@@ -20,13 +20,15 @@ See @architecture.spec.md for the full crate structure and design philosophy.
 ## Commands
 
 ```bash
-cargo check                        # fast compile check (no output)
-cargo build                        # build all crates
-cargo clippy -- -D warnings        # lint — warnings are errors
-cargo test                         # run all tests
-cargo test -p <crate>              # test a single crate
-cargo test <name>                  # run tests matching a name pattern
-cargo test -p <crate> <name>       # both
+cargo check                              # fast compile check (no output)
+cargo build                              # build all crates
+cargo clippy -- -D warnings             # lint — warnings are errors
+cargo test                               # run all tests
+cargo test -p <crate>                    # test a single crate
+cargo test <name>                        # run tests matching a name pattern
+cargo test -p <crate> <name>             # both
+cargo llvm-cov --summary-only           # coverage summary (install: cargo install cargo-llvm-cov)
+cargo llvm-cov --html                   # coverage report in target/llvm-cov/html/index.html
 ```
 
 The verification loop before any change is considered done: `cargo clippy -- -D warnings && cargo test`.
