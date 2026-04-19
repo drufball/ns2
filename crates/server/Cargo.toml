@@ -1,0 +1,25 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types = { path = "../types" }
+db = { path = "../db" }
+harness = { path = "../harness" }
+anthropic = { path = "../anthropic" }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace"] }
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+bytes = "1"
+
+[dev-dependencies]
+bytes = "1"

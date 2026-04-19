@@ -1,0 +1,17 @@
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types = { path = "../types" }
+db = { path = "../db" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+mockall = "0.12"
