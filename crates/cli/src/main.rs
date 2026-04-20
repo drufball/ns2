@@ -72,9 +72,8 @@ enum SessionAction {
     },
 }
 
-fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let repo_name = std::process::Command::new("git")
+fn git_root() -> Option<PathBuf> {
+    std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()
@@ -85,11 +84,32 @@ fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
                 None
             }
         })
-        .and_then(|p| {
-            PathBuf::from(p.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-        })
+        .map(|p| PathBuf::from(p.trim()))
+}
+
+fn load_dotenv() {
+    let Some(root) = git_root() else { return };
+    let Ok(contents) = std::fs::read_to_string(root.join(".env")) else { return };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim();
+            let val = val.trim().trim_matches('"').trim_matches('\'');
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, val);
+            }
+        }
+    }
+}
+
+fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let repo_name = git_root()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "default".to_string());
 
     let data_dir = PathBuf::from(&home).join(".ns2").join(&repo_name);
@@ -157,6 +177,7 @@ async fn resolve_session_id(server: &str, id: Option<String>, name: Option<Strin
 
 #[tokio::main]
 async fn main() {
+    load_dotenv();
     let cli = Cli::parse();
 
     match cli.command {

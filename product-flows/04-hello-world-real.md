@@ -4,20 +4,17 @@ Full session lifecycle using the real Anthropic API. Requires a valid `ANTHROPIC
 
 ## Setup
 
-Source the setup script so `ANTHROPIC_API_KEY` is loaded from `.env`:
-
 ```bash
 source product-flows/setup.sh
 cd /tmp/ns2-test-repo
 ```
 
-Confirm the key is set:
-```bash
-echo "${ANTHROPIC_API_KEY:+set (length ${#ANTHROPIC_API_KEY})}"
+Place a `.env` file in the repo root (next to `Cargo.toml`) with your key:
 ```
-Expected: `set (length 108)` — or whatever length your key is. Must not print `not set`.
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
-Start the server:
+The binary loads `.env` automatically on start. Then:
 ```bash
 $NS2 server start &
 ```
