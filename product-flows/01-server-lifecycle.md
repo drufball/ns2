@@ -78,3 +78,9 @@ ls ~/.ns2/ns2-test-repo/server-9876.pid 2>/dev/null || echo "PID file removed (e
 - [ ] `ns2 server stop` terminates the server process
 - [ ] After stop, port 9876 refuses connections
 - [ ] After stop, the PID file is removed
+
+## Cleanup
+
+```bash
+bash product-flows/cleanup.sh
+```

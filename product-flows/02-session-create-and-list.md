@@ -74,3 +74,9 @@ Expected: `No sessions found.` — no sessions are running.
 - [ ] `ns2 session list --status created` returns only created sessions
 - [ ] `ns2 session list --status running` returns `No sessions found.` when none are running
 - [ ] IDs in list output match the UUIDs from `session new` output
+
+## Cleanup
+
+```bash
+bash product-flows/cleanup.sh
+```

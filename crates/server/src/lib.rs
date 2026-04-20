@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use db::{ContentBlockDb, SessionDb, SqliteDb, TurnDb};
+use db::SqliteDb;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc};
@@ -49,15 +49,15 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub pid_file: PathBuf,
-    pub api_key: Option<String>,
+    pub client: Arc<dyn anthropic::AnthropicClient>,
 }
 
 #[derive(Clone)]
 struct AppState {
-    db: Arc<SqliteDb>,
+    db: Arc<dyn db::Db>,
     sessions: Arc<tokio::sync::Mutex<HashMap<Uuid, tokio::sync::broadcast::Sender<SessionEvent>>>>,
     msg_senders: Arc<tokio::sync::Mutex<HashMap<Uuid, tokio::sync::mpsc::Sender<String>>>>,
-    api_key: Option<String>,
+    client: Arc<dyn anthropic::AnthropicClient>,
 }
 
 #[derive(Deserialize)]
@@ -140,11 +140,7 @@ async fn create_session(
             model: "claude-opus-4-5".into(),
             system: None,
         };
-        let client: Arc<dyn harness::AnthropicClient> = if let Some(key) = &state.api_key {
-            Arc::new(anthropic::Client::new(key.clone()))
-        } else {
-            Arc::new(harness::StubClient)
-        };
+        let client = Arc::clone(&state.client);
 
         tokio::spawn(async move {
             let _ = harness::run(config, client, db, event_tx, msg_rx).await;
@@ -293,10 +289,10 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let db = SqliteDb::connect(&db_url).await?;
     let state = AppState {
-        db: Arc::new(db),
+        db: Arc::new(db) as Arc<dyn db::Db>,
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        api_key: config.api_key,
+        client: config.client,
     };
 
     let app = build_router(state);
@@ -338,12 +334,13 @@ mod tests {
     use tower::ServiceExt; // for .oneshot()
 
     async fn test_app() -> Router {
-        let db = SqliteDb::connect("sqlite::memory:").await.unwrap();
+        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let client = Arc::new(harness::StubClient) as Arc<dyn anthropic::AnthropicClient>;
         let state = AppState {
-            db: Arc::new(db),
+            db,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            api_key: None,
+            client,
         };
         build_router(state)
     }
@@ -615,5 +612,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- GET /sessions/:id/events ---
+
+    #[tokio::test]
+    async fn test_session_events_returns_200() {
+        let app = test_app().await;
+
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({"name": "sse-test"})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_session_events_content_type_is_event_stream() {
+        let app = test_app().await;
+
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/event-stream"), "expected SSE content-type, got: {ct}");
+    }
+
+    // --- POST /sessions/:id/messages ---
+
+    #[tokio::test]
+    async fn test_send_message_to_nonrunning_session_returns_404() {
+        let app = test_app().await;
+
+        // Create a session without initial_message: no harness, no msg_sender entry
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({"name": "idle"})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "hello"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_send_message_to_nonexistent_session_returns_404() {
+        let app = test_app().await;
+        let fake_id = uuid::Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{fake_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "hello"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

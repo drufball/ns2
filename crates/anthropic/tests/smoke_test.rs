@@ -1,5 +1,4 @@
-use anthropic::Client;
-use harness::{AnthropicClient, MessageRequest};
+use anthropic::{AnthropicClient, Client, MessageRequest};
 use types::{ContentBlock, Role};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
