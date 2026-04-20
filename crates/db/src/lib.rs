@@ -132,14 +132,6 @@ fn role_from_str(s: &str) -> Result<Role> {
     }
 }
 
-fn block_type_str(block: &ContentBlock) -> &'static str {
-    match block {
-        ContentBlock::Text { .. } => "text",
-        ContentBlock::ToolUse { .. } => "tool_use",
-        ContentBlock::ToolResult { .. } => "tool_result",
-    }
-}
-
 fn timestamp(dt: &DateTime<Utc>) -> i64 {
     dt.timestamp()
 }
@@ -174,7 +166,7 @@ impl SessionDb for SqliteDb {
         let rows = match status {
             Some(s) => {
                 sqlx::query(
-                    "SELECT id, name, status, agent, created_at, updated_at FROM sessions WHERE status = ? ORDER BY created_at DESC",
+                    "SELECT id, name, status, agent, created_at, updated_at FROM sessions WHERE status = ? ORDER BY created_at DESC, id ASC",
                 )
                 .bind(s.to_string())
                 .fetch_all(&self.pool)
@@ -182,7 +174,7 @@ impl SessionDb for SqliteDb {
             }
             None => {
                 sqlx::query(
-                    "SELECT id, name, status, agent, created_at, updated_at FROM sessions ORDER BY created_at DESC",
+                    "SELECT id, name, status, agent, created_at, updated_at FROM sessions ORDER BY created_at DESC, id ASC",
                 )
                 .fetch_all(&self.pool)
                 .await?
@@ -226,7 +218,7 @@ impl TurnDb for SqliteDb {
 
     async fn list_turns(&self, session_id: Uuid) -> Result<Vec<Turn>> {
         let rows = sqlx::query(
-            "SELECT id, session_id, token_count, created_at FROM turns WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT id, session_id, token_count, created_at FROM turns WHERE session_id = ? ORDER BY created_at ASC, id ASC",
         )
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
@@ -248,13 +240,12 @@ impl ContentBlockDb for SqliteDb {
         let id = Uuid::new_v4();
         let now = Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO content_blocks (id, turn_id, block_index, role, block_type, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO content_blocks (id, turn_id, block_index, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(turn_id.to_string())
         .bind(block_index)
         .bind(role_to_str(role))
-        .bind(block_type_str(block))
         .bind(&content)
         .bind(now)
         .execute(&self.pool)
