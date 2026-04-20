@@ -218,7 +218,7 @@ impl TurnDb for SqliteDb {
 
     async fn list_turns(&self, session_id: Uuid) -> Result<Vec<Turn>> {
         let rows = sqlx::query(
-            "SELECT id, session_id, token_count, created_at FROM turns WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+            "SELECT id, session_id, token_count, created_at FROM turns WHERE session_id = ? ORDER BY rowid ASC",
         )
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
@@ -560,5 +560,38 @@ mod tests {
             .update_session_status(Uuid::new_v4(), types::SessionStatus::Completed)
             .await;
         assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_turns_insertion_order_within_same_second(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session = insert_session(&db).await;
+
+        // Fixed timestamp so all three turns share the exact same created_at second.
+        let same_ts = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+
+        // UUIDs chosen so that lexicographic (id ASC) order is the REVERSE of insertion order.
+        // Insertion order: ff... → 88... → 00...
+        // Old ORDER BY id ASC would return: 00... → 88... → ff... (wrong)
+        // Correct ORDER BY rowid ASC returns: ff... → 88... → 00... (insertion order)
+        let id_first = Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap();
+        let id_second = Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap();
+        let id_third = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
+
+        for id in [id_first, id_second, id_third] {
+            let turn = types::Turn {
+                id,
+                session_id: session.id,
+                token_count: None,
+                created_at: same_ts,
+            };
+            db.create_turn(&turn).await.unwrap();
+        }
+
+        let turns = db.list_turns(session.id).await.unwrap();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].id, id_first,  "first inserted turn must be at index 0");
+        assert_eq!(turns[1].id, id_second, "second inserted turn must be at index 1");
+        assert_eq!(turns[2].id, id_third,  "third inserted turn must be at index 2");
     }
 }

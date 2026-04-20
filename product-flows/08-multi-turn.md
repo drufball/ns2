@@ -84,7 +84,9 @@ Expected: the same session still appears with status `completed`.
 ```
 [turn <uuid>]  ← first run user message
 [turn <uuid>]  ← first run assistant tool call
+[tool: read({"path":"/tmp/ns2-multi-turn-test.txt"})]
 [turn <uuid>]  ← first run tool result
+[result: The magic number is: 7742]
 [turn <uuid>]  ← first run assistant response
 The magic number is 7742.
 [done]
@@ -94,7 +96,7 @@ The magic number was 7742. Doubled, that is 15484.
 [done]
 ```
 
-The exact phrasing varies. The key checks are that a second set of turn events appears and the answer references prior context without a new tool call.
+The exact phrasing varies. The key checks are that a second set of turn events appears, `[tool: read(...)]` and `[result: ...]` lines appear for the first-run tool call, and the second answer references prior context without a new tool call.
 
 ## Acceptance Criteria
 
@@ -104,6 +106,7 @@ The exact phrasing varies. The key checks are that a second set of turn events a
 - [ ] Claude's second response references `7742` (from context, not a new tool call)
 - [ ] The session returns to `completed` after the second run
 - [ ] `session tail` after the second run shows two sets of turn events (two `[done]` markers or equivalent)
+- [ ] `ns2 session tail` output includes `[tool: read(...)]` and `[result: ...]` lines for the first-run tool call
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup

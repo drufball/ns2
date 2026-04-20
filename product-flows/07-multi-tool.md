@@ -44,9 +44,13 @@ The tail output should include lines similar to:
 
 ```
 [turn <uuid>]
+[tool: write({"path":"/tmp/ns2-multi-tool-test.txt","content":"ns2-multi-tool-test-99"})]
 [turn <uuid>]
+[result: wrote /tmp/ns2-multi-tool-test.txt]
 [turn <uuid>]
+[tool: read({"path":"/tmp/ns2-multi-tool-test.txt"})]
 [turn <uuid>]
+[result: ns2-multi-tool-test-99]
 [turn <uuid>]
 The file /tmp/ns2-multi-tool-test.txt contains: "ns2-multi-tool-test-99"
 [done]
@@ -77,7 +81,7 @@ Re-tailing replays stored events. The output should show multiple turns: the use
 - [ ] Claude invokes the `read` tool with `{"path": "/tmp/ns2-multi-tool-test.txt"}`
 - [ ] The file contents (`ns2-multi-tool-test-99`) appear in Claude's final response
 - [ ] The session transitions to `completed`
-- [ ] `ns2 session tail` shows both `write` and `read` ToolUse and ToolResult turns in the event stream
+- [ ] `ns2 session tail` output includes `[tool: write(...)]`, `[result: ...]`, `[tool: read(...)]`, and `[result: ...]` lines for both tool calls
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup

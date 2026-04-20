@@ -49,7 +49,9 @@ The tail output should include lines similar to:
 
 ```
 [turn <uuid>]
+[tool: read({"path":"/tmp/ns2-read-tool-test.txt"})]
 [turn <uuid>]
+[result: The secret value is: ns2-read-tool-test-42]
 [turn <uuid>]
 The file at /tmp/ns2-read-tool-test.txt says: "The secret value is: ns2-read-tool-test-42"
 [done]
@@ -79,7 +81,7 @@ Re-tailing replays stored events. The output should show multiple turns: the use
 - [ ] Claude invokes the `read` tool with `{"path": "/tmp/ns2-read-tool-test.txt"}`
 - [ ] The file contents (`ns2-read-tool-test-42`) appear in Claude's final response
 - [ ] The session transitions to `completed`
-- [ ] `ns2 session tail` shows ToolUse and ToolResult turns in the event stream
+- [ ] `ns2 session tail` output includes `[tool: read({"path": ...})]` and `[result: ...]` lines for the tool call
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup
