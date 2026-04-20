@@ -9,6 +9,9 @@ else
 fi
 TEST_REPO="/tmp/ns2-test-repo"
 
+# 0. Clean up any existing state
+bash "$(dirname "$0")/cleanup.sh"
+
 # 1. Load .env (sets ANTHROPIC_API_KEY)
 if [[ -f "$WORKTREE_DIR/.env" ]]; then
     set -a
@@ -34,15 +37,15 @@ else
     echo "Test repo created."
 fi
 
-# 3. Build binary (cargo skips unchanged crates, so this is fast on re-runs)
+# 3. Build binary
 echo "Building ns2 binary..."
 if ! cargo build --manifest-path "$WORKTREE_DIR/Cargo.toml" 2>&1; then
     echo "ERROR: build failed — fix errors above before continuing"
     return 1
 fi
 
-# 4. Export NS2
-export NS2="$BINARY"
+# 4. Export NS2 (fixes missing $BINARY from original)
+export NS2="$WORKTREE_DIR/target/debug/ns2"
 
 echo ""
 echo "============================================================"
@@ -57,7 +60,4 @@ echo "detection resolves to 'ns2-test-repo':"
 echo ""
 echo "  cd $TEST_REPO"
 echo "  \$NS2 session list"
-echo ""
-echo "To use \$NS2 in your current shell, source this script:"
-echo "  source product-flows/setup.sh"
 echo "============================================================"

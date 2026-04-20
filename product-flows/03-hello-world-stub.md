@@ -63,3 +63,9 @@ Expected: the session ID appears in the list with status `completed`.
 - [ ] The session transitions to `completed` after the stub response
 - [ ] `ns2 session list --status completed` shows the session
 - [ ] No panics, stack traces, or unhandled errors in server output
+
+## Cleanup
+
+```bash
+bash product-flows/cleanup.sh
+```

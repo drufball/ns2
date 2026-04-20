@@ -83,3 +83,9 @@ Expected: `Exit code: 1` (or any non-zero value).
 - [ ] Error messages suggest the fix (`ns2 server start`)
 - [ ] No Rust panics, backtraces, or `unwrap` failure output is visible
 - [ ] No JSON error blobs or HTTP response bodies are printed raw to the user
+
+## Cleanup
+
+```bash
+bash product-flows/cleanup.sh
+```

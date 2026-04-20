@@ -75,3 +75,9 @@ Re-tailing a completed session replays the stored content. Confirm the response 
 - [ ] The session transitions to `completed` after the response is fully streamed
 - [ ] `ns2 session list --status completed` shows the session
 - [ ] No panics, stack traces, or unhandled errors in server output
+
+## Cleanup
+
+```bash
+bash product-flows/cleanup.sh
+```
