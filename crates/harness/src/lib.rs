@@ -1,3 +1,4 @@
+use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::sync::Arc;
@@ -10,38 +11,16 @@ pub enum Error {
     #[error("db error: {0}")]
     Db(#[from] db::Error),
     #[error("anthropic error: {0}")]
-    Anthropic(String),
+    Anthropic(#[from] anthropic::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-// Message request/response types live here since they're the trait contract
-#[derive(Debug, Clone)]
-pub struct MessageRequest {
-    pub model: String,
-    pub system: Option<String>,
-    pub messages: Vec<(types::Role, Vec<ContentBlock>)>,
-    pub max_tokens: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct MessageResponse {
-    pub content: Vec<ContentBlock>,
-    pub stop_reason: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
-#[async_trait]
-pub trait AnthropicClient: Send + Sync {
-    async fn complete(&self, request: MessageRequest) -> Result<MessageResponse>;
-}
 
 pub struct StubClient;
 
 #[async_trait]
 impl AnthropicClient for StubClient {
-    async fn complete(&self, _request: MessageRequest) -> Result<MessageResponse> {
+    async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
         Ok(MessageResponse {
             content: vec![ContentBlock::Text {
                 text: "Hello! I'm a stub assistant.".into(),
@@ -59,10 +38,10 @@ pub struct HarnessConfig {
     pub system: Option<String>,
 }
 
-pub async fn run<D: db::Db + 'static>(
+pub async fn run(
     config: HarnessConfig,
     client: Arc<dyn AnthropicClient>,
-    db: Arc<D>,
+    db: Arc<dyn db::Db>,
     event_tx: broadcast::Sender<SessionEvent>,
     mut msg_rx: mpsc::Receiver<String>,
 ) -> Result<()> {
@@ -432,7 +411,7 @@ mod tests {
 
     #[async_trait]
     impl AnthropicClient for MultiBlockClient {
-        async fn complete(&self, _request: MessageRequest) -> Result<MessageResponse> {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
             Ok(MessageResponse {
                 content: vec![
                     types::ContentBlock::Text { text: "block one".into() },

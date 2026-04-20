@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-use harness::{AnthropicClient, MessageRequest, MessageResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use types::{ContentBlock, Role};
@@ -12,6 +10,29 @@ pub enum Error {
     Parse(String),
     #[error("api error: {status} {message}")]
     Api { status: u16, message: String },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone)]
+pub struct MessageRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<(types::Role, Vec<types::ContentBlock>)>,
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageResponse {
+    pub content: Vec<types::ContentBlock>,
+    pub stop_reason: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+#[async_trait::async_trait]
+pub trait AnthropicClient: Send + Sync {
+    async fn complete(&self, request: MessageRequest) -> Result<MessageResponse>;
 }
 
 pub struct Client {
@@ -180,9 +201,9 @@ impl BlockAssembler {
 
 // --- AnthropicClient impl ---
 
-#[async_trait]
+#[async_trait::async_trait]
 impl AnthropicClient for Client {
-    async fn complete(&self, request: MessageRequest) -> harness::Result<MessageResponse> {
+    async fn complete(&self, request: MessageRequest) -> Result<MessageResponse> {
         let messages: Vec<ApiRequestMessage> = request
             .messages
             .into_iter()
@@ -224,12 +245,12 @@ impl AnthropicClient for Client {
             .json(&body)
             .send()
             .await
-            .map_err(|e| harness::Error::Anthropic(e.to_string()))?;
+            .map_err(Error::Http)?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            return Err(harness::Error::Anthropic(format!("{status}: {text}")));
+            return Err(Error::Api { status, message: text });
         }
 
         // Parse SSE stream
@@ -239,7 +260,7 @@ impl AnthropicClient for Client {
         let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| harness::Error::Anthropic(e.to_string()))?;
+            let chunk = chunk.map_err(Error::Http)?;
             if let Ok(s) = std::str::from_utf8(&chunk) {
                 buffer.push_str(s);
             }
@@ -249,7 +270,7 @@ impl AnthropicClient for Client {
                 for part in line.lines() {
                     if let Some(data) = part.strip_prefix("data: ") {
                         if data == "[DONE]" {
-                            break;
+                            return Ok(assembler.finish());
                         }
                         if let Ok(event) = serde_json::from_str::<ApiEvent>(data) {
                             assembler.process(event);
