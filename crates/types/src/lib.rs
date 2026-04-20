@@ -87,6 +87,14 @@ pub enum SessionEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockDelta {
     TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -331,6 +339,30 @@ mod tests {
         assert_eq!(v["text"], "chunk");
         let decoded: ContentBlockDelta = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(decoded, ContentBlockDelta::TextDelta { text } if text == "chunk"));
+    }
+
+    #[test]
+    fn content_block_delta_input_json_delta_serde_round_trip() {
+        let delta = ContentBlockDelta::InputJsonDelta { partial_json: "{\"k\":".into() };
+        let json = serde_json::to_string(&delta).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(v["type"], "input_json_delta");
+        assert_eq!(v["partial_json"], "{\"k\":");
+        let decoded: ContentBlockDelta = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(decoded, ContentBlockDelta::InputJsonDelta { partial_json } if partial_json == "{\"k\":"));
+    }
+
+    #[test]
+    fn tool_definition_serde_round_trip() {
+        let def = ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        };
+        let json = serde_json::to_string(&def).expect("serialize");
+        let decoded: ToolDefinition = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.name, "read");
+        assert_eq!(decoded.description, "Read a file");
     }
 
     // --- Role serde ---

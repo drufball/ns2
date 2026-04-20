@@ -18,5 +18,6 @@ types = { path = "../types" }
 server = { path = "../server" }
 anthropic = { path = "../anthropic" }
 harness = { path = "../harness" }
+tools = { path = "../tools" }
 futures = "0.3"
 uuid = { workspace = true }

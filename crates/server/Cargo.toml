@@ -8,6 +8,7 @@ types = { path = "../types" }
 db = { path = "../db" }
 harness = { path = "../harness" }
 anthropic = { path = "../anthropic" }
+tools = { path = "../tools" }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -15,6 +16,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+async-trait = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace"] }
 futures = "0.3"

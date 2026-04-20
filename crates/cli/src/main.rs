@@ -138,6 +138,10 @@ fn print_session_event(event: &types::SessionEvent) {
             use std::io::Write;
             std::io::stdout().flush().ok();
         }
+        ContentBlockDelta {
+            delta: types::ContentBlockDelta::InputJsonDelta { .. },
+            ..
+        } => {}
         ContentBlockDone { .. } => println!(),
         TurnDone { .. } => {}
         SessionDone { .. } => println!("[done]"),
@@ -196,6 +200,14 @@ async fn main() {
                         };
                         c
                     },
+                    tools: vec![
+                        Arc::new(tools::ReadTool),
+                        Arc::new(tools::BashTool),
+                        Arc::new(tools::WriteTool),
+                        Arc::new(tools::EditTool),
+                    ],
+                    model: std::env::var("ANTHROPIC_MODEL")
+                        .unwrap_or_else(|_| "claude-opus-4-5".to_string()),
                 };
                 if let Err(e) = server::run(config).await {
                     eprintln!("Server error: {e}");

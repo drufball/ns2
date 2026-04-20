@@ -20,6 +20,7 @@ pub struct MessageRequest {
     pub system: Option<String>,
     pub messages: Vec<(types::Role, Vec<types::ContentBlock>)>,
     pub max_tokens: u32,
+    pub tools: Vec<types::ToolDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,11 +66,9 @@ impl Client {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiEvent {
     MessageStart { message: ApiMessage },
-    #[allow(dead_code)]
     ContentBlockStart { index: u32, content_block: ApiContentBlock },
     Ping,
     ContentBlockDelta { index: u32, delta: ApiDelta },
-    #[allow(dead_code)]
     ContentBlockStop { index: u32 },
     MessageDelta { delta: ApiMessageDelta, usage: ApiUsage },
     MessageStop,
@@ -91,16 +90,18 @@ struct ApiUsage {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)]
 enum ApiContentBlock {
-    Text { text: String },
+    Text {
+        #[allow(dead_code)]
+        text: String,
+    },
+    ToolUse { id: String, name: String },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiDelta {
     TextDelta { text: String },
-    #[allow(dead_code)]
     InputJsonDelta { partial_json: String },
 }
 
@@ -126,6 +127,25 @@ struct ApiRequest {
     system: Option<String>,
     messages: Vec<ApiRequestMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ApiToolDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiToolDefinition {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+impl From<types::ToolDefinition> for ApiToolDefinition {
+    fn from(t: types::ToolDefinition) -> Self {
+        Self {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -138,12 +158,22 @@ struct ApiRequestMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiContent {
     Text { text: String },
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolResult { tool_use_id: String, content: String },
 }
 
 // --- Block assembler ---
 
+struct ToolUseAccumulator {
+    id: String,
+    name: String,
+    partial_json: String,
+}
+
 struct BlockAssembler {
     texts: HashMap<u32, String>,
+    tool_uses: HashMap<u32, ToolUseAccumulator>,
+    finished_tool_uses: Vec<(u32, ContentBlock)>,
     input_tokens: u32,
     output_tokens: u32,
     stop_reason: String,
@@ -153,24 +183,50 @@ impl BlockAssembler {
     fn new() -> Self {
         Self {
             texts: Default::default(),
+            tool_uses: Default::default(),
+            finished_tool_uses: Default::default(),
             input_tokens: 0,
             output_tokens: 0,
             stop_reason: "end_turn".into(),
         }
     }
 
-    fn process(&mut self, event: ApiEvent) {
+    fn process(&mut self, event: ApiEvent) -> Result<()> {
         match event {
             ApiEvent::MessageStart { message } => {
                 self.input_tokens = message.usage.input_tokens;
             }
+            ApiEvent::ContentBlockStart {
+                index,
+                content_block: ApiContentBlock::ToolUse { id, name },
+            } => {
+                self.tool_uses.insert(index, ToolUseAccumulator { id, name, partial_json: String::new() });
+            }
+            ApiEvent::ContentBlockStart { .. } => {}
             ApiEvent::ContentBlockDelta {
                 index,
                 delta: ApiDelta::TextDelta { text },
             } => {
                 self.texts.entry(index).or_default().push_str(&text);
             }
-            ApiEvent::ContentBlockDelta { .. } => {}
+            ApiEvent::ContentBlockDelta {
+                index,
+                delta: ApiDelta::InputJsonDelta { partial_json },
+            } => {
+                if let Some(acc) = self.tool_uses.get_mut(&index) {
+                    acc.partial_json.push_str(&partial_json);
+                }
+            }
+            ApiEvent::ContentBlockStop { index } => {
+                if let Some(acc) = self.tool_uses.remove(&index) {
+                    let input = serde_json::from_str(&acc.partial_json)
+                        .map_err(|e| Error::Parse(format!("invalid tool input JSON: {e}")))?;
+                    self.finished_tool_uses.push((
+                        index,
+                        ContentBlock::ToolUse { id: acc.id, name: acc.name, input },
+                    ));
+                }
+            }
             ApiEvent::MessageDelta { delta, usage } => {
                 if let Some(reason) = delta.stop_reason {
                     self.stop_reason = reason;
@@ -181,6 +237,7 @@ impl BlockAssembler {
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn finish(self) -> MessageResponse {
@@ -189,6 +246,7 @@ impl BlockAssembler {
             .into_iter()
             .map(|(i, text)| (i, ContentBlock::Text { text }))
             .collect();
+        blocks.extend(self.finished_tool_uses);
         blocks.sort_by_key(|(i, _)| *i);
         MessageResponse {
             content: blocks.into_iter().map(|(_, b)| b).collect(),
@@ -210,11 +268,13 @@ impl AnthropicClient for Client {
             .map(|(role, blocks)| {
                 let content = blocks
                     .into_iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(ApiContent::Text { text })
-                        } else {
-                            None
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => ApiContent::Text { text },
+                        ContentBlock::ToolUse { id, name, input } => {
+                            ApiContent::ToolUse { id, name, input }
+                        }
+                        ContentBlock::ToolResult { tool_use_id, content } => {
+                            ApiContent::ToolResult { tool_use_id, content }
                         }
                     })
                     .collect();
@@ -228,12 +288,15 @@ impl AnthropicClient for Client {
             })
             .collect();
 
+        let tools: Vec<ApiToolDefinition> = request.tools.into_iter().map(Into::into).collect();
+
         let body = ApiRequest {
             model: request.model,
             max_tokens: request.max_tokens,
             system: request.system,
             messages,
             stream: true,
+            tools,
         };
 
         let resp = self
@@ -273,7 +336,7 @@ impl AnthropicClient for Client {
                             return Ok(assembler.finish());
                         }
                         if let Ok(event) = serde_json::from_str::<ApiEvent>(data) {
-                            assembler.process(event);
+                            assembler.process(event)?;
                         }
                     }
                 }
