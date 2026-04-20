@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 use types::Session;
 use uuid::Uuid;
 
@@ -162,12 +163,18 @@ async fn main() {
         Command::Server { action } => match action {
             ServerAction::Start { port } => {
                 let (data_dir, pid_file) = data_dir_and_pid(port);
-                let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
                 let config = server::ServerConfig {
                     port,
                     data_dir,
                     pid_file,
-                    api_key,
+                    client: {
+                        let key = std::env::var("ANTHROPIC_API_KEY").ok();
+                        let c: Arc<dyn anthropic::AnthropicClient> = match key {
+                            Some(k) => Arc::new(anthropic::Client::new(k)),
+                            None => Arc::new(harness::StubClient),
+                        };
+                        c
+                    },
                 };
                 if let Err(e) = server::run(config).await {
                     eprintln!("Server error: {e}");
