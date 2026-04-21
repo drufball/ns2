@@ -126,22 +126,55 @@ fn handle_connection_error(err: &reqwest::Error) -> ! {
     std::process::exit(1);
 }
 
-fn print_session_event(event: &types::SessionEvent) {
+pub fn format_session_event(event: &types::SessionEvent) -> Option<String> {
     use types::SessionEvent::*;
     match event {
-        TurnStarted { turn } => println!("[turn {}]", turn.id),
+        TurnStarted { turn } => Some(format!("[turn {}]\n", turn.id)),
         ContentBlockDelta {
             delta: types::ContentBlockDelta::TextDelta { text },
             ..
+        } => Some(text.clone()),
+        ContentBlockDelta {
+            delta: types::ContentBlockDelta::InputJsonDelta { .. },
+            ..
+        } => None,
+        ContentBlockDone { block, .. } => match block {
+            types::ContentBlock::Text { .. } => Some("\n".to_string()),
+            types::ContentBlock::ToolUse { name, input, .. } => {
+                Some(format!("[tool: {}({})]\n", name, input))
+            }
+            types::ContentBlock::ToolResult { content, .. } => {
+                Some(format!("[result: {}]\n", content))
+            }
+        },
+        TurnDone { .. } => None,
+        SessionDone { .. } => Some("[done]\n".to_string()),
+        Error { message } => Some(format!("[error] {message}\n")),
+    }
+}
+
+fn print_session_event(event: &types::SessionEvent) {
+    use types::SessionEvent::*;
+    match event {
+        // Text deltas stream without a newline; flush so the terminal shows them immediately.
+        ContentBlockDelta {
+            delta: types::ContentBlockDelta::TextDelta { .. },
+            ..
         } => {
-            print!("{text}");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
+            if let Some(text) = format_session_event(event) {
+                print!("{text}");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
         }
-        ContentBlockDone { .. } => println!(),
-        TurnDone { .. } => {}
-        SessionDone { .. } => println!("[done]"),
+        // Errors go to stderr.
         Error { message } => eprintln!("[error] {message}"),
+        // Everything else: print the formatted string (which already includes a newline).
+        _ => {
+            if let Some(output) = format_session_event(event) {
+                print!("{output}");
+            }
+        }
     }
 }
 
@@ -196,6 +229,14 @@ async fn main() {
                         };
                         c
                     },
+                    tools: vec![
+                        Arc::new(tools::ReadTool),
+                        Arc::new(tools::BashTool),
+                        Arc::new(tools::WriteTool),
+                        Arc::new(tools::EditTool),
+                    ],
+                    model: std::env::var("ANTHROPIC_MODEL")
+                        .unwrap_or_else(|_| "claude-opus-4-5".to_string()),
                 };
                 if let Err(e) = server::run(config).await {
                     eprintln!("Server error: {e}");
@@ -322,7 +363,8 @@ async fn main() {
                                 serde_json::from_str::<types::SessionEvent>(data)
                             {
                                 print_session_event(&event);
-                                if matches!(event, types::SessionEvent::SessionDone { .. }) {
+                                // Exit on both SessionDone (success) and Error (failure) — never hang on a failed session.
+                                if matches!(event, types::SessionEvent::SessionDone { .. } | types::SessionEvent::Error { .. }) {
                                     return;
                                 }
                             }
@@ -350,5 +392,70 @@ async fn main() {
                 println!("Stop not yet implemented for session {session_id}");
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+    use types::*;
+
+    fn make_turn() -> Turn {
+        Turn {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            token_count: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_tool_use_renders_name_and_input() {
+        let turn = make_turn();
+        let event = SessionEvent::ContentBlockDone {
+            turn_id: turn.id,
+            index: 0,
+            block: ContentBlock::ToolUse {
+                id: "abc".into(),
+                name: "read".into(),
+                input: serde_json::json!({"path": "/tmp/foo.txt"}),
+            },
+        };
+        let out = format_session_event(&event).unwrap();
+        assert!(out.contains("read"), "should contain tool name");
+        assert!(out.contains("/tmp/foo.txt"), "should contain input");
+    }
+
+    #[test]
+    fn test_tool_result_renders_content() {
+        let turn = make_turn();
+        let event = SessionEvent::ContentBlockDone {
+            turn_id: turn.id,
+            index: 1,
+            block: ContentBlock::ToolResult {
+                tool_use_id: "abc".into(),
+                content: "file contents here".into(),
+            },
+        };
+        let out = format_session_event(&event).unwrap();
+        assert!(out.contains("file contents here"), "should contain result content");
+    }
+
+    #[test]
+    fn test_input_json_delta_is_silent() {
+        let event = SessionEvent::ContentBlockDelta {
+            turn_id: Uuid::new_v4(),
+            index: 0,
+            delta: ContentBlockDelta::InputJsonDelta { partial_json: "{\"path\":".into() },
+        };
+        assert!(format_session_event(&event).is_none());
+    }
+
+    #[test]
+    fn test_error_event_produces_output() {
+        let event = types::SessionEvent::Error { message: "something went wrong".into() };
+        let out = format_session_event(&event).unwrap();
+        assert!(out.contains("something went wrong"));
     }
 }

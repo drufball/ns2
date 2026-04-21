@@ -3,6 +3,7 @@ members = [
     "crates/types",
     "crates/db",
     "crates/anthropic",
+    "crates/tools",
     "crates/harness",
     "crates/server",
     "crates/tui",
@@ -18,3 +19,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 async-trait = "0.1"
+tracing = "0.1"

@@ -339,6 +339,7 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anthropic",
+ "chrono",
  "clap",
  "futures",
  "harness",
@@ -348,6 +349,7 @@ dependencies = [
  "server",
  "thiserror",
  "tokio",
+ "tools",
  "types",
  "uuid",
 ]
@@ -812,6 +814,8 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tools",
+ "tracing",
  "types",
  "uuid",
 ]
@@ -2014,6 +2018,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "anthropic",
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
@@ -2025,6 +2030,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tools",
  "tower 0.4.13",
  "tower-http 0.5.2",
  "types",
@@ -2551,6 +2557,19 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "types",
 ]
 
 [[package]]
