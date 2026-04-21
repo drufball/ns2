@@ -363,7 +363,8 @@ async fn main() {
                                 serde_json::from_str::<types::SessionEvent>(data)
                             {
                                 print_session_event(&event);
-                                if matches!(event, types::SessionEvent::SessionDone { .. }) {
+                                // Exit on both SessionDone (success) and Error (failure) — never hang on a failed session.
+                                if matches!(event, types::SessionEvent::SessionDone { .. } | types::SessionEvent::Error { .. }) {
                                     return;
                                 }
                             }
@@ -449,5 +450,12 @@ mod tests {
             delta: ContentBlockDelta::InputJsonDelta { partial_json: "{\"path\":".into() },
         };
         assert!(format_session_event(&event).is_none());
+    }
+
+    #[test]
+    fn test_error_event_produces_output() {
+        let event = types::SessionEvent::Error { message: "something went wrong".into() };
+        let out = format_session_event(&event).unwrap();
+        assert!(out.contains("something went wrong"));
     }
 }
