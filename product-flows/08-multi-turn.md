@@ -2,26 +2,16 @@
 
 A user sends a follow-up message to a completed session and Claude responds with full prior context.
 
-## Setup
+## Prerequisites
+
+**[Requires: ANTHROPIC_API_KEY]** — loaded from `/tmp/ns2-host.env` mounted into the container.
+
+## Fixture Setup
 
 ```bash
-source product-flows/setup.sh
-cd /tmp/ns2-test-repo
-```
-
-Place a `.env` file in the repo root (next to `Cargo.toml`) with your key:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Create a test file for Claude to read:
-```bash
-echo "The magic number is: 7742" > /tmp/ns2-multi-turn-test.txt
-```
-
-Start the server:
-```bash
-$NS2 server start &
+docker exec ns2-flow-08 bash /fixtures/init.sh
+docker exec ns2-flow-08 bash /fixtures/start-server.sh
+docker exec ns2-flow-08 bash /fixtures/create-multi-turn-file.sh
 ```
 
 ## Steps
@@ -29,16 +19,15 @@ $NS2 server start &
 ### Step 1: Start a session asking Claude to read a file
 
 ```bash
-SESSION_ID=$($NS2 session new --message "Please read the file at /tmp/ns2-multi-turn-test.txt and tell me what the magic number is.")
-echo "Session: $SESSION_ID"
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session new --message "Please read the file at /repo/multi-turn-test.txt and tell me what the magic number is." | tee /tmp/session_id.txt && echo "Session created: $(cat /tmp/session_id.txt)"'
 ```
 
-Expected: a UUID printed and stored in `SESSION_ID`.
+Expected: a UUID printed alongside `Session created:`.
 
 ### Step 2: Tail the session and wait for completion
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 The output should show multiple turns (user message, tool call, tool result, final response) ending with `[done]`. Claude's response must include `7742`.
@@ -46,7 +35,7 @@ The output should show multiple turns (user message, tool call, tool result, fin
 ### Step 3: Verify the session is completed
 
 ```bash
-$NS2 session list --status completed
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session list --status completed'
 ```
 
 Expected: the session appears with status `completed`.
@@ -54,15 +43,15 @@ Expected: the session appears with status `completed`.
 ### Step 4: Send a follow-up message referencing the first answer
 
 ```bash
-$NS2 session send --id "$SESSION_ID" --message "What was the magic number you found? Double it and tell me the result."
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session send --id "$(cat /tmp/session_id.txt)" --message "What was the magic number you found? Double it and tell me the result."'
 ```
 
-Expected: 200 OK (no error).
+Expected: command exits 0 with no error.
 
 ### Step 5: Tail the session again to see the second agent run
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 The tail output should first replay the first run's events (user message, tool call, tool result, first assistant response), then show a second set of `[turn ...]` events for the follow-up, and end with `[done]` again.
@@ -71,20 +60,11 @@ Claude's response to the follow-up must:
 - Reference `7742` from the prior context (it should know the magic number without re-reading the file)
 - State the doubled value: `15484`
 
-### Step 6: Verify the session is completed again
-
-```bash
-$NS2 session list --status completed
-```
-
-Expected: the same session still appears with status `completed`.
-
-## Expected tail output (second run)
-
+Expected output shape:
 ```
 [turn <uuid>]  ← first run user message
 [turn <uuid>]  ← first run assistant tool call
-[tool: read({"path":"/tmp/ns2-multi-turn-test.txt"})]
+[tool: read({"path":"/repo/multi-turn-test.txt"})]
 [turn <uuid>]  ← first run tool result
 [result: The magic number is: 7742]
 [turn <uuid>]  ← first run assistant response
@@ -96,7 +76,15 @@ The magic number was 7742. Doubled, that is 15484.
 [done]
 ```
 
-The exact phrasing varies. The key checks are that a second set of turn events appears, `[tool: read(...)]` and `[result: ...]` lines appear for the first-run tool call, and the second answer references prior context without a new tool call.
+The exact phrasing varies. The key checks are that a second set of turn events appears after the first `[done]`, the second response contains `15484`, and no new `[tool: read(...)]` call appears in the second run.
+
+### Step 6: Verify the session is completed again
+
+```bash
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session list --status completed'
+```
+
+Expected: the same session still appears with status `completed`.
 
 ## Acceptance Criteria
 
@@ -104,14 +92,12 @@ The exact phrasing varies. The key checks are that a second set of turn events a
 - [ ] `session send` on a `completed` session returns 200, not 4xx
 - [ ] The second run processes the follow-up message with full conversation history
 - [ ] Claude's second response references `7742` (from context, not a new tool call)
+- [ ] Claude's second response contains `15484` (7742 doubled)
 - [ ] The session returns to `completed` after the second run
-- [ ] `session tail` after the second run shows two sets of turn events (two `[done]` markers or equivalent)
-- [ ] `ns2 session tail` output includes `[tool: read(...)]` and `[result: ...]` lines for the first-run tool call
+- [ ] `session tail` after the second run shows two sets of turn events (two `[done]` markers)
+- [ ] `ns2 session tail` output includes `[tool: read(...)]` and `[result: ...]` lines for the first-run tool call only — the second run must not re-read the file
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup
 
-```bash
-rm -f /tmp/ns2-multi-turn-test.txt
-bash product-flows/cleanup.sh
-```
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

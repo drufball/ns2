@@ -1,22 +1,16 @@
 # Flow 04: Hello World (Real Claude API)
 
-Full session lifecycle using the real Anthropic API. Requires a valid `ANTHROPIC_API_KEY`.
+Full session lifecycle using the real Anthropic API.
 
-## Setup
+## Prerequisites
+
+**[Requires: ANTHROPIC_API_KEY]** — loaded from `/tmp/ns2-host.env` mounted into the container.
+
+## Fixture Setup
 
 ```bash
-source product-flows/setup.sh
-cd /tmp/ns2-test-repo
-```
-
-Place a `.env` file in the repo root (next to `Cargo.toml`) with your key:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-The binary loads `.env` automatically on start. Then:
-```bash
-$NS2 server start &
+docker exec ns2-flow-04 bash /fixtures/init.sh
+docker exec ns2-flow-04 bash /fixtures/start-server.sh
 ```
 
 ## Steps
@@ -24,22 +18,20 @@ $NS2 server start &
 ### Create a session with a message
 
 ```bash
-SESSION_ID=$($NS2 session new --message "hello")
-echo "Session: $SESSION_ID"
+docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session new --message "hello" | tee /tmp/session_id.txt && echo "Session created: $(cat /tmp/session_id.txt)"'
 ```
 
-Expected: a UUID printed and stored in `SESSION_ID`.
+Expected: a UUID printed alongside `Session created:`.
 
 ### Tail the session
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 The command streams events as Claude responds. Response time depends on API latency — typically 2–10 seconds for a short reply.
 
-### Expected output
-
+Expected output shape:
 ```
 [assistant] Hello! How can I help you today?
 Session completed.
@@ -50,31 +42,30 @@ The exact wording comes from Claude and will vary. It must be a coherent English
 ### Verify session status
 
 ```bash
-$NS2 session list --status completed
+docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session list --status completed'
 ```
 
-Expected: the session ID appears with status `completed`.
+Expected: the session appears with status `completed`.
 
-### Optional: confirm it was not the stub
+### Re-tail to confirm stored content replays correctly
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 Re-tailing a completed session replays the stored content. Confirm the response reads like a real Claude reply, not the hardcoded stub.
 
 ## Acceptance Criteria
 
-- [ ] `ns2 server start` picks up `ANTHROPIC_API_KEY` from the environment
-- [ ] `ns2 session new --message "hello"` creates a session and it transitions to `running`
+- [ ] `ns2 server start` picks up `ANTHROPIC_API_KEY` from the `.env` file
+- [ ] `ns2 session new --message "hello"` creates a session that transitions to `running`
 - [ ] `ns2 session tail` streams real text from the Anthropic API
-- [ ] The response is coherent natural language (not the stub string)
+- [ ] The response is coherent natural language (not the stub string "I'm a stub assistant.")
 - [ ] The session transitions to `completed` after the response is fully streamed
 - [ ] `ns2 session list --status completed` shows the session
+- [ ] Re-tailing a completed session replays the stored content identically
 - [ ] No panics, stack traces, or unhandled errors in server output
 
 ## Cleanup
 
-```bash
-bash product-flows/cleanup.sh
-```
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

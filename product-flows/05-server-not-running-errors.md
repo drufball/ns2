@@ -2,29 +2,32 @@
 
 Verify that CLI commands produce clear, actionable error messages when the server is not running.
 
-## Setup
+## Prerequisites
 
-Ensure the server is **not** running. Stop it if needed:
+No API key required. The server must NOT be started — this flow tests behavior with no running server.
+
+## Fixture Setup
 
 ```bash
-source product-flows/setup.sh
-cd /tmp/ns2-test-repo
-$NS2 server stop 2>/dev/null || true
+docker exec ns2-flow-05 bash /fixtures/init.sh
 ```
 
-Confirm the server is down:
+The server is intentionally not started.
+
+## Steps
+
+### Confirm the server is not reachable
+
 ```bash
-curl -s http://127.0.0.1:9876/health 2>&1 || echo "Server not reachable (expected)"
+docker exec ns2-flow-05 bash -c 'curl -s http://127.0.0.1:9876/health 2>&1 || echo "Server not reachable (expected)"'
 ```
 
 Expected: connection refused error or `Server not reachable (expected)`.
 
-## Steps
-
 ### Try `session list` with server down
 
 ```bash
-$NS2 session list
+docker exec ns2-flow-05 bash -c 'cd /repo && ns2 session list'
 ```
 
 Expected output (exit code non-zero):
@@ -35,7 +38,7 @@ Error: server is not running. Start it with: ns2 server start
 ### Try `session new` with server down
 
 ```bash
-$NS2 session new --message "hello"
+docker exec ns2-flow-05 bash -c 'cd /repo && ns2 session new --message "hello"'
 ```
 
 Expected output (exit code non-zero):
@@ -46,7 +49,7 @@ Error: server is not running. Start it with: ns2 server start
 ### Try `session tail` with server down
 
 ```bash
-$NS2 session tail --id "00000000-0000-0000-0000-000000000000"
+docker exec ns2-flow-05 bash -c 'cd /repo && ns2 session tail --id "00000000-0000-0000-0000-000000000000"'
 ```
 
 Expected output (exit code non-zero):
@@ -57,7 +60,7 @@ Error: server is not running. Start it with: ns2 server start
 ### Try `session send` with server down
 
 ```bash
-$NS2 session send --id "00000000-0000-0000-0000-000000000000" --message "hi"
+docker exec ns2-flow-05 bash -c 'cd /repo && ns2 session send --id "00000000-0000-0000-0000-000000000000" --message "hi"'
 ```
 
 Expected output (exit code non-zero):
@@ -68,7 +71,7 @@ Error: server is not running. Start it with: ns2 server start
 ### Verify exit codes
 
 ```bash
-$NS2 session list; echo "Exit code: $?"
+docker exec ns2-flow-05 bash -c 'cd /repo && ns2 session list; echo "Exit code: $?"'
 ```
 
 Expected: `Exit code: 1` (or any non-zero value).
@@ -86,6 +89,4 @@ Expected: `Exit code: 1` (or any non-zero value).
 
 ## Cleanup
 
-```bash
-bash product-flows/cleanup.sh
-```
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.
