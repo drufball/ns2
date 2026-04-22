@@ -29,14 +29,22 @@ jobs:
 
       - name: Coverage
         run: |
-          IGNORE_FLAGS=$(python3 -c "
-          import tomllib, sys
+          IGNORE_FLAGS=$(python3 - <<'EOF'
+          import sys
+          try:
+              import tomllib
+          except ImportError:
+              try:
+                  import tomli as tomllib
+              except ImportError:
+                  sys.exit(0)
           with open('crates/arch-tests/coverage-ignores.toml', 'rb') as f:
               data = tomllib.load(f)
           flags = []
           for e in data.get('file_ignore', []):
               flags += ['--ignore-filename-regex', e['path']]
           print(' '.join(flags))
-          ")
+          EOF
+          )
           # shellcheck disable=SC2086
           cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
