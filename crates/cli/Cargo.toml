@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 types = { path = "../types" }
 workspace = { path = "../workspace" }
+agents = { path = "../agents" }
 server = { path = "../server" }
 anthropic = { path = "../anthropic" }
 harness = { path = "../harness" }

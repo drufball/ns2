@@ -149,7 +149,6 @@ fn spawn_harness_sync(
     let config = harness::HarnessConfig {
         session: session_clone.clone(),
         model,
-        system: None,
         tools,
     };
 

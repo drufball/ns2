@@ -2,3 +2,4 @@
 .claude/worktrees/
 .env
 mutants.out
+mutants.out.old

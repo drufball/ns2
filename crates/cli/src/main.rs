@@ -25,6 +25,31 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    List,
+    New {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
+    Edit {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -71,6 +96,8 @@ enum SessionAction {
         name: Option<String>,
     },
 }
+
+// ────────────────────────────────────────────────────────────────────────────
 
 fn load_dotenv() {
     let Some(root) = workspace::git_root() else { return };
@@ -221,7 +248,10 @@ async fn main() {
                         let key = std::env::var("ANTHROPIC_API_KEY").ok();
                         let c: Arc<dyn anthropic::AnthropicClient> = match key {
                             Some(k) => Arc::new(anthropic::Client::new(k)),
-                            None => Arc::new(harness::StubClient),
+                            None => {
+                                eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
+                                Arc::new(harness::StubClient)
+                            }
                         };
                         c
                     },
@@ -384,6 +414,93 @@ async fn main() {
                 let session_id = resolve_session_id(&cli.server, id, name).await;
                 // For MVP, just print "not implemented" — real cancellation is out of scope
                 println!("Stop not yet implemented for session {session_id}");
+            }
+        },
+        Command::Agent { action } => match action {
+            AgentAction::List => {
+                let dir = agents::agents_dir().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                if !dir.exists() {
+                    println!("No agents found (directory does not exist: {})", dir.display());
+                    return;
+                }
+                let agent_list = agents::list_agents(&dir);
+                if agent_list.is_empty() {
+                    println!("No agents found.");
+                } else {
+                    println!("{:<20}  description", "name");
+                    for a in &agent_list {
+                        println!("{:<20}  {}", a.name, a.description);
+                    }
+                }
+            }
+            AgentAction::New { name, description, body } => {
+                let name = name.unwrap_or_else(|| {
+                    eprintln!("Error: --name is required");
+                    std::process::exit(1);
+                });
+                let dir = agents::agents_dir().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    eprintln!("Error creating agents directory: {e}");
+                    std::process::exit(1);
+                }
+                let path = dir.join(format!("{name}.md"));
+                if path.exists() {
+                    eprintln!("Error: agent '{name}' already exists at {}", path.display());
+                    std::process::exit(1);
+                }
+                let open_editor = body.is_none();
+                let def = agents::AgentDef {
+                    name: name.clone(),
+                    description: description.unwrap_or_default(),
+                    body: body.unwrap_or_default(),
+                };
+                if let Err(e) = agents::write_agent(&dir, &def) {
+                    eprintln!("Error writing agent file: {e}");
+                    std::process::exit(1);
+                }
+                if open_editor {
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                    std::process::Command::new(&editor).arg(&path).status().ok();
+                }
+                eprintln!("Created agent '{name}' at {}", path.display());
+            }
+            AgentAction::Edit { name, description, body } => {
+                let name = name.unwrap_or_else(|| {
+                    eprintln!("Error: --name is required");
+                    std::process::exit(1);
+                });
+                if description.is_none() && body.is_none() {
+                    eprintln!("Error: must provide at least one of --description or --body");
+                    std::process::exit(1);
+                }
+                let dir = agents::agents_dir().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                let mut def = agents::load_agent(&dir, &name).unwrap_or_else(|| {
+                    eprintln!(
+                        "Error: agent '{name}' not found at {}",
+                        dir.join(format!("{name}.md")).display()
+                    );
+                    std::process::exit(1);
+                });
+                if let Some(d) = description {
+                    def.description = d;
+                }
+                if let Some(b) = body {
+                    def.body = b;
+                }
+                if let Err(e) = agents::write_agent(&dir, &def) {
+                    eprintln!("Error writing agent file: {e}");
+                    std::process::exit(1);
+                }
+                eprintln!("Updated agent '{name}'.");
             }
         },
     }
