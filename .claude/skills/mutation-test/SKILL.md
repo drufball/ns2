@@ -21,15 +21,15 @@ Wait for the user's answer before proceeding.
 **Diff mode:**
 
 ```
-git diff main.. > /tmp/ns2-mutation.diff && cargo mutants --workspace --in-diff /tmp/ns2-mutation.diff -vV
+git diff main > /tmp/ns2-mutation.diff && cargo mutants --workspace --in-diff /tmp/ns2-mutation.diff -vV; rm -rf mutants.out.old
 ```
 
-If `git diff main..` produces no output (nothing changed relative to `main`), report that and stop — there are no mutations to test.
+If the diff file is empty (nothing changed relative to `main`), report that and stop — there are no mutations to test.
 
 **Full mode:**
 
 ```
-cargo mutants --workspace -j 4 -vV
+cargo mutants --workspace -j 4 -vV; rm -rf mutants.out.old
 ```
 
 Warn the user this may take 15–60 minutes before starting. Capture the full output.

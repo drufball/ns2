@@ -35,7 +35,6 @@ impl AnthropicClient for StubClient {
 pub struct HarnessConfig {
     pub session: Session,
     pub model: String,
-    pub system: Option<String>,
     pub tools: Vec<Arc<dyn tools::Tool>>,
 }
 
@@ -116,10 +115,21 @@ async fn run_tool_dispatch_loop(
     let tool_definitions: Vec<types::ToolDefinition> =
         config.tools.iter().map(|t| t.definition()).collect();
 
+    let system = config
+        .session
+        .agent
+        .as_deref()
+        .and_then(|name| {
+            let dir = agents::agents_dir()?;
+            agents::load_agent(&dir, name)
+        })
+        .map(|def| def.body)
+        .filter(|s| !s.is_empty());
+
     loop {
         let request = MessageRequest {
             model: config.model.clone(),
-            system: config.system.clone(),
+            system: system.clone(),
             messages: messages.clone(),
             max_tokens: 4096,
             tools: tool_definitions.clone(),
@@ -330,7 +340,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
 
@@ -374,7 +383,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(StubClient);
@@ -419,7 +427,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(StubClient);
@@ -440,7 +447,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(StubClient);
@@ -484,7 +490,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(StubClient);
@@ -575,7 +580,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(MultiBlockClient);
@@ -608,7 +612,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(StubClient);
@@ -706,7 +709,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysOkTool)],
         };
         let client = Arc::new(ToolUseClient::new());
@@ -774,7 +776,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysErrTool)],
         };
         let client = Arc::new(ToolUseClient::new());
@@ -924,7 +925,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysOkTool)],
         };
         let client = Arc::new(TwoToolClient { call_count: std::sync::atomic::AtomicU32::new(0) });
@@ -1033,7 +1033,6 @@ mod tests {
                 updated_at: Utc::now(),
             },
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
 
@@ -1107,7 +1106,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(MaxTokensClient);
@@ -1203,7 +1201,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysOkTool)], // only "read", not "nonexistent_tool"
         };
         let client = Arc::new(UnknownToolClient::new());
@@ -1251,7 +1248,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![], // empty
         };
         let client = Arc::new(StubClient);
@@ -1327,7 +1323,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysOkTool)],
         };
         let client = Arc::new(ToolUseClient::new());
@@ -1391,7 +1386,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![Arc::new(AlwaysOkTool)],
         };
         let client = Arc::new(TwoToolOrderingClient {
@@ -1500,7 +1494,6 @@ mod tests {
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
         let client = Arc::new(KnownTokenClient);
@@ -1628,7 +1621,6 @@ mod tests {
                 updated_at: Utc::now(),
             },
             model: "claude-opus-4-5".into(),
-            system: None,
             tools: vec![],
         };
 
@@ -1668,6 +1660,184 @@ mod tests {
         assert!(
             matches!(&captured[2].1[0], ContentBlock::Text { text } if text == "follow up"),
             "third message should be 'follow up'"
+        );
+    }
+
+    // --- Agent system prompt tests ---
+
+    /// A client that captures the `system` field from the first request.
+    struct SystemCapturingClient {
+        captured_system: std::sync::Mutex<Option<Option<String>>>,
+    }
+
+    impl SystemCapturingClient {
+        fn new() -> Self {
+            Self { captured_system: std::sync::Mutex::new(None) }
+        }
+
+        fn captured(&self) -> Option<String> {
+            self.captured_system.lock().unwrap().clone().flatten()
+        }
+    }
+
+    #[async_trait]
+    impl AnthropicClient for SystemCapturingClient {
+        async fn complete(&self, request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let mut guard = self.captured_system.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(request.system);
+            }
+            Ok(MessageResponse {
+                content: vec![ContentBlock::Text { text: "ok".into() }],
+                stop_reason: "end_turn".into(),
+                input_tokens: 10,
+                output_tokens: 3,
+            })
+        }
+    }
+
+    /// When session.agent is None, the system prompt sent to the API must be None.
+    #[tokio::test]
+    async fn test_no_agent_means_no_system_prompt() {
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: None, // No agent
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+        };
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        assert!(
+            client_ref.captured().is_none(),
+            "system prompt must be None when session.agent is None"
+        );
+    }
+
+    /// When an agent exists with a non-empty body, its body becomes the system prompt.
+    /// When an agent exists with an empty body, system prompt must remain None.
+    /// These tests write real agent files to .ns2/agents/ to exercise the full path.
+    /// They skip when not inside a git repo (e.g. cargo-mutants temp dir) because
+    /// agents::agents_dir() depends on workspace::git_root().
+    #[tokio::test]
+    async fn test_agent_with_nonempty_body_becomes_system_prompt() {
+        // Skip when not inside a git repo (cargo-mutants runs in a temp dir)
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        // Write a real agent file so agents::load_agent can find it
+        std::fs::create_dir_all(&dir).unwrap();
+        let agent_name = "harness_test_nonempty_body";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent".to_string(),
+            body: "You are a test harness agent with a non-empty body.".to_string(),
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+        };
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup before any assertions that might panic
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+
+        result.unwrap();
+
+        assert_eq!(
+            client_ref.captured().as_deref(),
+            Some("You are a test harness agent with a non-empty body."),
+            "non-empty agent body must become the system prompt"
+        );
+    }
+
+    /// When an agent exists but has an empty body, the system prompt must be None.
+    /// This catches the `.filter(|s| !s.is_empty())` mutation (flipping ! would let
+    /// empty bodies through and drop non-empty ones).
+    #[tokio::test]
+    async fn test_agent_with_empty_body_produces_no_system_prompt() {
+        // Skip when not inside a git repo (cargo-mutants runs in a temp dir)
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let agent_name = "harness_test_empty_body";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent with no body".to_string(),
+            body: String::new(), // empty body
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+        };
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup before any assertions that might panic
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+
+        result.unwrap();
+
+        assert!(
+            client_ref.captured().is_none(),
+            "empty agent body must NOT become the system prompt (system must be None)"
         );
     }
 }

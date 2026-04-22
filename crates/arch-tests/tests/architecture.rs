@@ -165,6 +165,15 @@ fn workspace_has_no_application_deps() {
     }
 }
 
+/// `agents` only depends on `workspace` — must not depend on db, anthropic, harness, server, tui, or cli.
+#[test]
+fn agents_has_no_upper_layer_deps() {
+    let graph = build_dep_graph();
+    for forbidden in &["db", "anthropic", "harness", "server", "tui", "cli"] {
+        assert_no_dep(&graph, "agents", forbidden);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Coverage-ignore allowlist helpers
 // ---------------------------------------------------------------------------
@@ -426,6 +435,14 @@ fn direct_dep_edges_match_spec() {
     assert_no_direct_dep(&graph, "workspace", "server");
     assert_no_direct_dep(&graph, "workspace", "tui");
     assert_no_direct_dep(&graph, "workspace", "cli");
+
+    // agents -> no upper layers (workspace is allowed)
+    assert_no_direct_dep(&graph, "agents", "db");
+    assert_no_direct_dep(&graph, "agents", "anthropic");
+    assert_no_direct_dep(&graph, "agents", "harness");
+    assert_no_direct_dep(&graph, "agents", "server");
+    assert_no_direct_dep(&graph, "agents", "tui");
+    assert_no_direct_dep(&graph, "agents", "cli");
 
     // harness -> no HTTP layer
     assert_no_direct_dep(&graph, "harness", "server");

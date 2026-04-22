@@ -5,6 +5,7 @@ members = [
     "crates/anthropic",
     "crates/tools",
     "crates/workspace",
+    "crates/agents",
     "crates/harness",
     "crates/server",
     "crates/tui",
