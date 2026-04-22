@@ -8,6 +8,7 @@ pub struct SpecDef {
 }
 
 pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
+    let content = content.trim_start();
     let rest = content.strip_prefix("---\n")?;
     let (frontmatter, body) = if let Some(pos) = rest.find("\n---\n") {
         (&rest[..pos], rest[pos + 5..].trim())
@@ -104,9 +105,13 @@ pub fn stale_files(root: &Path, def: &SpecDef) -> Vec<PathBuf> {
                 Err(_) => continue,
             };
             let modified_dt: DateTime<Utc> = modified.into();
+            let rel = match entry.strip_prefix(root) {
+                Ok(p) => p.to_path_buf(),
+                Err(_) => entry,
+            };
             match def.verified {
-                None => matched.push(entry),
-                Some(v) if modified_dt > v => matched.push(entry),
+                None => matched.push(rel),
+                Some(v) if modified_dt > v => matched.push(rel),
                 _ => {}
             }
         }
@@ -313,6 +318,69 @@ mod tests {
         };
         let stale = stale_files(root, &def);
         assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0], PathBuf::from("main.rs"));
+    }
+
+    #[test]
+    fn parse_spec_content_ignores_leading_whitespace() {
+        let content = "\n---\ntargets:\n  - *.rs\n---\n";
+        let def = parse_spec_content(content).unwrap();
+        assert_eq!(def.targets, vec!["*.rs"]);
+    }
+
+    #[test]
+    fn format_spec_file_empty_body_ends_with_fence() {
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: None,
+            body: String::new(),
+        };
+        let formatted = format_spec_file(&def);
+        assert!(formatted.ends_with("---\n"), "empty body must end with ---\\n");
+        assert!(!formatted.contains("---\n\n"), "must not have blank line after --- when body is empty");
+    }
+
+    #[test]
+    fn parse_spec_content_stops_targets_at_non_list_item() {
+        // A non-list line after targets: should end target collection;
+        // the subsequent list item belongs to a different key and must be ignored.
+        let content = "---\ntargets:\n  - file1.rs\nother: value\n  - file2.rs\n---\n";
+        let def = parse_spec_content(content).unwrap();
+        assert_eq!(def.targets.len(), 1);
+        assert_eq!(def.targets[0], "file1.rs");
+    }
+
+    #[test]
+    fn list_specs_finds_nested_spec_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let nested = root.join("crates").join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: None,
+            body: String::new(),
+        };
+        write_spec(&nested.join("design.spec.md"), &def).unwrap();
+        let specs = list_specs(root);
+        assert_eq!(specs.len(), 1);
+    }
+
+    #[test]
+    fn stale_files_multiple_targets_deduplicates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        let epoch = Utc.timestamp_opt(0, 0).unwrap();
+        let def = SpecDef {
+            // both patterns match main.rs — result must contain it only once
+            targets: vec!["*.rs".to_string(), "main.rs".to_string()],
+            verified: Some(epoch),
+            body: String::new(),
+        };
+        let stale = stale_files(root, &def);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
 
     #[test]
@@ -343,5 +411,6 @@ mod tests {
         };
         let stale = stale_files(root, &def);
         assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
 }

@@ -538,7 +538,17 @@ async fn main() {
                     eprintln!("Error: at least one --target is required");
                     std::process::exit(1);
                 }
-                let path = PathBuf::from(&path);
+                let git_root = workspace::git_root().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                let resolved = if PathBuf::from(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    git_root.join(&path)
+                };
+                let path_display = path.clone();
+                let path = resolved;
                 if path.exists() {
                     eprintln!("Error: spec already exists at {}", path.display());
                     std::process::exit(1);
@@ -556,7 +566,7 @@ async fn main() {
                     eprintln!("Error writing spec file: {e}");
                     std::process::exit(1);
                 }
-                println!("Created spec at {}", path.display());
+                println!("Created spec at {path_display}");
             }
             SpecAction::Sync { path } => {
                 let git_root = workspace::git_root().unwrap_or_else(|| {
@@ -564,7 +574,12 @@ async fn main() {
                     std::process::exit(1);
                 });
                 if let Some(p) = path {
-                    let def = specs::load_spec(std::path::Path::new(&p)).unwrap_or_else(|| {
+                    let resolved = if PathBuf::from(&p).is_absolute() {
+                        PathBuf::from(&p)
+                    } else {
+                        git_root.join(&p)
+                    };
+                    let def = specs::load_spec(&resolved).unwrap_or_else(|| {
                         eprintln!("Error: could not load spec at {p}");
                         std::process::exit(1);
                     });
@@ -589,12 +604,21 @@ async fn main() {
                 }
             }
             SpecAction::Verify { path } => {
-                let mut def = specs::load_spec(std::path::Path::new(&path)).unwrap_or_else(|| {
+                let git_root = workspace::git_root().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                let resolved = if PathBuf::from(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    git_root.join(&path)
+                };
+                let mut def = specs::load_spec(&resolved).unwrap_or_else(|| {
                     eprintln!("Error: could not load spec at {path}");
                     std::process::exit(1);
                 });
                 def.verified = Some(chrono::Utc::now());
-                if let Err(e) = specs::write_spec(std::path::Path::new(&path), &def) {
+                if let Err(e) = specs::write_spec(&resolved, &def) {
                     eprintln!("Error writing spec file: {e}");
                     std::process::exit(1);
                 }
@@ -715,6 +739,21 @@ mod tests {
     // Spec command parsing and behavior tests
     // These test functions and helpers that handle spec logic.
     // The actual CLI wiring (clap parse) is tested by integration tests / smoke tests.
+
+    #[test]
+    fn format_sync_error_includes_spec_and_files() {
+        let stale = vec![
+            std::path::PathBuf::from("crates/cli/src/main.rs"),
+            std::path::PathBuf::from("crates/agents/src/lib.rs"),
+        ];
+        let out = format_sync_error("crates/cli/cli-commands.spec.md", &stale);
+        assert!(out.contains("crates/cli/cli-commands.spec.md"));
+        assert!(out.contains("crates/cli/src/main.rs"));
+        assert!(out.contains("crates/agents/src/lib.rs"));
+        // Each file is on its own indented line
+        assert!(out.contains("  crates/cli/src/main.rs\n"));
+        assert!(out.contains("  crates/agents/src/lib.rs\n"));
+    }
 
     #[test]
     fn spec_sync_output_contains_spec_path_and_stale_file() {
