@@ -4,7 +4,7 @@ description: Run product-flow manual tests in parallel Docker containers, one pe
 argument-hint: "flow numbers e.g. '01 03', or omit for all"
 ---
 
-Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise run all flows 01–09.
+Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise run all flows 01–12.
 
 ## Step 0: Detect repo root and build
 
@@ -31,6 +31,21 @@ ls REPO_ROOT/product-flows/.build/ns2
 ```
 
 If the binary is missing, bail immediately with: "Binary not found at product-flows/.build/ns2 — aborting."
+
+## Step 0.5: Check which flows are stale
+
+Run spec sync scoped to the product-flows directory:
+
+    ./ns2 spec sync product-flows/
+
+If this exits non-zero, some flow spec files have stale targets — meaning the code
+those flows exercise has changed since the flows were last verified. List which flows
+are stale in the report header. Stale flows MUST be included in the run even if the
+user provided a specific flow subset; skip them only if they were already going to
+be skipped for other reasons (e.g. missing API key).
+
+If spec sync is not available (binary missing or command fails), skip this check with
+a note in the report and continue.
 
 ## Step 1: Check prerequisites
 
@@ -62,7 +77,7 @@ If `docker run` returns non-zero for a given flow, mark that flow CRITICAL, reco
 After all containers are started, spawn one subagent per non-SKIPPED, non-CRITICAL flow. Spawn them all at the same time — do not wait for one to finish before starting the next. Each container has its own network namespace, so port 9876 does not conflict between flows.
 
 Each subagent receives:
-- The full text of the flow .md file
+- The full text of the flow `.spec.md` file
 - The container name assigned to it (e.g. `ns2-flow-03`)
 - This instruction: **All bash commands in this flow must be run via `docker exec <container-name> bash -c '...'`. Do not run commands on the host. The Fixture Setup section contains the setup commands already formatted as `docker exec` calls — run them exactly as written.**
 
@@ -95,6 +110,18 @@ Subagents also note **Workflow Snags** — friction that made the flow harder to
 
 Wait for every spawned subagent to finish before proceeding.
 
+## Step 4.5: Verify passing flows
+
+For each flow that returned PASS, run:
+
+    ./ns2 spec verify product-flows/NN-name.spec.md
+
+This stamps the current timestamp into the flow's `verified` field, recording that
+the flow was run and passed against the current codebase. List each verify result
+in the Container Cleanup Status section.
+
+If `./ns2` is not available, skip this step with a note.
+
 ## Step 5: Cleanup all containers
 
 For every flow that had a container started (including CRITICAL flows), run:
@@ -110,6 +137,10 @@ Run cleanup for each container regardless of that flow's outcome. Record whether
 Print the following sections in order.
 
 ### Results table
+
+If any flows were stale at the start of the run (from Step 0.5), note them here before the table:
+
+> Stale flows (code changed since last verified): NN-name, NN-name, ...
 
 | Flow | Name | Passed | Failed | Verdict |
 |------|------|--------|--------|---------|
@@ -128,12 +159,12 @@ List friction points that made testing harder or reduced visibility. These are i
 
 ### Container Cleanup Status
 
-Confirm whether each container was successfully removed. Format:
+Confirm whether each container was successfully removed and whether each passing flow was re-verified. Format:
 
-| Container | Removed |
-|-----------|---------|
-| ns2-flow-01 | yes |
-| ns2-flow-02 | yes |
-| ... | ... |
+| Container | Removed | Verified |
+|-----------|---------|---------|
+| ns2-flow-01 | yes | yes |
+| ns2-flow-02 | yes | yes |
+| ... | ... | ... |
 
-If any removal failed, list the error.
+If any removal failed, list the error. If verify was skipped (binary unavailable), note that in the Verified column.

@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/specs/src/**/*.rs
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-22T19:27:29Z
+---
+
+
 # Flow 10: Spec New
 
 Create new `.spec.md` files using `ns2 spec new`. These files declare which source files a

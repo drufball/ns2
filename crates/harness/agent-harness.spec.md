@@ -1,3 +1,13 @@
+---
+targets:
+  - crates/harness/src/**/*.rs
+  - crates/harness/Cargo.toml
+  - crates/anthropic/src/**/*.rs
+  - crates/tools/src/**/*.rs
+verified: 2026-04-22T19:18:32Z
+---
+
+
 # Agent Harness Spec
 
 ## Overview

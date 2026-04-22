@@ -107,9 +107,13 @@ enum SpecAction {
         path: String,
         #[arg(long = "target", num_args = 1..)]
         targets: Vec<String>,
+        #[arg(long, default_value = "error")]
+        severity: String,
     },
     Sync {
         path: Option<String>,
+        #[arg(long)]
+        error_on_warnings: bool,
     },
     Verify {
         path: String,
@@ -221,7 +225,15 @@ pub fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<String> {
 }
 
 pub fn format_sync_error(spec_path: &str, stale: &[PathBuf]) -> String {
-    let mut out = format!("spec {spec_path} has stale files:\n");
+    let mut out = format!("[error] spec {spec_path} has stale files:\n");
+    for f in stale {
+        out.push_str(&format!("  {}\n", f.display()));
+    }
+    out
+}
+
+pub fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
+    let mut out = format!("[warning] spec {spec_path} has stale files:\n");
     for f in stale {
         out.push_str(&format!("  {}\n", f.display()));
     }
@@ -533,11 +545,19 @@ async fn main() {
             }
         },
         Command::Spec { action } => match action {
-            SpecAction::New { path, targets } => {
+            SpecAction::New { path, targets, severity } => {
                 if targets.is_empty() {
                     eprintln!("Error: at least one --target is required");
                     std::process::exit(1);
                 }
+                let severity = match severity.as_str() {
+                    "warning" => specs::Severity::Warning,
+                    "error" => specs::Severity::Error,
+                    _ => {
+                        eprintln!("Error: --severity must be 'error' or 'warning'");
+                        std::process::exit(1);
+                    }
+                };
                 let git_root = workspace::git_root().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
@@ -561,14 +581,14 @@ async fn main() {
                         }
                     }
                 }
-                let def = specs::SpecDef { targets, verified: None, body: String::new() };
+                let def = specs::SpecDef { targets, verified: None, severity, body: String::new() };
                 if let Err(e) = specs::write_spec(&path, &def) {
                     eprintln!("Error writing spec file: {e}");
                     std::process::exit(1);
                 }
                 println!("Created spec at {path_display}");
             }
-            SpecAction::Sync { path } => {
+            SpecAction::Sync { path, error_on_warnings } => {
                 let git_root = workspace::git_root().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
@@ -585,20 +605,31 @@ async fn main() {
                     });
                     let stale = specs::stale_files(&git_root, &def);
                     if !stale.is_empty() {
-                        eprint!("{}", format_sync_error(&p, &stale));
-                        std::process::exit(1);
+                        let is_error = def.severity == specs::Severity::Error || error_on_warnings;
+                        if is_error {
+                            eprint!("{}", format_sync_error(&p, &stale));
+                            std::process::exit(1);
+                        } else {
+                            eprint!("{}", format_sync_warning(&p, &stale));
+                        }
                     }
                 } else {
                     let all_specs = specs::list_specs(&git_root);
-                    let mut any_stale = false;
+                    let mut has_errors = false;
                     for (spec_path, def) in &all_specs {
                         let stale = specs::stale_files(&git_root, def);
                         if !stale.is_empty() {
-                            eprint!("{}", format_sync_error(&spec_path.display().to_string(), &stale));
-                            any_stale = true;
+                            let display_path = spec_path.display().to_string();
+                            let is_error = def.severity == specs::Severity::Error || error_on_warnings;
+                            if is_error {
+                                eprint!("{}", format_sync_error(&display_path, &stale));
+                                has_errors = true;
+                            } else {
+                                eprint!("{}", format_sync_warning(&display_path, &stale));
+                            }
                         }
                     }
-                    if any_stale {
+                    if has_errors {
                         std::process::exit(1);
                     }
                 }
@@ -747,6 +778,7 @@ mod tests {
             std::path::PathBuf::from("crates/agents/src/lib.rs"),
         ];
         let out = format_sync_error("crates/cli/cli-commands.spec.md", &stale);
+        assert!(out.contains("[error]"));
         assert!(out.contains("crates/cli/cli-commands.spec.md"));
         assert!(out.contains("crates/cli/src/main.rs"));
         assert!(out.contains("crates/agents/src/lib.rs"));
@@ -764,6 +796,22 @@ mod tests {
         let output = format_sync_error(spec_path, &stale);
         assert!(output.contains(spec_path), "output must include spec path");
         assert!(output.contains("crates/cli/src/main.rs"), "output must include stale file");
+    }
+
+    #[test]
+    fn format_sync_warning_includes_warning_prefix() {
+        let stale = vec![std::path::PathBuf::from("crates/cli/src/main.rs")];
+        let out = format_sync_warning("crates/foo.spec.md", &stale);
+        assert!(out.contains("[warning]"));
+        assert!(out.contains("crates/foo.spec.md"));
+        assert!(out.contains("crates/cli/src/main.rs"));
+    }
+
+    #[test]
+    fn format_sync_error_includes_error_prefix() {
+        let stale = vec![std::path::PathBuf::from("crates/cli/src/main.rs")];
+        let out = format_sync_error("crates/foo.spec.md", &stale);
+        assert!(out.contains("[error]"));
     }
 
     #[test]

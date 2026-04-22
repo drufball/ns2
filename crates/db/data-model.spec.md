@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/db/src/**/*.rs
+  - crates/db/Cargo.toml
+  - crates/types/src/**/*.rs
+verified: 2026-04-22T19:18:32Z
+---
+
+
 # Data Model Spec
 
 ## Overview
@@ -43,5 +52,3 @@ One row per content block within a turn, in order.
 | `content` | TEXT | JSON; shape depends on `type` (see below) |
 
 The `content` column is a JSON string whose shape depends on `type`. The `type` column tells the `types` crate which `ContentBlock` enum variant to deserialize `content` into.
-
-

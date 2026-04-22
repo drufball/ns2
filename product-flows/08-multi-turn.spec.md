@@ -1,3 +1,13 @@
+---
+targets:
+  - crates/harness/src/**/*.rs
+  - crates/server/src/**/*.rs
+  - crates/db/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 08: Multi-Turn Conversation
 
 A user sends a follow-up message to a completed session and Claude responds with full prior context.

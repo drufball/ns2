@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/specs/src/**/*.rs
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-22T19:27:29Z
+---
+
+
 # Flow 12: Spec Verify
 
 Mark a spec as verified at the current time using `ns2 spec verify`. Updates the `verified`

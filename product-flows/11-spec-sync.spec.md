@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/specs/src/**/*.rs
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-22T19:27:29Z
+---
+
+
 # Flow 11: Spec Sync
 
 Check whether source files covered by a spec have been modified since the spec was last

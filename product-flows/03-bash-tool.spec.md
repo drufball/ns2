@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/tools/src/**/*.rs
+  - crates/harness/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 03: Bash Tool
 
 Verify Claude invokes the `bash` tool correctly and captures its output.

@@ -1,3 +1,11 @@
+---
+targets:
+  - Cargo.toml
+  - crates/*/Cargo.toml
+verified: 2026-04-22T19:18:32Z
+---
+
+
 # Architecture Spec
 
 ## Overview

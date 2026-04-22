@@ -1,9 +1,17 @@
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Severity {
+    #[default]
+    Error,
+    Warning,
+}
+
 pub struct SpecDef {
     pub targets: Vec<String>,
     pub verified: Option<DateTime<Utc>>,
+    pub severity: Severity,
     pub body: String,
 }
 
@@ -20,6 +28,7 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
 
     let mut targets: Vec<String> = Vec::new();
     let mut verified: Option<DateTime<Utc>> = None;
+    let mut severity = Severity::default();
     let mut in_targets = false;
 
     for line in frontmatter.lines() {
@@ -31,6 +40,13 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
             in_targets = false;
             let dt = DateTime::parse_from_rfc3339(v.trim()).ok()?.with_timezone(&Utc);
             verified = Some(dt);
+        } else if let Some(v) = line.strip_prefix("severity: ") {
+            in_targets = false;
+            severity = match v.trim() {
+                "warning" => Severity::Warning,
+                "error" => Severity::Error,
+                _ => return None,
+            };
         } else {
             in_targets = false;
         }
@@ -40,13 +56,16 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
         return None;
     }
 
-    Some(SpecDef { targets, verified, body: body.to_string() })
+    Some(SpecDef { targets, verified, severity, body: body.to_string() })
 }
 
 pub fn format_spec_file(def: &SpecDef) -> String {
     let mut out = String::from("---\ntargets:\n");
     for t in &def.targets {
         out.push_str(&format!("  - {t}\n"));
+    }
+    if def.severity == Severity::Warning {
+        out.push_str("severity: warning\n");
     }
     if let Some(v) = def.verified {
         out.push_str(&format!("verified: {}\n", v.format("%Y-%m-%dT%H:%M:%SZ")));
@@ -201,6 +220,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string(), "crates/agents/Cargo.toml".to_string()],
             verified: Some(verified),
+            severity: Severity::Error,
             body: "Some spec body.".to_string(),
         };
         let formatted = format_spec_file(&def);
@@ -215,6 +235,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: "Body text.".to_string(),
         };
         let formatted = format_spec_file(&def);
@@ -229,6 +250,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: "Body.".to_string(),
         };
         let formatted = format_spec_file(&def);
@@ -245,6 +267,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string()],
             verified: Some(verified),
+            severity: Severity::Error,
             body: "Spec body.".to_string(),
         };
         write_spec(&path, &def).unwrap();
@@ -276,6 +299,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: "Body.".to_string(),
         };
         write_spec(&root.join("myspec.spec.md"), &def).unwrap();
@@ -291,6 +315,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["crates/cli/src/**/*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: "Body.".to_string(),
         };
         write_spec(&root.join("good.spec.md"), &def).unwrap();
@@ -314,6 +339,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: String::new(),
         };
         let stale = stale_files(root, &def);
@@ -333,6 +359,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: String::new(),
         };
         let formatted = format_spec_file(&def);
@@ -359,6 +386,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: None,
+            severity: Severity::Error,
             body: String::new(),
         };
         write_spec(&nested.join("design.spec.md"), &def).unwrap();
@@ -376,6 +404,7 @@ mod tests {
             // both patterns match main.rs — result must contain it only once
             targets: vec!["*.rs".to_string(), "main.rs".to_string()],
             verified: Some(epoch),
+            severity: Severity::Error,
             body: String::new(),
         };
         let stale = stale_files(root, &def);
@@ -392,6 +421,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: Some(future),
+            severity: Severity::Error,
             body: String::new(),
         };
         let stale = stale_files(root, &def);
@@ -407,6 +437,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: Some(epoch),
+            severity: Severity::Error,
             body: String::new(),
         };
         let stale = stale_files(root, &def);
@@ -434,6 +465,7 @@ mod tests {
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],
             verified: Some(verified),
+            severity: Severity::Error,
             body: String::new(),
         };
         let stale = stale_files(root, &def);
@@ -441,5 +473,61 @@ mod tests {
             stale.is_empty(),
             "a file whose mtime equals verified should not be considered stale"
         );
+    }
+
+    #[test]
+    fn parse_spec_content_extracts_severity_warning() {
+        let content = "---\ntargets:\n  - *.rs\nseverity: warning\n---\n";
+        let def = parse_spec_content(content).unwrap();
+        assert_eq!(def.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn parse_spec_content_defaults_severity_to_error() {
+        let content = "---\ntargets:\n  - *.rs\n---\n";
+        let def = parse_spec_content(content).unwrap();
+        assert_eq!(def.severity, Severity::Error);
+    }
+
+    #[test]
+    fn parse_spec_content_rejects_invalid_severity() {
+        let content = "---\ntargets:\n  - *.rs\nseverity: critical\n---\n";
+        assert!(parse_spec_content(content).is_none());
+    }
+
+    #[test]
+    fn format_spec_file_includes_severity_when_warning() {
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: None,
+            severity: Severity::Warning,
+            body: String::new(),
+        };
+        let formatted = format_spec_file(&def);
+        assert!(formatted.contains("severity: warning\n"));
+    }
+
+    #[test]
+    fn format_spec_file_omits_severity_when_error() {
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: None,
+            severity: Severity::Error,
+            body: String::new(),
+        };
+        let formatted = format_spec_file(&def);
+        assert!(!formatted.contains("severity:"));
+    }
+
+    #[test]
+    fn format_spec_file_round_trips_severity_warning() {
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: None,
+            severity: Severity::Warning,
+            body: "body".to_string(),
+        };
+        let parsed = parse_spec_content(&format_spec_file(&def)).unwrap();
+        assert_eq!(parsed.severity, Severity::Warning);
     }
 }
