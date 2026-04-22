@@ -5,45 +5,48 @@ Create and manage agent type files using `ns2 agent list`, `ns2 agent new`, and 
 These commands operate purely on the filesystem — no server required. Agent files live in
 `.ns2/agents/` relative to the git root of the current repo.
 
-## Setup
+## Prerequisites
+
+No API key required. No server needed.
+
+## Fixture Setup
 
 ```bash
-source product-flows/setup.sh
-cd /tmp/ns2-test-repo
+docker exec ns2-flow-09 bash /fixtures/init.sh
 ```
 
-No server needs to be started for any step in this flow.
+The server is intentionally not started — agent commands are filesystem-only.
 
 ## Steps
 
 ### List agents when the directory does not exist yet
 
 ```bash
-$NS2 agent list
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent list'
 ```
 
 Expected output:
 ```
-No agents found (directory does not exist: /tmp/ns2-test-repo/.ns2/agents)
+No agents found (directory does not exist: /repo/.ns2/agents)
 ```
 
-Exit code: 0. The `.ns2/agents/` directory does not exist yet; the command prints where
-it looked and exits cleanly rather than erroring.
+Exit code: 0. The `.ns2/agents/` directory does not exist yet; the command prints where it looked and exits cleanly rather than erroring.
 
 ### Create a first agent with all flags provided
 
 ```bash
-$NS2 agent new --name "reviewer" --description "Reviews pull requests for style and correctness" --body "You are a careful code reviewer. Focus on clarity and correctness."
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent new --name "reviewer" --description "Reviews pull requests for style and correctness" --body "You are a careful code reviewer. Focus on clarity and correctness."'
 ```
 
 Expected output on stderr:
 ```
-Created agent 'reviewer' at /tmp/ns2-test-repo/.ns2/agents/reviewer.md
+Created agent 'reviewer' at /repo/.ns2/agents/reviewer.md
 ```
 
 Verify the file was written correctly:
+
 ```bash
-cat /tmp/ns2-test-repo/.ns2/agents/reviewer.md
+docker exec ns2-flow-09 bash -c 'cat /repo/.ns2/agents/reviewer.md'
 ```
 
 Expected file contents:
@@ -61,7 +64,7 @@ The file has YAML frontmatter followed by a blank line and the body text.
 ### List agents — shows the new entry
 
 ```bash
-$NS2 agent list
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent list'
 ```
 
 Expected output — a two-column table with `name` padded to 20 characters:
@@ -73,18 +76,18 @@ reviewer             Reviews pull requests for style and correctness
 ### Create a second agent
 
 ```bash
-$NS2 agent new --name "planner" --description "Breaks large tasks into actionable steps" --body "You are a planning assistant. Decompose problems into small, concrete steps."
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent new --name "planner" --description "Breaks large tasks into actionable steps" --body "You are a planning assistant. Decompose problems into small, concrete steps."'
 ```
 
 Expected output on stderr:
 ```
-Created agent 'planner' at /tmp/ns2-test-repo/.ns2/agents/planner.md
+Created agent 'planner' at /repo/.ns2/agents/planner.md
 ```
 
 ### List shows both agents, sorted by name
 
 ```bash
-$NS2 agent list
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent list'
 ```
 
 Expected output — agents appear in alphabetical order by name:
@@ -97,7 +100,7 @@ reviewer             Reviews pull requests for style and correctness
 ### Edit the first agent's description
 
 ```bash
-$NS2 agent edit --name "reviewer" --description "Reviews code for correctness, style, and test coverage"
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent edit --name "reviewer" --description "Reviews code for correctness, style, and test coverage"'
 ```
 
 Expected output on stderr:
@@ -106,8 +109,9 @@ Updated agent 'reviewer'.
 ```
 
 Verify the description changed and the body was preserved:
+
 ```bash
-cat /tmp/ns2-test-repo/.ns2/agents/reviewer.md
+docker exec ns2-flow-09 bash -c 'cat /repo/.ns2/agents/reviewer.md'
 ```
 
 Expected file contents:
@@ -123,7 +127,7 @@ You are a careful code reviewer. Focus on clarity and correctness.
 ### Edit the first agent's body
 
 ```bash
-$NS2 agent edit --name "reviewer" --body "You are a thorough code reviewer. Check for correctness, style, and adequate test coverage."
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent edit --name "reviewer" --body "You are a thorough code reviewer. Check for correctness, style, and adequate test coverage."'
 ```
 
 Expected output on stderr:
@@ -132,8 +136,9 @@ Updated agent 'reviewer'.
 ```
 
 Verify the body changed and the description from the previous step was preserved:
+
 ```bash
-cat /tmp/ns2-test-repo/.ns2/agents/reviewer.md
+docker exec ns2-flow-09 bash -c 'cat /repo/.ns2/agents/reviewer.md'
 ```
 
 Expected file contents:
@@ -151,35 +156,23 @@ You are a thorough code reviewer. Check for correctness, style, and adequate tes
 ### `agent new` without `--name`
 
 ```bash
-$NS2 agent new --description "Missing name flag"
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent new --description "Missing name flag"; echo "Exit code: $?"'
 ```
 
-Expected: error message and non-zero exit code. The `--name` flag is required.
-
-```bash
-$NS2 agent new --description "Missing name flag"; echo "Exit code: $?"
-```
-
-Expected: `Exit code: 1` (or any non-zero value).
+Expected: error message and `Exit code: 1` (or any non-zero value). The `--name` flag is required.
 
 ### `agent edit` without `--name`
 
 ```bash
-$NS2 agent edit --description "No name given"
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent edit --description "No name given"; echo "Exit code: $?"'
 ```
 
-Expected: error message and non-zero exit code. The `--name` flag is required.
-
-```bash
-$NS2 agent edit --description "No name given"; echo "Exit code: $?"
-```
-
-Expected: `Exit code: 1` (or any non-zero value).
+Expected: error message and `Exit code: 1` (or any non-zero value). The `--name` flag is required.
 
 ### `agent edit` with `--name` but no other flags
 
 ```bash
-$NS2 agent edit --name "reviewer"
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent edit --name "reviewer"'
 ```
 
 Expected output (exit code non-zero):
@@ -192,12 +185,12 @@ Nothing in the file changes.
 ### `agent new` with a duplicate name
 
 ```bash
-$NS2 agent new --name "reviewer" --description "Duplicate" --body "This should fail."
+docker exec ns2-flow-09 bash -c 'cd /repo && ns2 agent new --name "reviewer" --description "Duplicate" --body "This should fail."'
 ```
 
 Expected output (exit code non-zero):
 ```
-Error: agent 'reviewer' already exists at /tmp/ns2-test-repo/.ns2/agents/reviewer.md
+Error: agent 'reviewer' already exists at /repo/.ns2/agents/reviewer.md
 ```
 
 The existing `reviewer.md` file is unchanged.
@@ -223,9 +216,4 @@ The existing `reviewer.md` file is unchanged.
 
 ## Cleanup
 
-```bash
-rm -f /tmp/ns2-test-repo/.ns2/agents/reviewer.md
-rm -f /tmp/ns2-test-repo/.ns2/agents/planner.md
-rmdir /tmp/ns2-test-repo/.ns2/agents 2>/dev/null || true
-rmdir /tmp/ns2-test-repo/.ns2 2>/dev/null || true
-```
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

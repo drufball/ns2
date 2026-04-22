@@ -2,21 +2,15 @@
 
 Claude writes a file using the `write` tool and reads it back using the `read` tool during a single agent run.
 
-## Setup
+## Prerequisites
+
+**[Requires: ANTHROPIC_API_KEY]** — loaded from `/tmp/ns2-host.env` mounted into the container.
+
+## Fixture Setup
 
 ```bash
-source product-flows/setup.sh
-cd /tmp/ns2-test-repo
-```
-
-Place a `.env` file in the repo root (next to `Cargo.toml`) with your key:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Start the server:
-```bash
-$NS2 server start &
+docker exec ns2-flow-07 bash /fixtures/init.sh
+docker exec ns2-flow-07 bash /fixtures/start-server.sh
 ```
 
 ## Steps
@@ -24,29 +18,25 @@ $NS2 server start &
 ### Create a session asking Claude to write and then read a file
 
 ```bash
-SESSION_ID=$($NS2 session new --message "Please write the text 'ns2-multi-tool-test-99' to the file /tmp/ns2-multi-tool-test.txt, then read it back and tell me what it contains.")
-echo "Session: $SESSION_ID"
+docker exec ns2-flow-07 bash -c 'cd /repo && ns2 session new --message "Please write the text '\''ns2-multi-tool-test-99'\'' to the file /tmp/ns2-multi-tool-test.txt, then read it back and tell me what it contains." | tee /tmp/session_id.txt && echo "Session created: $(cat /tmp/session_id.txt)"'
 ```
 
-Expected: a UUID printed and stored in `SESSION_ID`.
+Expected: a UUID printed alongside `Session created:`.
 
-### Tail the session
+### Tail the session and wait for completion
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-07 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 The command streams events as Claude responds. Claude will invoke the `write` tool to create the file, then the `read` tool to read it back, and finally summarize the contents.
 
-### Expected output
-
-The tail output should include lines similar to:
-
+Expected output shape:
 ```
 [turn <uuid>]
 [tool: write({"path":"/tmp/ns2-multi-tool-test.txt","content":"ns2-multi-tool-test-99"})]
 [turn <uuid>]
-[result: wrote /tmp/ns2-multi-tool-test.txt]
+[result: Wrote N bytes to /tmp/ns2-multi-tool-test.txt]
 [turn <uuid>]
 [tool: read({"path":"/tmp/ns2-multi-tool-test.txt"})]
 [turn <uuid>]
@@ -58,10 +48,21 @@ The file /tmp/ns2-multi-tool-test.txt contains: "ns2-multi-tool-test-99"
 
 The exact phrasing varies, but Claude's final response must include the string `ns2-multi-tool-test-99` — the value that was written by the `write` tool and read back by the `read` tool.
 
+### Verify the file was actually written in the container
+
+```bash
+docker exec ns2-flow-07 bash -c 'cat /tmp/ns2-multi-tool-test.txt'
+```
+
+Expected output:
+```
+ns2-multi-tool-test-99
+```
+
 ### Verify session status
 
 ```bash
-$NS2 session list --status completed
+docker exec ns2-flow-07 bash -c 'cd /repo && ns2 session list --status completed'
 ```
 
 Expected: the session appears with status `completed`.
@@ -69,7 +70,7 @@ Expected: the session appears with status `completed`.
 ### Re-tail to confirm ToolUse and ToolResult blocks are stored
 
 ```bash
-$NS2 session tail --id "$SESSION_ID"
+docker exec ns2-flow-07 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)"'
 ```
 
 Re-tailing replays stored events. The output should show multiple turns: the user message, the assistant `write` tool call, the write tool result, the assistant `read` tool call, the read tool result, and the final assistant response.
@@ -79,14 +80,12 @@ Re-tailing replays stored events. The output should show multiple turns: the use
 - [ ] `ns2 session new --message "..."` creates a session that transitions to `running`
 - [ ] Claude invokes the `write` tool with `{"path": "/tmp/ns2-multi-tool-test.txt", "content": "ns2-multi-tool-test-99"}`
 - [ ] Claude invokes the `read` tool with `{"path": "/tmp/ns2-multi-tool-test.txt"}`
-- [ ] The file contents (`ns2-multi-tool-test-99`) appear in Claude's final response
+- [ ] The file `/tmp/ns2-multi-tool-test.txt` exists in the container and contains `ns2-multi-tool-test-99`
+- [ ] The string `ns2-multi-tool-test-99` appears in Claude's final response
 - [ ] The session transitions to `completed`
 - [ ] `ns2 session tail` output includes `[tool: write(...)]`, `[result: ...]`, `[tool: read(...)]`, and `[result: ...]` lines for both tool calls
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup
 
-```bash
-rm -f /tmp/ns2-multi-tool-test.txt
-bash product-flows/cleanup.sh
-```
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

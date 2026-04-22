@@ -274,8 +274,10 @@ async fn main() {
                 match std::fs::read_to_string(&pid_file) {
                     Ok(pid_str) => {
                         let pid = pid_str.trim().to_string();
-                        let result = std::process::Command::new("kill")
-                            .args(["-TERM", &pid])
+                        // Use sh to invoke kill so the shell builtin is available
+                        // even on minimal systems without a standalone kill binary.
+                        let result = std::process::Command::new("sh")
+                            .args(["-c", &format!("kill -TERM {pid}")])
                             .output();
                         match result {
                             Ok(o) if o.status.success() => {
