@@ -413,4 +413,33 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
+
+    #[test]
+    fn stale_files_file_modified_at_exact_verified_time_is_not_stale() {
+        // A file whose mtime == verified must NOT appear in the stale list.
+        // The boundary condition is `modified_dt > verified` (strictly greater),
+        // so equal-timestamp files are fresh. This test pins that boundary so
+        // mutating `>` to `>=` would be caught.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let path = root.join("main.rs");
+        std::fs::write(&path, "fn main() {}").unwrap();
+        // Read the actual mtime and use it verbatim as the verified timestamp.
+        // modified_dt == verified  →  modified_dt > verified is false  →  not stale.
+        let mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let verified: DateTime<Utc> = mtime.into();
+        let def = SpecDef {
+            targets: vec!["*.rs".to_string()],
+            verified: Some(verified),
+            body: String::new(),
+        };
+        let stale = stale_files(root, &def);
+        assert!(
+            stale.is_empty(),
+            "a file whose mtime equals verified should not be considered stale"
+        );
+    }
 }
