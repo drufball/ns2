@@ -17,12 +17,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 types = { path = "../types" }
 workspace = { path = "../workspace" }
 agents = { path = "../agents" }
+specs = { path = "../specs" }
 server = { path = "../server" }
 anthropic = { path = "../anthropic" }
 harness = { path = "../harness" }
 tools = { path = "../tools" }
 futures = "0.3"
 uuid = { workspace = true }
-
-[dev-dependencies]
 chrono = { workspace = true }

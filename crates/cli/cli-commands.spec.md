@@ -91,6 +91,49 @@ Flags:
 
 ---
 
+## `ns2 spec`
+
+Spec files (`.spec.md`) are design documents that declare which source files they govern. A spec file has YAML frontmatter with two fields:
+
+- `targets` — a list of glob patterns (relative to the git root) for files this spec covers
+- `verified` — an ISO 8601 UTC timestamp recording when the spec was last confirmed to match its targets
+
+Files without valid frontmatter (e.g. the raw architecture or harness spec files) are silently ignored by all `ns2 spec` commands.
+
+### `ns2 spec new`
+
+Create a new spec file at the given path with the provided targets. The file is initialized with a `targets` list and no `verified` timestamp (unverified). The body is left empty.
+
+Args:
+- `<path>` — path where the spec file should be created (e.g. `crates/myfeature/design.spec.md`)
+
+Flags:
+- `--target <glob>` — glob pattern for files this spec covers; can be repeated
+
+Prints `Created spec at <path>` on success. Errors if the file already exists.
+
+### `ns2 spec sync`
+
+Check whether any files matched by spec targets have been modified since the spec was last verified. Compares each target file's modification time against the `verified` timestamp. If `verified` is absent, every matched file is considered stale.
+
+If any stale files are found, prints an error listing each affected spec path and its offending files, then exits non-zero. If all specs are clean, exits 0 with no output.
+
+Args (optional):
+- `<path>` — path to a specific `.spec.md` file; if omitted, checks all `.spec.md` files found recursively from the git root
+
+Spec files without valid frontmatter (missing `targets`) are silently skipped.
+
+### `ns2 spec verify`
+
+Mark a spec as verified at the current time, writing the current UTC timestamp into the `verified` frontmatter field. The rest of the file (body and targets) is preserved.
+
+Args:
+- `<path>` — path to the spec file to verify (required — cannot verify all specs at once)
+
+Prints `Verified <path>` on success.
+
+---
+
 ## `ns2 workspace`
 
 ### `ns2 workspace list`
