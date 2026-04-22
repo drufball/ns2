@@ -18,7 +18,7 @@ The workspace is a flat set of crates, each owning one layer of the system. Depe
 
 **`tools`** — defines the `Tool` trait and implements the standard tools: `bash`, `read`, `write`, `edit`. Each tool is self-contained. The harness depends on this crate; tools have no knowledge of sessions or turns.
 
-**`workspace`** — git worktree management. Creates a worktree for a branch on demand; worktrees persist until explicitly removed via CLI (typically after merge). Purely a git operations crate — no knowledge of sessions.
+**`workspace`** — git worktree management. Creates a worktree for a branch on demand; worktrees persist until explicitly removed via CLI (typically after merge). Purely a git operations crate — no knowledge of sessions. Also exposes `git_root()` — a utility that returns the repository root, used by `cli` for locating config files and data directories. All git interactions belong here.
 
 **`harness`** — the agent turn loop. Depends on `anthropic`, `tools`, `db`, and `workspace`. Owns context window construction, system prompt loading and preprocessing, and tool dispatch. Emits events to a tokio broadcast channel — it has no knowledge of HTTP or subscribers. One instance runs per active session as a tokio task.
 
@@ -26,4 +26,4 @@ The workspace is a flat set of crates, each owning one layer of the system. Depe
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE and renders sessions. Thin client: all state comes from the server, nothing is computed locally.
 
-**`cli`** — the `ns2` binary. On launch, checks if a server is already running (via a PID file or a probe to localhost). If not, starts one in the background. Then launches the TUI connected to the orchestrator session. Wires crates together; contains no logic of its own.
+**`cli`** — the `ns2` binary. Depends on `workspace` for git root discovery. On launch, checks if a server is already running (via a PID file or a probe to localhost). If not, starts one in the background. Then launches the TUI connected to the orchestrator session. Wires crates together; contains no logic of its own.

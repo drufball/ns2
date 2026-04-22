@@ -72,23 +72,8 @@ enum SessionAction {
     },
 }
 
-fn git_root() -> Option<PathBuf> {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|p| PathBuf::from(p.trim()))
-}
-
 fn load_dotenv() {
-    let Some(root) = git_root() else { return };
+    let Some(root) = workspace::git_root() else { return };
     let Ok(contents) = std::fs::read_to_string(root.join(".env")) else { return };
     for line in contents.lines() {
         let line = line.trim();
@@ -106,9 +91,9 @@ fn load_dotenv() {
     }
 }
 
-fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
+pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let repo_name = git_root()
+    let repo_name = workspace::git_root()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "default".to_string());
 
@@ -176,6 +161,17 @@ fn print_session_event(event: &types::SessionEvent) {
             }
         }
     }
+}
+
+pub fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<String> {
+    buffer.push_str(new_data);
+    let mut frames = Vec::new();
+    while let Some(pos) = buffer.find("\n\n") {
+        let frame = buffer[..pos].to_string();
+        *buffer = buffer[pos + 2..].to_string();
+        frames.push(frame);
+    }
+    frames
 }
 
 async fn resolve_session_id(server: &str, id: Option<String>, name: Option<String>) -> Uuid {
@@ -353,19 +349,17 @@ async fn main() {
                         std::process::exit(1);
                     });
                     if let Ok(s) = std::str::from_utf8(&chunk) {
-                        buffer.push_str(s);
-                    }
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let line = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if let Ok(event) =
-                                serde_json::from_str::<types::SessionEvent>(data)
-                            {
-                                print_session_event(&event);
-                                // Exit on both SessionDone (success) and Error (failure) — never hang on a failed session.
-                                if matches!(event, types::SessionEvent::SessionDone { .. } | types::SessionEvent::Error { .. }) {
-                                    return;
+                        let frames = parse_sse_frames(&mut buffer, s);
+                        for line in frames {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if let Ok(event) =
+                                    serde_json::from_str::<types::SessionEvent>(data)
+                                {
+                                    print_session_event(&event);
+                                    // Exit on both SessionDone (success) and Error (failure) — never hang on a failed session.
+                                    if matches!(event, types::SessionEvent::SessionDone { .. } | types::SessionEvent::Error { .. }) {
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -398,8 +392,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use types::*;
+    use uuid::Uuid;
 
     fn make_turn() -> Turn {
         Turn {
@@ -457,5 +451,72 @@ mod tests {
         let event = types::SessionEvent::Error { message: "something went wrong".into() };
         let out = format_session_event(&event).unwrap();
         assert!(out.contains("something went wrong"));
+    }
+
+    #[test]
+    fn parse_sse_frames_one_complete_frame() {
+        let mut buf = String::new();
+        let frames = parse_sse_frames(&mut buf, "data: hello\n\n");
+        assert_eq!(frames, vec!["data: hello"]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_frames_two_frames_concatenated() {
+        let mut buf = String::new();
+        let frames = parse_sse_frames(&mut buf, "data: first\n\ndata: second\n\n");
+        assert_eq!(frames, vec!["data: first", "data: second"]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_frames_partial_frame_stays_in_buffer() {
+        let mut buf = String::new();
+        let frames = parse_sse_frames(&mut buf, "data: partial");
+        assert!(frames.is_empty());
+        assert_eq!(buf, "data: partial");
+    }
+
+    #[test]
+    fn parse_sse_frames_split_across_two_calls() {
+        let mut buf = String::new();
+        let frames1 = parse_sse_frames(&mut buf, "data: hel");
+        assert!(frames1.is_empty());
+        let frames2 = parse_sse_frames(&mut buf, "lo\n\n");
+        assert_eq!(frames2, vec!["data: hello"]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_frames_delimiter_not_consumed_into_next_frame() {
+        let mut buf = String::new();
+        let frames = parse_sse_frames(&mut buf, "data: a\n\ndata: b\n\n");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0], "data: a");
+        assert_eq!(frames[1], "data: b");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn data_dir_and_pid_contains_port_and_repo_name() {
+        let port: u16 = 19876;
+        let tmp = std::env::temp_dir().join("ns2-test-home");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", tmp.to_str().unwrap());
+
+        let (data_dir, pid_file) = data_dir_and_pid(port);
+
+        assert!(
+            data_dir.to_string_lossy().contains(".ns2"),
+            "data_dir should contain .ns2"
+        );
+        assert!(
+            pid_file.to_string_lossy().contains("19876"),
+            "pid_file should contain the port number"
+        );
+        assert!(
+            pid_file.to_string_lossy().ends_with(".pid"),
+            "pid_file should end with .pid"
+        );
     }
 }

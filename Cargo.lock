@@ -393,6 +393,7 @@ dependencies = [
  "tools",
  "types",
  "uuid",
+ "workspace",
 ]
 
 [[package]]
@@ -3415,6 +3416,10 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "workspace"
+version = "0.1.0"
 
 [[package]]
 name = "writeable"

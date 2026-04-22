@@ -293,10 +293,13 @@ mod tests {
         };
         db.create_session(&session).await.unwrap();
         let fetched = db.get_session(session.id).await.unwrap();
+        let now = Utc::now();
         assert_eq!(fetched.id, session.id);
         assert_eq!(fetched.name, "test");
         assert_eq!(fetched.status, types::SessionStatus::Created);
         assert!(fetched.agent.is_none());
+        assert!((fetched.created_at - now).num_seconds().abs() < 5);
+        assert!((fetched.updated_at - now).num_seconds().abs() < 5);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -356,7 +359,9 @@ mod tests {
             .await
             .unwrap();
         let fetched = db.get_session(session.id).await.unwrap();
+        let now = Utc::now();
         assert_eq!(fetched.status, types::SessionStatus::Running);
+        assert!((fetched.updated_at - now).num_seconds().abs() < 5);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

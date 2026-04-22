@@ -156,6 +156,15 @@ fn server_does_not_depend_on_tui_or_cli() {
     }
 }
 
+/// `workspace` is a pure git operations crate — must not depend on db, anthropic, harness, server, tui, or cli.
+#[test]
+fn workspace_has_no_application_deps() {
+    let graph = build_dep_graph();
+    for forbidden in &["db", "anthropic", "harness", "server", "tui", "cli"] {
+        assert_no_dep(&graph, "workspace", forbidden);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Coverage-ignore allowlist helpers
 // ---------------------------------------------------------------------------
@@ -409,6 +418,14 @@ fn direct_dep_edges_match_spec() {
     assert_no_direct_dep(&graph, "anthropic", "tools");
     assert_no_direct_dep(&graph, "anthropic", "harness");
     assert_no_direct_dep(&graph, "anthropic", "server");
+
+    // workspace -> no application layer
+    assert_no_direct_dep(&graph, "workspace", "db");
+    assert_no_direct_dep(&graph, "workspace", "anthropic");
+    assert_no_direct_dep(&graph, "workspace", "harness");
+    assert_no_direct_dep(&graph, "workspace", "server");
+    assert_no_direct_dep(&graph, "workspace", "tui");
+    assert_no_direct_dep(&graph, "workspace", "cli");
 
     // harness -> no HTTP layer
     assert_no_direct_dep(&graph, "harness", "server");

@@ -962,6 +962,121 @@ mod tests {
         );
     }
 
+    // --- event_from serialization ---
+
+    #[tokio::test]
+    async fn test_event_from_serializes_session_event() {
+        let session_id = Uuid::new_v4();
+        let ev = SessionEvent::SessionDone { session_id };
+        let sse_event = event_from(&ev);
+
+        let stream = futures::stream::once(async move { Ok::<Event, Infallible>(sse_event) });
+        let resp = Sse::new(stream).into_response();
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        let data_line = raw
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .expect("SSE body must contain a data: line");
+        let json = &data_line["data: ".len()..];
+        let decoded: SessionEvent = serde_json::from_str(json).expect("must deserialize back");
+        assert!(
+            matches!(decoded, SessionEvent::SessionDone { session_id: sid } if sid == session_id)
+        );
+    }
+
+    // --- has_message boundary ---
+
+    #[tokio::test]
+    async fn test_empty_initial_message_does_not_spawn_harness() {
+        let (app, state) = test_app_with_state().await;
+
+        let resp = app
+            .oneshot(
+                create_session_req(serde_json::json!({"initial_message": ""})).await,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let sessions = state.sessions.lock().await;
+        assert!(sessions.is_empty(), "empty initial_message must not spawn a harness");
+    }
+
+    #[tokio::test]
+    async fn test_nonempty_initial_message_spawns_harness() {
+        let (app, state) = test_app_with_state().await;
+
+        let resp = app
+            .oneshot(
+                create_session_req(serde_json::json!({"initial_message": "hello"})).await,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let sessions = state.sessions.lock().await;
+        assert!(
+            sessions.contains_key(&session_id),
+            "non-empty initial_message must spawn a harness"
+        );
+    }
+
+    // --- terminal session history includes SessionDone ---
+
+    #[tokio::test]
+    async fn test_completed_session_events_includes_session_done() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "done-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/events", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        let has_session_done = raw
+            .lines()
+            .filter(|l| l.starts_with("data: "))
+            .any(|l| {
+                let json = &l["data: ".len()..];
+                serde_json::from_str::<SessionEvent>(json)
+                    .map(|ev| matches!(ev, SessionEvent::SessionDone { .. }))
+                    .unwrap_or(false)
+            });
+        assert!(has_session_done, "completed session events must include SessionDone");
+    }
+
     /// A Completed session must still accept new messages via POST /sessions/:id/messages.
     /// This verifies that the broadcast sender remains alive in the map after completion.
     #[tokio::test]

@@ -18,4 +18,4 @@
 
 [[file_ignore]]
 path = "cli/src/main"
-reason = "Binary entry point that spawns the server and TUI; no application logic to unit-test"
+reason = "main() is a command dispatcher with HTTP calls and process spawning; testable helpers (parse_sse_frames, data_dir_and_pid, format_session_event) are extracted and covered separately"
