@@ -16,12 +16,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Clippy
         run: cargo clippy -- -D warnings
 
-      - name: Tests
-        run: cargo test
+      - name: Coverage
+        run: cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'cli/src/main'

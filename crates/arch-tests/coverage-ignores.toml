@@ -1,0 +1,7 @@
+# Each entry must have: file (workspace-relative path), item (the name of the
+# function/impl/block decorated), and reason (why coverage is not required).
+
+# [[ignore]]
+# file = "crates/cli/src/main.rs"
+# item = "main"
+# reason = "Binary entry point, not meaningful to unit-test"
