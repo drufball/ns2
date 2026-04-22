@@ -293,13 +293,12 @@ mod tests {
         };
         db.create_session(&session).await.unwrap();
         let fetched = db.get_session(session.id).await.unwrap();
-        let now = Utc::now();
         assert_eq!(fetched.id, session.id);
         assert_eq!(fetched.name, "test");
         assert_eq!(fetched.status, types::SessionStatus::Created);
         assert!(fetched.agent.is_none());
-        assert!((fetched.created_at - now).num_seconds().abs() < 5);
-        assert!((fetched.updated_at - now).num_seconds().abs() < 5);
+        assert_eq!(fetched.created_at.timestamp(), session.created_at.timestamp());
+        assert_eq!(fetched.updated_at.timestamp(), session.updated_at.timestamp());
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -355,13 +354,15 @@ mod tests {
             updated_at: Utc::now(),
         };
         db.create_session(&session).await.unwrap();
+        let before_update = Utc::now();
         db.update_session_status(session.id, types::SessionStatus::Running)
             .await
             .unwrap();
         let fetched = db.get_session(session.id).await.unwrap();
-        let now = Utc::now();
+        let after_update = Utc::now();
         assert_eq!(fetched.status, types::SessionStatus::Running);
-        assert!((fetched.updated_at - now).num_seconds().abs() < 5);
+        assert!(fetched.updated_at.timestamp() >= before_update.timestamp());
+        assert!(fetched.updated_at.timestamp() <= after_update.timestamp());
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
