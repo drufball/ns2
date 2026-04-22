@@ -4,10 +4,12 @@ members = [
     "crates/db",
     "crates/anthropic",
     "crates/tools",
+    "crates/workspace",
     "crates/harness",
     "crates/server",
     "crates/tui",
     "crates/cli",
+    "crates/arch-tests",
 ]
 resolver = "2"
 

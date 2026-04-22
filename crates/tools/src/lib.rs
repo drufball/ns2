@@ -369,6 +369,19 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::InvalidInput(_)));
     }
 
+    #[tokio::test]
+    async fn bash_tool_signal_killed_returns_exit_error_minus_one() {
+        let tool = BashTool;
+        let result = tool
+            .execute(serde_json::json!({"command": "kill -9 $$"}))
+            .await;
+        assert!(
+            matches!(result, Err(Error::ExitError { code: -1, .. })),
+            "expected ExitError with code -1, got: {:?}",
+            result
+        );
+    }
+
     #[test]
     fn bash_tool_definition_has_correct_name() {
         let tool = BashTool;

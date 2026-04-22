@@ -1,0 +1,11 @@
+[package]
+name = "arch-tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+
+[dev-dependencies]
+cargo_metadata = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -253,6 +253,44 @@ async fn test_malformed_tool_input_json_returns_error() {
 }
 
 #[tokio::test]
+async fn test_text_content_block_start_does_not_corrupt_output() {
+    // ContentBlockStart for a text block hits the catch-all arm in BlockAssembler::process.
+    // This test ensures that arm is present and harmless: the text assembled from deltas
+    // must match exactly, with no extra empty block inserted by a mishandled start event.
+    let text_block_sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello \"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(text_block_sse),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = Client::with_base_url("test-key".into(), mock_server.uri());
+    let response = client.complete(make_request()).await.unwrap();
+
+    assert_eq!(response.content.len(), 1, "expected exactly one content block");
+    match &response.content[0] {
+        ContentBlock::Text { text } => assert_eq!(text, "hello world"),
+        other => panic!("expected Text block, got: {:?}", other),
+    }
+    assert_eq!(response.input_tokens, 8);
+    assert_eq!(response.output_tokens, 3);
+}
+
+#[tokio::test]
 async fn test_tool_result_in_message_history_serializes_correctly() {
     // Verify that ToolResult content blocks serialize with the correct wire format
     use wiremock::matchers::body_partial_json;

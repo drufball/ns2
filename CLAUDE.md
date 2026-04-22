@@ -13,7 +13,7 @@ A CLI coding agent + orchestration framework. Core architecture is a localhost H
 
 ## Architecture
 
-See @architecture.spec.md for the full crate structure and design philosophy.
+See @crates/arch-tests/architecture.spec.md for the full crate structure and design philosophy.
 
 **Verification loops are paramount:** unit tests, integration tests, compile, and clippy must pass before any change is considered done. All new features *MUST* be testable via unit tests and manual testing by coding agents.
 

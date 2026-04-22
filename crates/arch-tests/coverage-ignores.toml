@@ -1,0 +1,21 @@
+# Function-level coverage exclusions.
+# Each [[ignore]] entry corresponds to a #[coverage(off)] annotation in source.
+# Adding #[coverage(off)] anywhere without a registered entry here fails cargo test.
+#
+# [[ignore]]
+# file = "crates/example/src/lib.rs"   # workspace-relative path
+# item = "fmt"                          # decorated function or impl block
+# reason = "Display impl, no assertions possible"
+
+# File-level coverage exclusions.
+# Each [[file_ignore]] entry corresponds to a --ignore-filename-regex pattern
+# passed to cargo llvm-cov. The path is matched as a regex substring.
+# scripts/verify.sh reads this table to build the flags dynamically.
+#
+# [[file_ignore]]
+# path = "crates/example/src/main.rs"  # regex matched against file path
+# reason = "..."
+
+[[file_ignore]]
+path = "cli/src/main"
+reason = "main() is a command dispatcher with HTTP calls and process spawning; testable helpers (parse_sse_frames, data_dir_and_pid, format_session_event) are extracted and covered separately"

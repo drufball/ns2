@@ -1463,6 +1463,65 @@ mod tests {
         );
     }
 
+    // --- Token count tests ---
+
+    struct KnownTokenClient;
+
+    #[async_trait]
+    impl AnthropicClient for KnownTokenClient {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            Ok(MessageResponse {
+                content: vec![ContentBlock::Text { text: "response".into() }],
+                stop_reason: "end_turn".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_assistant_turn_token_count_equals_input_plus_output() {
+        let session = make_session();
+
+        use std::sync::Mutex;
+        let turns_store: Arc<Mutex<Vec<types::Turn>>> = Arc::new(Mutex::new(vec![]));
+        let turns_store_c = Arc::clone(&turns_store);
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(move |turn| {
+            turns_store_c.lock().unwrap().push(turn.clone());
+            Ok(())
+        });
+        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
+        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            system: None,
+            tools: vec![],
+        };
+        let client = Arc::new(KnownTokenClient);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let stored = turns_store.lock().unwrap();
+        let assistant_turn = stored.iter().find(|t| t.token_count.is_some());
+        assert!(assistant_turn.is_some(), "expected an assistant turn with token_count set");
+        assert_eq!(
+            assistant_turn.unwrap().token_count,
+            Some(150),
+            "token_count should be input_tokens (100) + output_tokens (50) = 150"
+        );
+    }
+
     // --- Fix 2e: history reconstructed after cold restart ---
 
     /// A client that captures all messages it receives on its first call.

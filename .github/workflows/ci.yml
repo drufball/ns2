@@ -16,12 +16,35 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Clippy
         run: cargo clippy -- -D warnings
 
-      - name: Tests
-        run: cargo test
+      - name: Coverage
+        run: |
+          IGNORE_FLAGS=$(python3 - <<'EOF'
+          import sys
+          try:
+              import tomllib
+          except ImportError:
+              try:
+                  import tomli as tomllib
+              except ImportError:
+                  sys.exit(0)
+          with open('crates/arch-tests/coverage-ignores.toml', 'rb') as f:
+              data = tomllib.load(f)
+          flags = []
+          for e in data.get('file_ignore', []):
+              flags += ['--ignore-filename-regex', e['path']]
+          print(' '.join(flags))
+          EOF
+          )
+          # shellcheck disable=SC2086
+          cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
