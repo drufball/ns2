@@ -171,6 +171,8 @@ fn workspace_root() -> PathBuf {
 struct CoverageIgnores {
     #[serde(default)]
     ignore: Vec<IgnoreEntry>,
+    #[serde(default)]
+    file_ignore: Vec<FileIgnoreEntry>,
 }
 
 #[derive(serde::Deserialize)]
@@ -178,6 +180,13 @@ struct IgnoreEntry {
     file: String,
     #[allow(dead_code)]
     item: String,
+    #[allow(dead_code)]
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FileIgnoreEntry {
+    path: String,
     #[allow(dead_code)]
     reason: String,
 }
@@ -305,6 +314,68 @@ fn test_no_stale_coverage_ignores() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Every [[file_ignore]] entry in coverage-ignores.toml must point to a file that
+/// actually exists in the workspace, so stale entries don't silently widen the exclusion.
+#[test]
+fn test_no_stale_file_ignores() {
+    let root = workspace_root();
+    let ignores = load_coverage_ignores();
+
+    let stale: Vec<&str> = ignores
+        .file_ignore
+        .iter()
+        .filter(|e| {
+            // The path is a regex substring — check that at least one real file matches it.
+            let pattern = &e.path;
+            !walkdir_any_match(&root, pattern)
+        })
+        .map(|e| e.path.as_str())
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "Stale [[file_ignore]] entries in coverage-ignores.toml \
+         (no file in the workspace matches the path pattern):\n\
+         {}\n\n\
+         Remove or update these entries.",
+        stale
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+fn walkdir_any_match(workspace_root: &Path, substring: &str) -> bool {
+    let crates_dir = workspace_root.join("crates");
+    walkdir_match_inner(&crates_dir, workspace_root, substring)
+}
+
+fn walkdir_match_inner(dir: &Path, workspace_root: &Path, substring: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(path) = entry.path().canonicalize() else {
+            continue;
+        };
+        if path.is_dir() {
+            if walkdir_match_inner(&path, workspace_root, substring) {
+                return true;
+            }
+        } else {
+            let rel = path
+                .strip_prefix(workspace_root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if rel.contains(substring) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Verify direct dependency edges match the spec — no direct dep means no accidental

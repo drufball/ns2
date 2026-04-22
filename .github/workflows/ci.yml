@@ -28,4 +28,15 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Coverage
-        run: cargo llvm-cov --fail-under-lines 85 --ignore-filename-regex 'cli/src/main'
+        run: |
+          IGNORE_FLAGS=$(python3 -c "
+          import tomllib, sys
+          with open('crates/arch-tests/coverage-ignores.toml', 'rb') as f:
+              data = tomllib.load(f)
+          flags = []
+          for e in data.get('file_ignore', []):
+              flags += ['--ignore-filename-regex', e['path']]
+          print(' '.join(flags))
+          ")
+          # shellcheck disable=SC2086
+          cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
