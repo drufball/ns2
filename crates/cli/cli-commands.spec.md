@@ -2,164 +2,426 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-23T16:05:41Z
+verified: 2026-04-23T19:56:21Z
 ---
 
 
 # CLI Commands Spec
 
-## Overview
-
-All commands follow a `ns2 <noun> <verb>` structure. Running `ns2` with no arguments attaches to the orchestrator session.
+This spec serves as feature reference and `--help` specification. The code in `main.rs` should always match.
 
 ---
 
-## `ns2 session`
+### `ns2 --help`
 
-### `ns2 session list`
+```
+ns2 is a session-based agent orchestration tool.
 
-List all sessions. Output columns: `id`, `name`, `agent type`, `status`, `last activity`.
+Concepts:
+  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves
+  session  a single task run — send messages in, the agent processes and responds
 
-Default: last 24h, up to 10 sessions. Sort order: `failed` → `waiting` → `running` → `completed` → `cancelled`, then by last update within each group.
+Typical workflow:
+  ns2 server start
+  ns2 agent list
+  id=$(ns2 session new --agent swe --message "...")
+  ns2 session tail --id "$id"         # blocks until done; exits non-zero on failure
+  ns2 session send --id "$id" --message "..."
 
-Flags (all optional):
-- `--status <status>` — filter by status (`running`, `waiting`, `completed`, `failed`, `cancelled`)
-- `--agent <type>` — filter by agent type
-- `--since <duration>` — filter to sessions active within a duration (default: `24h`). Format: `XXd:YYh:ZZm` with any field optional (e.g. `1d`, `2h:30m`, `1d:12h`).
-- `--limit <n>` — max sessions to return (default: 10)
+Usage: ns2 [OPTIONS] <COMMAND>
 
-### `ns2 session new`
+Commands:
+  server   Localhost server. Must be running for all commands.
+  session  Create agent sessions to complete tasks.
+  agent    Create and list agents to use in sessions.
+  spec     Create design docs and verify they are in sync.
+  help     Print this message or the help of the given subcommand(s)
 
-Create a new agent session. Prints the session ID on success.
+Options:
+      --server <SERVER>
+          Base URL of the ns2 server.
+          
+          [default: http://localhost:9876]
 
-Flags:
-- `--name <name>` — human-readable label for the session
-- `--agent <type>` — agent type; defaults to `coding`
-- `--message <message>` — opening message to kick off the session. If omitted, session is created in `waiting` state.
-
-### `ns2 session attach`
-
-Attach the TUI to a session. Defaults to the orchestrator session if no flags provided.
-
-Flags:
-- `--id <id>` — attach by session ID
-- `--name <name>` — attach by session name
-
-### `ns2 session tail`
-
-Print the most recent content blocks from a session to stdout without attaching the TUI. Useful for the orchestrator agent to check on sessions programmatically.
-
-Flags:
-- `--id <id>` — identify by session ID
-- `--name <name>` — identify by session name
-- `--turns <n>` — number of recent turns to show (default: 5)
-
-### `ns2 session stop`
-
-Cancel a running or waiting session.
-
-Flags:
-- `--id <id>` — identify by session ID
-- `--name <name>` — identify by session name
-
-### `ns2 session send`
-
-Queue a message to a session without attaching.
-
-Flags:
-- `--id <id>` — identify by session ID
-- `--name <name>` — identify by session name
-- `--message <message>` — message to queue
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
 ---
 
-## `ns2 agent`
+### `ns2 server --help`
 
-### `ns2 agent list`
+```
+Hosts session state and agent loops on localhost — must be running before any other commands work.
 
-List all available agent types from `.ns2/agents/`, showing name and description from frontmatter. No flags.
+Usage: ns2 server <COMMAND>
 
-### `ns2 agent new`
+Commands:
+  start  Start the ns2 server.
+  stop   Stop a running server.
+  help   Print this message or the help of the given subcommand(s)
 
-Create a new agent system prompt file in `.ns2/agents/` and open it in `$EDITOR`.
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
-Flags:
-- `--name <name>` — agent type name (becomes the filename and frontmatter `name`)
-- `--description <description>` — short description written into frontmatter
-- `--body <body>` — initial system prompt body; if omitted, file opens empty in `$EDITOR`
+### `ns2 server start --help`
 
-### `ns2 agent edit`
+```
+Start the ns2 server.
 
-Updates the provided fields. All flags optional — if none provided, errors.
+Usage: ns2 server start [OPTIONS]
 
-Flags:
-- `--name <name>` — agent type to edit
-- `--description <description>` — update the frontmatter description
-- `--body <body>` — replace the prompt body directly.
+Options:
+      --port <PORT>
+          Port to listen on. Change this if the default port is occupied.
+          
+          [default: 9876]
 
----
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
-## `ns2 spec`
+### `ns2 server stop --help`
 
-Spec files (`.spec.md`) are design documents that declare which source files they govern. A spec file has YAML frontmatter with the following fields:
+```
+Stop a running server.
 
-- `targets` — a list of glob patterns (relative to the git root) for files this spec covers
-- `verified` — an ISO 8601 UTC timestamp recording when the spec was last confirmed to match its targets
-- `severity` — optional, `error` (default) or `warning`. Warning specs print a notice when stale but do not cause `sync` to exit non-zero (unless `--error-on-warnings` is passed).
+PID file: ~/.ns2/<repo-name>/server-<port>.pid (default: ~/.ns2/<repo-name>/server-9876.pid).
 
-Files without valid frontmatter (e.g. the raw architecture or harness spec files) are silently ignored by all `ns2 spec` commands.
+Usage: ns2 server stop
 
-### `ns2 spec new`
-
-Create a new spec file at the given path with the provided targets. The file is initialized with a `targets` list and no `verified` timestamp (unverified). The body is left empty.
-
-Args:
-- `<path>` — path where the spec file should be created (e.g. `crates/myfeature/design.spec.md`)
-
-Flags:
-- `--target <glob>` — glob pattern for files this spec covers; can be repeated
-- `--severity <error|warning>` — severity level for stale detection (default: `error`)
-
-Prints `Created spec at <path>` on success. Errors if the file already exists.
-
-### `ns2 spec sync`
-
-Check whether any files matched by spec targets have been modified since the spec was last verified. Compares each target file's modification time against the `verified` timestamp. If `verified` is absent, every matched file is considered stale.
-
-If any stale files are found, prints an error listing each affected spec path and its offending files, then exits non-zero. If all specs are clean, exits 0 with no output.
-
-Args (optional):
-- `<path>` — path to a specific `.spec.md` file; if omitted, checks all `.spec.md` files found recursively from the git root
-
-Flags (all optional):
-- `--error-on-warnings` — treat `warning`-severity specs as errors; exits non-zero if any spec (regardless of severity) has stale files. Intended for CI.
-
-Spec files without valid frontmatter (missing `targets`) are silently skipped.
-
-### `ns2 spec verify`
-
-Mark a spec as verified at the current time, writing the current UTC timestamp into the `verified` frontmatter field. The rest of the file (body and targets) is preserved.
-
-Args:
-- `<path>` — path to the spec file to verify (required — cannot verify all specs at once)
-
-Prints `Verified <path>` on success.
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
 ---
 
-## `ns2 workspace`
+### `ns2 session --help`
 
-### `ns2 workspace list`
+```
+Sessions are how you get work done. Create one with an agent type and initial message; the agent processes it and produces output. Use tail to watch progress; use send to give follow-up instructions.
 
-List all worktrees, showing branch, path, and the status of the current session on that branch.
+Lifecycle:
+  created    session exists but no message sent yet; agent not started
+  running    agent is active and processing messages
+  completed  agent finished successfully
+  failed     agent ended with an error (check tail output for details)
+  cancelled  stopped manually via session stop
 
-Flags:
-- `--status <status>` — filter by current session status (`running`, `waiting`, `completed`, `failed`, `cancelled`)
+Usage: ns2 session <COMMAND>
 
-### `ns2 workspace clean`
+Commands:
+  list  List recent sessions.
+  new   Start a new agent session and print its ID to stdout.
+  tail  Stream a session's output to stdout.
+  send  Queue a message to a session.
+  stop  Cancel a running or waiting session.
+  help  Print this message or the help of the given subcommand(s)
 
-Delete a worktree manually, typically after the branch has been merged.
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
-Flags:
-- `--branch <branch>` — branch whose worktree to remove
-- `--force` — remove even if the branch hasn't been merged
+### `ns2 session list --help`
+
+```
+List recent sessions.
+
+Output (one row per session, newest first):
+  id                                    name                  status      created_at
+  550e8400-e29b-41d4-a716-446655440000  mytask                running     2026-04-23 18:36:25 UTC
+
+Use the id field with --id in tail, send, and stop.
+
+Usage: ns2 session list [OPTIONS]
+
+Options:
+      --status <STATUS>
+          Show only sessions in this state. Values: created, running, completed, failed, cancelled.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 session new --help`
+
+```
+Start a new agent session. Session ID is printed to stdout (suitable for capture via `$(...)`). Human-readable confirmation to stderr. If `--message` is provided, the agent starts immediately. Without `--message`, the session remains in `created` state — useful when you want to set up the session before sending the first message.
+
+Usage: ns2 session new [OPTIONS]
+
+Options:
+      --name <NAME>
+          Optional human-readable label. Sessions are always identifiable by UUID via --id (printed to stdout on creation).
+
+      --agent <AGENT>
+          Which agent type should run the session. Run `ns2 agent list` to see available types. If omitted, no system prompt is used.
+
+      --message <MESSAGE>
+          The opening task or instruction for the agent. If omitted, the session waits for your first `session send`.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 session tail --help`
+
+```
+Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.
+
+Output format:
+  [turn <uuid>]          new agent turn starting
+  <text>                 model's text response, streamed
+  [tool: name(input)]    tool call
+  [result: content]      tool result
+  [done]                 session completed successfully
+  [error] <message>      session failed (also to stderr; exits non-zero)
+
+Requires --id or --name.
+
+Usage: ns2 session tail [OPTIONS]
+
+Options:
+      --id <ID>
+          Identify session by UUID (preferred). The UUID is printed to stdout by `session new`.
+
+      --name <NAME>
+          Identify session by name (alternative to --id).
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 session send --help`
+
+```
+Queue a message to a session.
+
+Use this to give follow-up instructions, provide additional context, or correct an agent that's going down an incorrect path. The message is queued immediately; the agent picks it up on its next turn. Messages can only be sent to sessions that are in the `created` or `running` state.
+
+Usage: ns2 session send [OPTIONS] --message <MESSAGE>
+
+Options:
+      --id <ID>
+          Identify session by UUID (preferred).
+
+      --name <NAME>
+          Identify session by name (alternative to --id).
+
+      --message <MESSAGE>
+          The message to queue. Required.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 session stop --help`
+
+```
+Cancel a running or created session.
+
+Use this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `completed` or `cancelled`.
+
+Usage: ns2 session stop [OPTIONS]
+
+Options:
+      --id <ID>
+          Identify session by UUID (preferred).
+
+      --name <NAME>
+          Identify session by name (alternative to --id).
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+---
+
+### `ns2 agent --help`
+
+```
+Agents define how a session behaves. Each agent is a Markdown file in .ns2/agents/ with three fields:
+
+  name         the identifier used in `session new --agent <name>`
+  description  a one-line summary shown in `agent list`; helps you pick the right agent for a task
+  body         the system prompt — sent to the model at the start of every session of this type
+
+When a session starts, the agent's body is loaded as the system prompt before the first user message. An agent with an empty body runs with no system prompt.
+
+Usage: ns2 agent <COMMAND>
+
+Commands:
+  list  List all available agent types.
+  new   Create a new agent type.
+  edit  Update an existing agent's description or system prompt.
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 agent list --help`
+
+```
+List all available agent types.
+
+Shows the name and description of each agent from `.ns2/agents/`. Run this to find valid values for `--agent` in `session new`. No flags.
+
+Usage: ns2 agent list
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 agent new --help`
+
+```
+Create a new agent type at `.ns2/agents/<name>.md`. Standard usage provides name, description, and body via flags.
+
+Always pass `--body` when running non-interactively — without it the command opens `$EDITOR` and blocks until the editor exits.
+
+Usage: ns2 agent new [OPTIONS]
+
+Options:
+      --name <NAME>
+          The agent type name. Becomes the filename and the value you pass to `session new --agent`. Required.
+
+      --description <DESCRIPTION>
+          A one-line summary shown in `agent list`. Helps you pick the right agent for a task.
+
+      --body <BODY>
+          The system prompt body. Required for non-interactive use — omitting opens `$EDITOR` and blocks.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 agent edit --help`
+
+```
+Update an existing agent's description or system prompt.
+
+Modifies the specified fields in place; fields you don't pass are unchanged. At least one of `--description` or `--body` must be provided.
+
+Usage: ns2 agent edit [OPTIONS]
+
+Options:
+      --name <NAME>
+          The agent type to edit. Required.
+
+      --description <DESCRIPTION>
+          Replace the frontmatter description.
+
+      --body <BODY>
+          Replace the system prompt body entirely.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+---
+
+### `ns2 spec --help`
+
+```
+Specs are Markdown files that describe the intended behavior of a part of the codebase and declare
+which source files implement it. They serve two purposes: human-readable design documentation for
+understanding and guiding the implementation, and a staleness check that fails when the code changes without the spec being reviewed.
+
+Each spec file has YAML frontmatter:
+  targets   glob patterns for the source files this spec governs (relative to git root)
+  verified  timestamp of the last review; unset means the spec has never been verified
+  severity  error (default) or warning — controls whether sync exits non-zero when stale
+
+Lifecycle:
+  unverified  spec was just created or targets have never been reviewed
+  stale       one or more target files changed after the verified timestamp
+  clean       all target files are older than the verified timestamp
+
+Use `spec sync` in CI to enforce that specs are always kept in sync with the code they describe.
+
+Usage: ns2 spec <COMMAND>
+
+Commands:
+  new     Create a new spec file.
+  sync    Check whether spec targets have been modified since last verified.
+  verify  Mark a spec as verified at the current time.
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 spec new --help`
+
+```
+Create a new spec file.
+
+Initializes the file with the given targets and no `verified` timestamp. The body is left empty for you to fill in. Errors if the file already exists.
+
+Usage: ns2 spec new [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+          Where to create the spec. Relative to git root.
+
+Options:
+      --target <TARGETS>...
+          A glob pattern for files this spec covers. Repeat for multiple targets.
+
+      --severity <SEVERITY>
+          How stale detection is reported (default: error). Use `warning` for specs that document aspirational design.
+          
+          [default: error]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 spec sync --help`
+
+```
+Check whether spec targets have been modified since the spec was last verified.
+
+Prints an error for each stale spec and exits non-zero if any error-severity spec is stale. Exits 0 with no output if everything is clean.
+
+Use this in CI to catch unreviewed drift, or before starting work to understand which specs are out of date.
+
+Usage: ns2 spec sync [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          A specific `.spec.md` file or directory to check. If omitted, checks all `.spec.md` files recursively from the git root.
+
+Options:
+      --error-on-warnings
+          Treat `warning`-severity specs as errors. Use in CI when you want a strict check.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 spec verify --help`
+
+```
+Mark a spec as verified at the current time.
+
+Writes the current UTC timestamp into the `verified` frontmatter field. Run this after reviewing or updating a spec's targets to confirm the spec is in sync with the code. The body and targets are preserved.
+
+Usage: ns2 spec verify <PATH>
+
+Arguments:
+  <PATH>
+          The spec file to verify. Required — you must verify specs one at a time.
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```

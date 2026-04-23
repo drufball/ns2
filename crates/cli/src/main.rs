@@ -7,8 +7,10 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "ns2")]
+#[command(about = "A session-based agent orchestration tool.")]
+#[command(long_about = "ns2 is a session-based agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  session  a single task run — send messages in, the agent processes and responds\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 session new --agent swe --message \"...\")\n  ns2 session tail --id \"$id\"         # blocks until done; exits non-zero on failure\n  ns2 session send --id \"$id\" --message \"...\"")]
 struct Cli {
-    #[arg(long, default_value = "http://localhost:9876")]
+    #[arg(long, default_value = "http://localhost:9876", help = "Base URL of the ns2 server.")]
     server: String,
 
     #[command(subcommand)]
@@ -17,18 +19,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Localhost server. Must be running for all commands.", long_about = "Hosts session state and agent loops on localhost — must be running before any other commands work.")]
     Server {
         #[command(subcommand)]
         action: ServerAction,
     },
+    #[command(about = "Create agent sessions to complete tasks.", long_about = "Sessions are how you get work done. Create one with an agent type and initial message; the agent processes it and produces output. Use tail to watch progress; use send to give follow-up instructions.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop")]
     Session {
         #[command(subcommand)]
         action: SessionAction,
     },
+    #[command(about = "Create and list agents to use in sessions.", long_about = "Agents define how a session behaves. Each agent is a Markdown file in .ns2/agents/ with three fields:\n\n  name         the identifier used in `session new --agent <name>`\n  description  a one-line summary shown in `agent list`; helps you pick the right agent for a task\n  body         the system prompt — sent to the model at the start of every session of this type\n\nWhen a session starts, the agent's body is loaded as the system prompt before the first user message. An agent with an empty body runs with no system prompt.")]
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
+    #[command(about = "Create design docs and verify they are in sync.", long_about = "Specs are Markdown files that describe the intended behavior of a part of the codebase and declare\nwhich source files implement it. They serve two purposes: human-readable design documentation for\nunderstanding and guiding the implementation, and a staleness check that fails when the code changes\nwithout the spec being reviewed.\n\nEach spec file has YAML frontmatter:\n  targets   glob patterns for the source files this spec governs (relative to git root)\n  verified  timestamp of the last review; unset means the spec has never been verified\n  severity  error (default) or warning — controls whether sync exits non-zero when stale\n\nLifecycle:\n  unverified  spec was just created or targets have never been reviewed\n  stale       one or more target files changed after the verified timestamp\n  clean       all target files are older than the verified timestamp\n\nUse `spec sync` in CI to enforce that specs are always kept in sync with the code they describe.")]
     Spec {
         #[command(subcommand)]
         action: SpecAction,
@@ -37,85 +43,101 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    #[command(about = "List all available agent types.", long_about = "List all available agent types.\n\nShows the name and description of each agent from `.ns2/agents/`. Run this to find valid values for `--agent` in `session new`. No flags.")]
     List,
+    #[command(about = "Create a new agent type.", long_about = "Create a new agent type at `.ns2/agents/<name>.md`. Standard usage provides name, description, and body via flags.\n\nAlways pass `--body` when running non-interactively — without it the command opens `$EDITOR` and blocks until the editor exits.")]
     New {
-        #[arg(long)]
+        #[arg(long, help = "The agent type name. Becomes the filename and the value you pass to `session new --agent`. Required.")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "A one-line summary shown in `agent list`. Helps you pick the right agent for a task.")]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "The system prompt body. Required for non-interactive use — omitting opens `$EDITOR` and blocks.")]
         body: Option<String>,
     },
+    #[command(about = "Update an existing agent's description or system prompt.", long_about = "Update an existing agent's description or system prompt.\n\nModifies the specified fields in place; fields you don't pass are unchanged. At least one of `--description` or `--body` must be provided.")]
     Edit {
-        #[arg(long)]
+        #[arg(long, help = "The agent type to edit. Required.")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Replace the frontmatter description.")]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Replace the system prompt body entirely.")]
         body: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum ServerAction {
+    #[command(about = "Start the ns2 server.")]
     Start {
-        #[arg(long, default_value_t = 9876)]
+        #[arg(long, default_value_t = 9876, help = "Port to listen on. Change this if the default port is occupied.")]
         port: u16,
     },
+    #[command(about = "Stop a running server.", long_about = "Stop a running server.\n\nPID file: ~/.ns2/<repo-name>/server-<port>.pid (default: ~/.ns2/<repo-name>/server-9876.pid).")]
     Stop,
 }
 
 #[derive(Subcommand)]
 enum SessionAction {
+    #[command(about = "List recent sessions.", long_about = "List recent sessions.\n\nOutput (one row per session, newest first):\n  id                                    name                  status      created_at\n  550e8400-e29b-41d4-a716-446655440000  mytask                running     2026-04-23 18:36:25 UTC\n\nUse the id field with --id in tail, send, and stop.")]
     List {
-        #[arg(long)]
+        #[arg(long, help = "Show only sessions in this state. Values: created, running, completed, failed, cancelled.")]
         status: Option<String>,
     },
+    #[command(about = "Start a new agent session and print its ID to stdout.", long_about = "Start a new agent session. Session ID is printed to stdout (suitable for capture via `$(...)`). Human-readable confirmation to stderr. If `--message` is provided, the agent starts immediately. Without `--message`, the session remains in `created` state — useful when you want to set up the session before sending the first message.")]
     New {
-        #[arg(long)]
+        #[arg(long, help = "Optional human-readable label. Sessions are always identifiable by UUID via --id (printed to stdout on creation).")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Which agent type should run the session. Run `ns2 agent list` to see available types. If omitted, no system prompt is used.")]
         agent: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "The opening task or instruction for the agent. If omitted, the session waits for your first `session send`.")]
         message: Option<String>,
     },
+    #[command(about = "Stream a session's output to stdout.", long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session completed successfully\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name.")]
     Tail {
-        #[arg(long)]
+        #[arg(long, help = "Identify session by UUID (preferred). The UUID is printed to stdout by `session new`.")]
         id: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Identify session by name (alternative to --id).")]
         name: Option<String>,
     },
+    #[command(about = "Queue a message to a session.", long_about = "Queue a message to a session.\n\nUse this to give follow-up instructions, provide additional context, or correct an agent that's going down an incorrect path. The message is queued immediately; the agent picks it up on its next turn. Messages can only be sent to sessions that are in the `created` or `running` state.")]
     Send {
-        #[arg(long)]
+        #[arg(long, help = "Identify session by UUID (preferred).")]
         id: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Identify session by name (alternative to --id).")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "The message to queue. Required.")]
         message: String,
     },
+    #[command(about = "Cancel a running or created session.", long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `completed` or `cancelled`.")]
     Stop {
-        #[arg(long)]
+        #[arg(long, help = "Identify session by UUID (preferred).")]
         id: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Identify session by name (alternative to --id).")]
         name: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum SpecAction {
+    #[command(about = "Create a new spec file.", long_about = "Create a new spec file.\n\nInitializes the file with the given targets and no `verified` timestamp (so it shows as immediately stale). The body is left empty for you to fill in. Errors if the file already exists.")]
     New {
+        #[arg(help = "Where to create the spec (e.g. `crates/myfeature/design.spec.md`). Relative to git root.")]
         path: String,
-        #[arg(long = "target", num_args = 1..)]
+        #[arg(long = "target", num_args = 1.., help = "A glob pattern for files this spec covers. Repeat for multiple targets.")]
         targets: Vec<String>,
-        #[arg(long, default_value = "error")]
+        #[arg(long, default_value = "error", help = "How stale detection is reported. Use `warning` for specs that document aspirational design.")]
         severity: String,
     },
+    #[command(about = "Check whether spec targets have been modified since last verified.", long_about = "Check whether spec targets have been modified since the spec was last verified.\n\nPrints an error for each stale spec and exits non-zero if any error-severity spec is stale. Exits 0 with no output if everything is clean.\n\nUse this in CI to catch unreviewed drift, or before starting work to understand which specs are out of date.")]
     Sync {
+        #[arg(help = "A specific `.spec.md` file or directory to check. If omitted, checks all `.spec.md` files recursively from the git root.")]
         path: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Treat `warning`-severity specs as errors. Use in CI when you want a strict check.")]
         error_on_warnings: bool,
     },
+    #[command(about = "Mark a spec as verified at the current time.", long_about = "Mark a spec as verified at the current time.\n\nWrites the current UTC timestamp into the `verified` frontmatter field. Run this after reviewing or updating a spec's targets to confirm the spec is in sync with the code. The body and targets are preserved.")]
     Verify {
+        #[arg(help = "The spec file to verify. Required — you must verify specs one at a time.")]
         path: String,
     },
 }
@@ -427,9 +449,11 @@ async fn main() {
                                     serde_json::from_str::<types::SessionEvent>(data)
                                 {
                                     print_session_event(&event);
-                                    // Exit on both SessionDone (success) and Error (failure) — never hang on a failed session.
-                                    if matches!(event, types::SessionEvent::SessionDone { .. } | types::SessionEvent::Error { .. }) {
+                                    if matches!(event, types::SessionEvent::SessionDone { .. }) {
                                         return;
+                                    }
+                                    if matches!(event, types::SessionEvent::Error { .. }) {
+                                        std::process::exit(1);
                                     }
                                 }
                             }
