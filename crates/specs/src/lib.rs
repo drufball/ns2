@@ -107,37 +107,51 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
 }
 
 pub fn stale_files(root: &Path, def: &SpecDef) -> Vec<PathBuf> {
-    let mut matched: Vec<PathBuf> = Vec::new();
-    for target in &def.targets {
+    let matched = glob_matched_files(root, &def.targets);
+
+    let verified = match def.verified {
+        None => return matched,
+        Some(v) => v,
+    };
+
+    if workspace::is_git_repo(root) {
+        let verified_str = verified.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut stale: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        stale.extend(workspace::git_files_committed_after(root, &verified_str, &matched));
+        stale.extend(workspace::git_files_locally_modified(root, &matched));
+        stale.into_iter().collect()
+    } else {
+        // Mtime fallback for non-git environments (e.g. unit tests using tempdir).
+        matched
+            .into_iter()
+            .filter(|rel| {
+                let dt: DateTime<Utc> = root
+                    .join(rel)
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(Into::into)
+                    .unwrap_or_else(|_| chrono::TimeZone::timestamp_opt(&Utc, 0, 0).unwrap());
+                dt > verified
+            })
+            .collect()
+    }
+}
+
+fn glob_matched_files(root: &Path, targets: &[String]) -> Vec<PathBuf> {
+    let mut matched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for target in targets {
         let pattern = format!("{}/{}", root.display(), target);
         let entries = match glob::glob(&pattern) {
             Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries.filter_map(|e| e.ok()) {
-            let meta = match std::fs::metadata(&entry) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let modified = match meta.modified() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let modified_dt: DateTime<Utc> = modified.into();
-            let rel = match entry.strip_prefix(root) {
-                Ok(p) => p.to_path_buf(),
-                Err(_) => entry,
-            };
-            match def.verified {
-                None => matched.push(rel),
-                Some(v) if modified_dt > v => matched.push(rel),
-                _ => {}
+            if let Ok(rel) = entry.strip_prefix(root) {
+                matched.insert(rel.to_path_buf());
             }
         }
     }
-    matched.sort();
-    matched.dedup();
-    matched
+    matched.into_iter().collect()
 }
 
 #[cfg(test)]
