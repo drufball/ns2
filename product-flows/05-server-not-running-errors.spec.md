@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-22T19:27:29Z
+verified: 2026-04-23T10:33:49Z
 ---
 
 

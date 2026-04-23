@@ -599,18 +599,45 @@ async fn main() {
                     } else {
                         git_root.join(&p)
                     };
-                    let def = specs::load_spec(&resolved).unwrap_or_else(|| {
-                        eprintln!("Error: could not load spec at {p}");
-                        std::process::exit(1);
-                    });
-                    let stale = specs::stale_files(&git_root, &def);
-                    if !stale.is_empty() {
-                        let is_error = def.severity == specs::Severity::Error || error_on_warnings;
-                        if is_error {
-                            eprint!("{}", format_sync_error(&p, &stale));
+                    if resolved.is_dir() {
+                        let all_specs = specs::list_specs(&resolved);
+                        let mut has_errors = false;
+                        for (spec_path, def) in &all_specs {
+                            let stale = specs::stale_files(&git_root, def);
+                            if !stale.is_empty() {
+                                let display_path = spec_path
+                                    .strip_prefix(&git_root)
+                                    .unwrap_or(spec_path)
+                                    .display()
+                                    .to_string();
+                                let is_error =
+                                    def.severity == specs::Severity::Error || error_on_warnings;
+                                if is_error {
+                                    eprint!("{}", format_sync_error(&display_path, &stale));
+                                    has_errors = true;
+                                } else {
+                                    eprint!("{}", format_sync_warning(&display_path, &stale));
+                                }
+                            }
+                        }
+                        if has_errors {
                             std::process::exit(1);
-                        } else {
-                            eprint!("{}", format_sync_warning(&p, &stale));
+                        }
+                    } else {
+                        let def = specs::load_spec(&resolved).unwrap_or_else(|| {
+                            eprintln!("Error: could not load spec at {p}");
+                            std::process::exit(1);
+                        });
+                        let stale = specs::stale_files(&git_root, &def);
+                        if !stale.is_empty() {
+                            let is_error =
+                                def.severity == specs::Severity::Error || error_on_warnings;
+                            if is_error {
+                                eprint!("{}", format_sync_error(&p, &stale));
+                                std::process::exit(1);
+                            } else {
+                                eprint!("{}", format_sync_warning(&p, &stale));
+                            }
                         }
                     }
                 } else {
@@ -619,8 +646,13 @@ async fn main() {
                     for (spec_path, def) in &all_specs {
                         let stale = specs::stale_files(&git_root, def);
                         if !stale.is_empty() {
-                            let display_path = spec_path.display().to_string();
-                            let is_error = def.severity == specs::Severity::Error || error_on_warnings;
+                            let display_path = spec_path
+                                .strip_prefix(&git_root)
+                                .unwrap_or(spec_path)
+                                .display()
+                                .to_string();
+                            let is_error =
+                                def.severity == specs::Severity::Error || error_on_warnings;
                             if is_error {
                                 eprint!("{}", format_sync_error(&display_path, &stale));
                                 has_errors = true;
