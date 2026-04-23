@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-22T19:18:32Z
+verified: 2026-04-23T16:05:41Z
 ---
 
 

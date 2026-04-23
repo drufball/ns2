@@ -3449,6 +3449,9 @@ dependencies = [
 [[package]]
 name = "workspace"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "writeable"

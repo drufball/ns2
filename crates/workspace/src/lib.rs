@@ -25,44 +25,32 @@ pub fn is_git_repo(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns the subset of `files` (relative to `root`) that have commits
-/// after `after_iso` (ISO 8601 UTC string).
-pub fn git_files_committed_after(root: &Path, after_iso: &str, files: &[PathBuf]) -> Vec<PathBuf> {
-    if files.is_empty() {
-        return Vec::new();
-    }
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root)
-        .args(["log", "--name-only", "--format=", &format!("--after={after_iso}"), "--"]);
-    for f in files {
-        cmd.arg(f);
-    }
-    let Ok(output) = cmd.output() else { return Vec::new() };
+/// Returns the commit hash of the last commit that touched `file` (relative to `root`),
+/// or None if the file has no commits.
+pub fn git_last_commit_for_file(root: &Path, file: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["log", "-1", "--format=%H", "--", &file.to_string_lossy()])
+        .output()
+        .ok()?;
     if !output.status.success() {
-        return Vec::new();
+        return None;
     }
-    let Ok(stdout) = String::from_utf8(output.stdout) else { return Vec::new() };
-    stdout.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect()
+    let hash = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if hash.is_empty() { None } else { Some(hash) }
 }
 
-/// Returns the subset of `files` (relative to `root`) that have uncommitted
-/// local modifications (staged or unstaged).
-pub fn git_files_locally_modified(root: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
-    if files.is_empty() {
-        return Vec::new();
+/// Returns true if `older` is an ancestor of `newer`, or they are the same commit.
+pub fn git_is_ancestor_or_equal(root: &Path, older: &str, newer: &str) -> bool {
+    if older == newer {
+        return true;
     }
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root).args(["status", "--porcelain", "--"]);
-    for f in files {
-        cmd.arg(f);
-    }
-    let Ok(output) = cmd.output() else { return Vec::new() };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let Ok(stdout) = String::from_utf8(output.stdout) else { return Vec::new() };
-    // Format: "XY filename" — first 3 chars are XY status codes + space
-    stdout.lines().filter(|l| l.len() > 3).map(|l| PathBuf::from(l[3..].trim())).collect()
+    std::process::Command::new("git")
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -77,5 +65,54 @@ mod tests {
             "git_root() should return a directory containing .git, got: {}",
             root.display()
         );
+    }
+
+    #[test]
+    fn git_last_commit_for_file_returns_none_for_untracked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("new.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        // tempdir is not a git repo, so no commit exists
+        let result = git_last_commit_for_file(tmp.path(), Path::new("new.rs"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn git_last_commit_for_file_returns_hash_for_tracked_file() {
+        let root = git_root().expect("should be inside a git repo");
+        // CLAUDE.md is always committed in this repo
+        let result = git_last_commit_for_file(&root, Path::new("CLAUDE.md"));
+        assert!(result.is_some());
+        let hash = result.unwrap();
+        assert_eq!(hash.len(), 40, "commit hash should be 40 hex chars, got: {hash}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn git_is_ancestor_or_equal_same_commit_is_true() {
+        let root = git_root().expect("should be inside a git repo");
+        let hash = git_last_commit_for_file(&root, Path::new("CLAUDE.md"))
+            .expect("CLAUDE.md should have commits");
+        assert!(git_is_ancestor_or_equal(&root, &hash, &hash));
+    }
+
+    #[test]
+    fn git_is_ancestor_or_equal_older_ancestor_is_true() {
+        let root = git_root().expect("should be inside a git repo");
+        // HEAD~1 is an ancestor of HEAD
+        let head = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let head_hash = String::from_utf8(head.stdout).unwrap().trim().to_string();
+        let parent = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "HEAD~1"])
+            .output()
+            .unwrap();
+        let parent_hash = String::from_utf8(parent.stdout).unwrap().trim().to_string();
+        assert!(git_is_ancestor_or_equal(&root, &parent_hash, &head_hash));
+        assert!(!git_is_ancestor_or_equal(&root, &head_hash, &parent_hash));
     }
 }

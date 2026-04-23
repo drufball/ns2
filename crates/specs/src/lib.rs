@@ -106,22 +106,36 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
     results
 }
 
-pub fn stale_files(root: &Path, def: &SpecDef) -> Vec<PathBuf> {
+/// Returns which target files are stale relative to `spec_path`.
+///
+/// In CI (`CI` env var set) with a git repo: uses commit ancestry — a target is stale if its
+/// last-touching commit is *not* an ancestor of the spec file's last-touching commit.
+/// Locally: compares file mtime against the `verified` timestamp in the spec frontmatter.
+pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf> {
     let matched = glob_matched_files(root, &def.targets);
 
-    let verified = match def.verified {
-        None => return matched,
-        Some(v) => v,
-    };
+    let in_ci = std::env::var("CI").is_ok();
 
-    if workspace::is_git_repo(root) {
-        let verified_str = verified.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let mut stale: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
-        stale.extend(workspace::git_files_committed_after(root, &verified_str, &matched));
-        stale.extend(workspace::git_files_locally_modified(root, &matched));
-        stale.into_iter().collect()
+    if in_ci && workspace::is_git_repo(root) {
+        let rel_spec = spec_path.strip_prefix(root).unwrap_or(spec_path);
+        let Some(spec_commit) = workspace::git_last_commit_for_file(root, rel_spec) else {
+            return matched;
+        };
+        matched
+            .into_iter()
+            .filter(|rel_target| {
+                match workspace::git_last_commit_for_file(root, rel_target) {
+                    None => true,
+                    Some(target_commit) => {
+                        !workspace::git_is_ancestor_or_equal(root, &target_commit, &spec_commit)
+                    }
+                }
+            })
+            .collect()
     } else {
-        // Mtime fallback for non-git environments (e.g. unit tests using tempdir).
+        let Some(verified) = def.verified else {
+            return matched;
+        };
         matched
             .into_iter()
             .filter(|rel| {
@@ -356,7 +370,7 @@ mod tests {
             severity: Severity::Error,
             body: String::new(),
         };
-        let stale = stale_files(root, &def);
+        let stale = stale_files(root, &root.join("spec.spec.md"), &def);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
@@ -421,7 +435,7 @@ mod tests {
             severity: Severity::Error,
             body: String::new(),
         };
-        let stale = stale_files(root, &def);
+        let stale = stale_files(root, &root.join("spec.spec.md"), &def);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
@@ -438,7 +452,7 @@ mod tests {
             severity: Severity::Error,
             body: String::new(),
         };
-        let stale = stale_files(root, &def);
+        let stale = stale_files(root, &root.join("spec.spec.md"), &def);
         assert!(stale.is_empty());
     }
 
@@ -454,7 +468,7 @@ mod tests {
             severity: Severity::Error,
             body: String::new(),
         };
-        let stale = stale_files(root, &def);
+        let stale = stale_files(root, &root.join("spec.spec.md"), &def);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], PathBuf::from("main.rs"));
     }
@@ -482,7 +496,7 @@ mod tests {
             severity: Severity::Error,
             body: String::new(),
         };
-        let stale = stale_files(root, &def);
+        let stale = stale_files(root, &root.join("spec.spec.md"), &def);
         assert!(
             stale.is_empty(),
             "a file whose mtime equals verified should not be considered stale"

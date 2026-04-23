@@ -603,7 +603,7 @@ async fn main() {
                         let all_specs = specs::list_specs(&resolved);
                         let mut has_errors = false;
                         for (spec_path, def) in &all_specs {
-                            let stale = specs::stale_files(&git_root, def);
+                            let stale = specs::stale_files(&git_root, spec_path, def);
                             if !stale.is_empty() {
                                 let display_path = spec_path
                                     .strip_prefix(&git_root)
@@ -628,7 +628,7 @@ async fn main() {
                             eprintln!("Error: could not load spec at {p}");
                             std::process::exit(1);
                         });
-                        let stale = specs::stale_files(&git_root, &def);
+                        let stale = specs::stale_files(&git_root, &resolved, &def);
                         if !stale.is_empty() {
                             let is_error =
                                 def.severity == specs::Severity::Error || error_on_warnings;
@@ -644,7 +644,7 @@ async fn main() {
                     let all_specs = specs::list_specs(&git_root);
                     let mut has_errors = false;
                     for (spec_path, def) in &all_specs {
-                        let stale = specs::stale_files(&git_root, def);
+                        let stale = specs::stale_files(&git_root, spec_path, def);
                         if !stale.is_empty() {
                             let display_path = spec_path
                                 .strip_prefix(&git_root)

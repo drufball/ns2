@@ -1,10 +1,10 @@
 ---
 name: smoke-test
 description: Run product-flow manual tests in parallel Docker containers, one per flow. Use when asked to smoke test, run manual tests, or validate product flows.
-argument-hint: "flow numbers e.g. '01 03', or omit for all"
+argument-hint: "flow numbers e.g. '01 03', or omit for all out-of-sync flows"
 ---
 
-Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise run all flows 01–12.
+Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise determine which flows are out of sync (Step 0.5) and run only those.
 
 ## Step 0: Detect repo root and build
 
@@ -32,20 +32,23 @@ ls REPO_ROOT/product-flows/.build/ns2
 
 If the binary is missing, bail immediately with: "Binary not found at product-flows/.build/ns2 — aborting."
 
-## Step 0.5: Check which flows are stale
+The built binary at `REPO_ROOT/product-flows/.build/ns2` is compiled for the container OS (Linux). For host-side `ns2` commands in subsequent steps, use the system `ns2` binary (i.e. just `ns2` — it is on PATH).
 
-Run spec sync scoped to the product-flows directory:
+## Step 0.5: Determine which flows to run
 
-    ./ns2 spec sync product-flows/
+If `$ARGUMENTS` was given, the flows to run are exactly those numbered flows — skip the rest of this step.
 
-If this exits non-zero, some flow spec files have stale targets — meaning the code
-those flows exercise has changed since the flows were last verified. List which flows
-are stale in the report header. Stale flows MUST be included in the run even if the
-user provided a specific flow subset; skip them only if they were already going to
-be skipped for other reasons (e.g. missing API key).
+Otherwise, run spec sync scoped to the product-flows directory to find out-of-sync flows:
 
-If spec sync is not available (binary missing or command fails), skip this check with
-a note in the report and continue.
+```bash
+ns2 spec sync product-flows/ 2>&1
+```
+
+Parse the output for lines matching `[error] spec product-flows/NN-` or `[warning] spec product-flows/NN-` and extract the two-digit flow numbers. These are the **stale flows** to run.
+
+- If the command fails with a non-spec-sync error (e.g. binary crash), skip this check with a note and fall back to running all flows 01–12.
+- If the command succeeds or exits non-zero but produces stale-flow output: use the stale flow numbers as the set to run.
+- If no flows are stale (command exits 0, no stale output): report "All flows are up to date — nothing to run." and stop. Do not start any containers.
 
 ## Step 1: Check prerequisites
 
@@ -114,13 +117,13 @@ Wait for every spawned subagent to finish before proceeding.
 
 For each flow that returned PASS, run:
 
-    ./ns2 spec verify product-flows/NN-name.spec.md
+```bash
+ns2 spec verify product-flows/NN-name.spec.md
+```
 
-This stamps the current timestamp into the flow's `verified` field, recording that
-the flow was run and passed against the current codebase. List each verify result
-in the Container Cleanup Status section.
+This stamps the current timestamp into the flow's `verified` field, recording that the flow was run and passed against the current codebase. List each verify result in the Container Cleanup Status section.
 
-If `./ns2` is not available, skip this step with a note.
+If the binary is not available, skip this step with a note.
 
 ## Step 5: Cleanup all containers
 
@@ -137,10 +140,6 @@ Run cleanup for each container regardless of that flow's outcome. Record whether
 Print the following sections in order.
 
 ### Results table
-
-If any flows were stale at the start of the run (from Step 0.5), note them here before the table:
-
-> Stale flows (code changed since last verified): NN-name, NN-name, ...
 
 | Flow | Name | Passed | Failed | Verdict |
 |------|------|--------|--------|---------|
@@ -159,7 +158,7 @@ List friction points that made testing harder or reduced visibility. These are i
 
 ### Container Cleanup Status
 
-Confirm whether each container was successfully removed and whether each passing flow was re-verified. Format:
+Confirm whether each container was successfully removed and whether each passing flow was verified. Format:
 
 | Container | Removed | Verified |
 |-----------|---------|---------|

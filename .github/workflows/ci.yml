@@ -54,7 +54,7 @@ jobs:
       - name: Spec sync
         run: |
           cargo build -p cli -q
-          if ! ./ns2 spec sync --error-on-warnings; then
+          if ! ./target/debug/ns2 spec sync --error-on-warnings; then
             echo ""
             echo "One or more spec files have changed since they were last verified."
             echo "To resolve: update the spec or implementation so they agree, then run:"
