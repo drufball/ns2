@@ -11,6 +11,7 @@ members = [
     "crates/tui",
     "crates/cli",
     "crates/arch-tests",
+    "crates/specs",
 ]
 resolver = "2"
 

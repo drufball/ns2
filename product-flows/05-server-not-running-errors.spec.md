@@ -1,3 +1,11 @@
+---
+targets:
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-23T15:59:13Z
+---
+
+
 # Flow 05: Error Handling When Server Is Down
 
 Verify that CLI commands produce clear, actionable error messages when the server is not running.

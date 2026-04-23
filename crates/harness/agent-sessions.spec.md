@@ -1,3 +1,13 @@
+---
+targets:
+  - crates/harness/src/**/*.rs
+  - crates/server/src/**/*.rs
+  - crates/db/src/**/*.rs
+  - crates/types/src/**/*.rs
+verified: 2026-04-22T19:18:32Z
+---
+
+
 # Agent Sessions Spec
 
 ## Overview

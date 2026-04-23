@@ -1,3 +1,13 @@
+---
+targets:
+  - crates/harness/src/**/*.rs
+  - crates/anthropic/src/**/*.rs
+  - crates/server/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 04: Hello World (Real Claude API)
 
 Full session lifecycle using the real Anthropic API.

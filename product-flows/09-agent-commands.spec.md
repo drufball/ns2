@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/agents/src/**/*.rs
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-23T15:59:13Z
+---
+
+
 # Flow 09: Agent Commands
 
 Create and manage agent type files using `ns2 agent list`, `ns2 agent new`, and `ns2 agent edit`.

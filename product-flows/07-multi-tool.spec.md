@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/tools/src/**/*.rs
+  - crates/harness/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 07: Multi-Tool (Write + Read)
 
 Claude writes a file using the `write` tool and reads it back using the `read` tool during a single agent run.

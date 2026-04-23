@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/server/src/**/*.rs
+  - crates/cli/src/main.rs
+severity: warning
+verified: 2026-04-23T15:59:13Z
+---
+
+
 # Flow 01: Server Lifecycle
 
 Start and stop the ns2 server; verify it responds to health checks.

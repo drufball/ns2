@@ -1,10 +1,10 @@
 ---
 name: smoke-test
 description: Run product-flow manual tests in parallel Docker containers, one per flow. Use when asked to smoke test, run manual tests, or validate product flows.
-argument-hint: "flow numbers e.g. '01 03', or omit for all"
+argument-hint: "flow numbers e.g. '01 03', or omit for all out-of-sync flows"
 ---
 
-Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise run all flows 01–09.
+Run `product-flows/` flows in parallel Docker containers. If `$ARGUMENTS` is given, run only those numbered flows; otherwise determine which flows are out of sync (Step 0.5) and run only those.
 
 ## Step 0: Detect repo root and build
 
@@ -31,6 +31,24 @@ ls REPO_ROOT/product-flows/.build/ns2
 ```
 
 If the binary is missing, bail immediately with: "Binary not found at product-flows/.build/ns2 — aborting."
+
+The built binary at `REPO_ROOT/product-flows/.build/ns2` is compiled for the container OS (Linux). For host-side `ns2` commands in subsequent steps, use the system `ns2` binary (i.e. just `ns2` — it is on PATH).
+
+## Step 0.5: Determine which flows to run
+
+If `$ARGUMENTS` was given, the flows to run are exactly those numbered flows — skip the rest of this step.
+
+Otherwise, run spec sync scoped to the product-flows directory to find out-of-sync flows:
+
+```bash
+ns2 spec sync product-flows/ 2>&1
+```
+
+Parse the output for lines matching `[error] spec product-flows/NN-` or `[warning] spec product-flows/NN-` and extract the two-digit flow numbers. These are the **stale flows** to run.
+
+- If the command fails with a non-spec-sync error (e.g. binary crash), skip this check with a note and fall back to running all flows 01–12.
+- If the command succeeds or exits non-zero but produces stale-flow output: use the stale flow numbers as the set to run.
+- If no flows are stale (command exits 0, no stale output): report "All flows are up to date — nothing to run." and stop. Do not start any containers.
 
 ## Step 1: Check prerequisites
 
@@ -62,7 +80,7 @@ If `docker run` returns non-zero for a given flow, mark that flow CRITICAL, reco
 After all containers are started, spawn one subagent per non-SKIPPED, non-CRITICAL flow. Spawn them all at the same time — do not wait for one to finish before starting the next. Each container has its own network namespace, so port 9876 does not conflict between flows.
 
 Each subagent receives:
-- The full text of the flow .md file
+- The full text of the flow `.spec.md` file
 - The container name assigned to it (e.g. `ns2-flow-03`)
 - This instruction: **All bash commands in this flow must be run via `docker exec <container-name> bash -c '...'`. Do not run commands on the host. The Fixture Setup section contains the setup commands already formatted as `docker exec` calls — run them exactly as written.**
 
@@ -94,6 +112,18 @@ Subagents also note **Workflow Snags** — friction that made the flow harder to
 ## Step 4: Wait for all subagents
 
 Wait for every spawned subagent to finish before proceeding.
+
+## Step 4.5: Verify passing flows
+
+For each flow that returned PASS, run:
+
+```bash
+ns2 spec verify product-flows/NN-name.spec.md
+```
+
+This stamps the current timestamp into the flow's `verified` field, recording that the flow was run and passed against the current codebase. List each verify result in the Container Cleanup Status section.
+
+If the binary is not available, skip this step with a note.
 
 ## Step 5: Cleanup all containers
 
@@ -128,12 +158,12 @@ List friction points that made testing harder or reduced visibility. These are i
 
 ### Container Cleanup Status
 
-Confirm whether each container was successfully removed. Format:
+Confirm whether each container was successfully removed and whether each passing flow was verified. Format:
 
-| Container | Removed |
-|-----------|---------|
-| ns2-flow-01 | yes |
-| ns2-flow-02 | yes |
-| ... | ... |
+| Container | Removed | Verified |
+|-----------|---------|---------|
+| ns2-flow-01 | yes | yes |
+| ns2-flow-02 | yes | yes |
+| ... | ... | ... |
 
-If any removal failed, list the error.
+If any removal failed, list the error. If verify was skipped (binary unavailable), note that in the Verified column.

@@ -1,3 +1,11 @@
+---
+targets:
+  - Cargo.toml
+  - crates/*/Cargo.toml
+verified: 2026-04-23T16:05:41Z
+---
+
+
 # Architecture Spec
 
 ## Overview
@@ -22,10 +30,12 @@ The workspace is a flat set of crates, each owning one layer of the system. Depe
 
 **`agents`** — agent definition files. Reads and writes `.ns2/agents/*.md` files, which define agent types via YAML frontmatter (`name`, `description`) and a system prompt body. Exposes a pure in-memory `AgentDef` type, parsing/formatting helpers, and directory-based list/load/write operations. Depends only on `workspace` for `git_root()` discovery. No knowledge of sessions, turns, or HTTP.
 
+**`specs`** — spec file management. Reads and writes `.spec.md` files anywhere in the repo, which declare which source files a spec governs via YAML frontmatter (`targets`: glob patterns, `verified`: UTC timestamp). Exposes a pure in-memory `SpecDef` type, parsing/formatting helpers, recursive discovery (`list_specs`), and staleness checking (`stale_files`). Depends only on `workspace` for `git_root()` discovery. No knowledge of sessions, turns, or HTTP.
+
 **`harness`** — the agent turn loop. Depends on `anthropic`, `tools`, `db`, and `agents`. Owns context window construction, system prompt loading (reads the agent definition for `session.agent` via the `agents` crate), and tool dispatch. Emits events to a tokio broadcast channel — it has no knowledge of HTTP or subscribers. One instance runs per active session as a tokio task.
 
 **`server`** — axum HTTP server. Exposes routes for session management and SSE streaming: creating session records, listing sessions, queuing user messages. Enforces branch-level concurrency: rejects new sessions on a branch that already has a `running` session (checked against `db` at creation time). Spawns harness tasks for new sessions but doesn't reach into the turn loop — the harness runs independently once started. Subscribes to harness broadcast channels and fans events out to SSE clients. 
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE and renders sessions. Thin client: all state comes from the server, nothing is computed locally.
 
-**`cli`** — the `ns2` binary. Depends on `workspace` for git root discovery and `agents` for agent management commands. On launch, checks if a server is already running (via a PID file or a probe to localhost). If not, starts one in the background. Then launches the TUI connected to the orchestrator session. Wires crates together; contains no logic of its own.
+**`cli`** — the `ns2` binary. Depends on `workspace` for git root discovery, `agents` for agent management commands, and `specs` for spec file commands. On launch, checks if a server is already running (via a PID file or a probe to localhost). If not, starts one in the background. Then launches the TUI connected to the orchestrator session. Wires crates together; contains no logic of its own.

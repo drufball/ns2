@@ -29,6 +29,10 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    Spec {
+        #[command(subcommand)]
+        action: SpecAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -94,6 +98,25 @@ enum SessionAction {
         id: Option<String>,
         #[arg(long)]
         name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecAction {
+    New {
+        path: String,
+        #[arg(long = "target", num_args = 1..)]
+        targets: Vec<String>,
+        #[arg(long, default_value = "error")]
+        severity: String,
+    },
+    Sync {
+        path: Option<String>,
+        #[arg(long)]
+        error_on_warnings: bool,
+    },
+    Verify {
+        path: String,
     },
 }
 
@@ -199,6 +222,22 @@ pub fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<String> {
         frames.push(frame);
     }
     frames
+}
+
+pub fn format_sync_error(spec_path: &str, stale: &[PathBuf]) -> String {
+    let mut out = format!("[error] spec {spec_path} has stale files:\n");
+    for f in stale {
+        out.push_str(&format!("  {}\n", f.display()));
+    }
+    out
+}
+
+pub fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
+    let mut out = format!("[warning] spec {spec_path} has stale files:\n");
+    for f in stale {
+        out.push_str(&format!("  {}\n", f.display()));
+    }
+    out
 }
 
 async fn resolve_session_id(server: &str, id: Option<String>, name: Option<String>) -> Uuid {
@@ -505,6 +544,150 @@ async fn main() {
                 eprintln!("Updated agent '{name}'.");
             }
         },
+        Command::Spec { action } => match action {
+            SpecAction::New { path, targets, severity } => {
+                if targets.is_empty() {
+                    eprintln!("Error: at least one --target is required");
+                    std::process::exit(1);
+                }
+                let severity = match severity.as_str() {
+                    "warning" => specs::Severity::Warning,
+                    "error" => specs::Severity::Error,
+                    _ => {
+                        eprintln!("Error: --severity must be 'error' or 'warning'");
+                        std::process::exit(1);
+                    }
+                };
+                let git_root = workspace::git_root().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                let resolved = if PathBuf::from(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    git_root.join(&path)
+                };
+                let path_display = path.clone();
+                let path = resolved;
+                if path.exists() {
+                    eprintln!("Error: spec already exists at {}", path.display());
+                    std::process::exit(1);
+                }
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            eprintln!("Error creating directories: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                let def = specs::SpecDef { targets, verified: None, severity, body: String::new() };
+                if let Err(e) = specs::write_spec(&path, &def) {
+                    eprintln!("Error writing spec file: {e}");
+                    std::process::exit(1);
+                }
+                println!("Created spec at {path_display}");
+            }
+            SpecAction::Sync { path, error_on_warnings } => {
+                let git_root = workspace::git_root().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                if let Some(p) = path {
+                    let resolved = if PathBuf::from(&p).is_absolute() {
+                        PathBuf::from(&p)
+                    } else {
+                        git_root.join(&p)
+                    };
+                    if resolved.is_dir() {
+                        let all_specs = specs::list_specs(&resolved);
+                        let mut has_errors = false;
+                        for (spec_path, def) in &all_specs {
+                            let stale = specs::stale_files(&git_root, spec_path, def);
+                            if !stale.is_empty() {
+                                let display_path = spec_path
+                                    .strip_prefix(&git_root)
+                                    .unwrap_or(spec_path)
+                                    .display()
+                                    .to_string();
+                                let is_error =
+                                    def.severity == specs::Severity::Error || error_on_warnings;
+                                if is_error {
+                                    eprint!("{}", format_sync_error(&display_path, &stale));
+                                    has_errors = true;
+                                } else {
+                                    eprint!("{}", format_sync_warning(&display_path, &stale));
+                                }
+                            }
+                        }
+                        if has_errors {
+                            std::process::exit(1);
+                        }
+                    } else {
+                        let def = specs::load_spec(&resolved).unwrap_or_else(|| {
+                            eprintln!("Error: could not load spec at {p}");
+                            std::process::exit(1);
+                        });
+                        let stale = specs::stale_files(&git_root, &resolved, &def);
+                        if !stale.is_empty() {
+                            let is_error =
+                                def.severity == specs::Severity::Error || error_on_warnings;
+                            if is_error {
+                                eprint!("{}", format_sync_error(&p, &stale));
+                                std::process::exit(1);
+                            } else {
+                                eprint!("{}", format_sync_warning(&p, &stale));
+                            }
+                        }
+                    }
+                } else {
+                    let all_specs = specs::list_specs(&git_root);
+                    let mut has_errors = false;
+                    for (spec_path, def) in &all_specs {
+                        let stale = specs::stale_files(&git_root, spec_path, def);
+                        if !stale.is_empty() {
+                            let display_path = spec_path
+                                .strip_prefix(&git_root)
+                                .unwrap_or(spec_path)
+                                .display()
+                                .to_string();
+                            let is_error =
+                                def.severity == specs::Severity::Error || error_on_warnings;
+                            if is_error {
+                                eprint!("{}", format_sync_error(&display_path, &stale));
+                                has_errors = true;
+                            } else {
+                                eprint!("{}", format_sync_warning(&display_path, &stale));
+                            }
+                        }
+                    }
+                    if has_errors {
+                        std::process::exit(1);
+                    }
+                }
+            }
+            SpecAction::Verify { path } => {
+                let git_root = workspace::git_root().unwrap_or_else(|| {
+                    eprintln!("Error: not inside a git repository");
+                    std::process::exit(1);
+                });
+                let resolved = if PathBuf::from(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    git_root.join(&path)
+                };
+                let mut def = specs::load_spec(&resolved).unwrap_or_else(|| {
+                    eprintln!("Error: could not load spec at {path}");
+                    std::process::exit(1);
+                });
+                def.verified = Some(chrono::Utc::now());
+                if let Err(e) = specs::write_spec(&resolved, &def) {
+                    eprintln!("Error writing spec file: {e}");
+                    std::process::exit(1);
+                }
+                println!("Verified {path}");
+            }
+        },
     }
 }
 
@@ -614,6 +797,53 @@ mod tests {
         assert_eq!(frames[0], "data: a");
         assert_eq!(frames[1], "data: b");
         assert!(buf.is_empty());
+    }
+
+    // Spec command parsing and behavior tests
+    // These test functions and helpers that handle spec logic.
+    // The actual CLI wiring (clap parse) is tested by integration tests / smoke tests.
+
+    #[test]
+    fn format_sync_error_includes_spec_and_files() {
+        let stale = vec![
+            std::path::PathBuf::from("crates/cli/src/main.rs"),
+            std::path::PathBuf::from("crates/agents/src/lib.rs"),
+        ];
+        let out = format_sync_error("crates/cli/cli-commands.spec.md", &stale);
+        assert!(out.contains("[error]"));
+        assert!(out.contains("crates/cli/cli-commands.spec.md"));
+        assert!(out.contains("crates/cli/src/main.rs"));
+        assert!(out.contains("crates/agents/src/lib.rs"));
+        // Each file is on its own indented line
+        assert!(out.contains("  crates/cli/src/main.rs\n"));
+        assert!(out.contains("  crates/agents/src/lib.rs\n"));
+    }
+
+    #[test]
+    fn spec_sync_output_contains_spec_path_and_stale_file() {
+        // This tests the formatting logic for the error output of `ns2 spec sync`.
+        // We construct the message manually to verify the format.
+        let spec_path = "crates/cli/cli-commands.spec.md";
+        let stale = vec![std::path::PathBuf::from("crates/cli/src/main.rs")];
+        let output = format_sync_error(spec_path, &stale);
+        assert!(output.contains(spec_path), "output must include spec path");
+        assert!(output.contains("crates/cli/src/main.rs"), "output must include stale file");
+    }
+
+    #[test]
+    fn format_sync_warning_includes_warning_prefix() {
+        let stale = vec![std::path::PathBuf::from("crates/cli/src/main.rs")];
+        let out = format_sync_warning("crates/foo.spec.md", &stale);
+        assert!(out.contains("[warning]"));
+        assert!(out.contains("crates/foo.spec.md"));
+        assert!(out.contains("crates/cli/src/main.rs"));
+    }
+
+    #[test]
+    fn format_sync_error_includes_error_prefix() {
+        let stale = vec![std::path::PathBuf::from("crates/cli/src/main.rs")];
+        let out = format_sync_error("crates/foo.spec.md", &stale);
+        assert!(out.contains("[error]"));
     }
 
     #[test]

@@ -1,3 +1,13 @@
+---
+targets:
+  - crates/server/src/**/*.rs
+  - crates/db/src/**/*.rs
+  - crates/types/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 02: Session Create and List
 
 Create sessions and verify they appear in list output.

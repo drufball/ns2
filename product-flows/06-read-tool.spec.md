@@ -1,3 +1,12 @@
+---
+targets:
+  - crates/tools/src/**/*.rs
+  - crates/harness/src/**/*.rs
+severity: warning
+verified: 2026-04-22T19:19:38Z
+---
+
+
 # Flow 06: Read Tool
 
 Claude reads a file on disk using the `read` tool during an agent run.
