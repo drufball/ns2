@@ -11,7 +11,7 @@ use axum::{
 use chrono::Utc;
 use db::SqliteDb;
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::{HashMap, HashSet}, convert::Infallible, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
@@ -390,12 +390,25 @@ struct CreateIssueRequest {
     blocked_on: Option<Vec<String>>,
 }
 
+// Wraps a present JSON field (including null) in Some, leaving absent fields as None.
+// Used with #[serde(default, deserialize_with = "deserialize_some")] to distinguish
+// "field absent" (None) from "field explicitly null" (Some(None)).
+fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 struct EditIssueRequest {
     title: Option<String>,
     body: Option<String>,
-    assignee: Option<serde_json::Value>,
-    parent_id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    assignee: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    parent_id: Option<Option<String>>,
     blocked_on: Option<Vec<String>>,
 }
 
@@ -479,19 +492,11 @@ async fn edit_issue(
     if let Some(body) = req.body {
         issue.body = body;
     }
-    if let Some(assignee_val) = req.assignee {
-        issue.assignee = if assignee_val.is_null() {
-            None
-        } else {
-            assignee_val.as_str().map(|s| s.to_string())
-        };
+    if let Some(assignee_opt) = req.assignee {
+        issue.assignee = assignee_opt;
     }
-    if let Some(parent_val) = req.parent_id {
-        issue.parent_id = if parent_val.is_null() {
-            None
-        } else {
-            parent_val.as_str().map(|s| s.to_string())
-        };
+    if let Some(parent_opt) = req.parent_id {
+        issue.parent_id = parent_opt;
     }
     if let Some(blocked_on) = req.blocked_on {
         issue.blocked_on = blocked_on;
@@ -1781,6 +1786,61 @@ mod tests {
         let body = response_body_bytes(edit_resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["title"], "New title");
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_clears_parent_with_null() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Child", "body": "B", "parent_id": "abc1"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["parent_id"], "abc1");
+
+        let edit_resp = app
+            .clone()
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "parent_id": null
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["parent_id"].is_null(), "parent_id should be cleared to null");
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_absent_parent_leaves_unchanged() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Child", "body": "B", "parent_id": "abc1"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Patch only title — parent_id absent from request should leave it unchanged
+        let edit_resp = app
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "title": "Renamed"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["parent_id"], "abc1", "parent_id should be unchanged");
     }
 
     #[tokio::test]

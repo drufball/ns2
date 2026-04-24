@@ -274,6 +274,20 @@ fn handle_connection_error(err: &reqwest::Error) -> ! {
     std::process::exit(1);
 }
 
+async fn print_error_response(resp: reqwest::Response) -> ! {
+    let status = resp.status();
+    if let Ok(body) = resp.json::<serde_json::Value>().await {
+        if let Some(msg) = body.get("error").and_then(|v| v.as_str()) {
+            eprintln!("Error: {msg}");
+        } else {
+            eprintln!("Error: {status}");
+        }
+    } else {
+        eprintln!("Error: {status}");
+    }
+    std::process::exit(1);
+}
+
 pub fn format_session_event(event: &types::SessionEvent) -> Option<String> {
     use types::SessionEvent::*;
     match event {
@@ -862,6 +876,14 @@ async fn main() {
             let client = reqwest::Client::new();
             match action {
                 IssueAction::New { title, body, assignee, parent, blocked_on } => {
+                    if let Some(ref a) = assignee {
+                        if let Some(dir) = agents::agents_dir() {
+                            if agents::load_agent(&dir, a).is_none() {
+                                eprintln!("Error: agent type '{a}' not found in .ns2/agents/");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
                     let url = format!("{}/issues", cli.server);
                     let req_body = json!({
                         "title": title,
@@ -874,8 +896,7 @@ async fn main() {
                         handle_connection_error(&e);
                     });
                     if !resp.status().is_success() {
-                        eprintln!("Error: {}", resp.status());
-                        std::process::exit(1);
+                        print_error_response(resp).await;
                     }
                     let issue: Issue = resp.json().await.unwrap_or_else(|e| {
                         eprintln!("Error parsing response: {e}");
@@ -897,6 +918,12 @@ async fn main() {
                         if a.is_empty() {
                             req_body.insert("assignee".into(), json!(null));
                         } else {
+                            if let Some(dir) = agents::agents_dir() {
+                                if agents::load_agent(&dir, &a).is_none() {
+                                    eprintln!("Error: agent type '{a}' not found in .ns2/agents/");
+                                    std::process::exit(1);
+                                }
+                            }
                             req_body.insert("assignee".into(), json!(a));
                         }
                     }
@@ -919,10 +946,9 @@ async fn main() {
                     if !resp.status().is_success() {
                         if resp.status() == reqwest::StatusCode::NOT_FOUND {
                             eprintln!("Error: issue not found: {id}");
-                        } else {
-                            eprintln!("Error: {}", resp.status());
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
+                        print_error_response(resp).await;
                     }
                     let issue: Issue = resp.json().await.unwrap_or_else(|e| {
                         eprintln!("Error parsing response: {e}");
@@ -939,10 +965,9 @@ async fn main() {
                     if !resp.status().is_success() {
                         if resp.status() == reqwest::StatusCode::NOT_FOUND {
                             eprintln!("Error: issue not found: {id}");
-                        } else {
-                            eprintln!("Error: {}", resp.status());
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
+                        print_error_response(resp).await;
                     }
                     eprintln!("Comment added to issue {id}.");
                 }
@@ -954,10 +979,9 @@ async fn main() {
                     if !resp.status().is_success() {
                         if resp.status() == reqwest::StatusCode::NOT_FOUND {
                             eprintln!("Error: issue not found: {id}");
-                        } else {
-                            eprintln!("Error: {}", resp.status());
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
+                        print_error_response(resp).await;
                     }
                     let issue: Issue = resp.json().await.unwrap_or_else(|e| {
                         eprintln!("Error parsing response: {e}");
@@ -974,10 +998,9 @@ async fn main() {
                     if !resp.status().is_success() {
                         if resp.status() == reqwest::StatusCode::NOT_FOUND {
                             eprintln!("Error: issue not found: {id}");
-                        } else {
-                            eprintln!("Error: {}", resp.status());
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
+                        print_error_response(resp).await;
                     }
                     eprintln!("Issue {id} marked as completed.");
                 }
@@ -1033,7 +1056,11 @@ async fn main() {
                                 handle_connection_error(&e);
                             });
                             if !resp.status().is_success() {
-                                eprintln!("Error fetching issue {id}: {}", resp.status());
+                                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                                    eprintln!("Error: issue not found: {id}");
+                                } else {
+                                    print_error_response(resp).await;
+                                }
                                 std::process::exit(1);
                             }
                             let issue: Issue = resp.json().await.unwrap_or_else(|e| {

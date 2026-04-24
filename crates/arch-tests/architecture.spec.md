@@ -2,9 +2,8 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-23T19:56:21Z
+verified: 2026-04-24T14:02:58Z
 ---
-
 
 # Architecture Spec
 
@@ -34,7 +33,7 @@ The workspace is a flat set of crates, each owning one layer of the system. Depe
 
 **`harness`** — the agent turn loop. Depends on `anthropic`, `tools`, `db`, and `agents`. Owns context window construction, system prompt loading (reads the agent definition for `session.agent` via the `agents` crate), and tool dispatch. Emits events to a tokio broadcast channel — it has no knowledge of HTTP or subscribers. One instance runs per active session as a tokio task.
 
-**`server`** — axum HTTP server. Exposes routes for session management and SSE streaming: creating session records, listing sessions, queuing user messages. Enforces branch-level concurrency: rejects new sessions on a branch that already has a `running` session (checked against `db` at creation time). Spawns harness tasks for new sessions but doesn't reach into the turn loop — the harness runs independently once started. Subscribes to harness broadcast channels and fans events out to SSE clients. 
+**`server`** — axum HTTP server. Exposes routes for session management, issue management, and SSE streaming: creating session records, listing sessions, queuing user messages; creating, listing, editing, and completing issues; linking issues to agent sessions via `issue start`. Enforces branch-level concurrency: rejects new sessions on a branch that already has a `running` session (checked against `db` at creation time). Spawns harness tasks for new sessions but doesn't reach into the turn loop — the harness runs independently once started. Subscribes to harness broadcast channels and fans events out to SSE clients.
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE and renders sessions. Thin client: all state comes from the server, nothing is computed locally.
 
