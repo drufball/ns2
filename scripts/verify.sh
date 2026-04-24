@@ -36,7 +36,7 @@ EOF
 cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
 
 echo "=== Spec sync ==="
-if ! ns2 spec sync; then
+if ! ns2 spec sync --error-on-warnings; then
     echo ""
     echo "One or more spec files have changed since they were last verified."
     echo ""

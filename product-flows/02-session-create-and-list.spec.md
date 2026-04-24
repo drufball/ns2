@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-24T09:34:05Z
+verified: 2026-04-24T09:41:03Z
 ---
 
 
@@ -80,6 +80,14 @@ docker exec ns2-flow-02 bash -c 'cd /repo && ns2 session list --status running'
 
 Expected: `No sessions found.` — no sessions are running.
 
+### Filter by session ID
+
+```bash
+docker exec ns2-flow-02 bash -c 'cd /repo && ns2 session list --id "$(ns2 session list | tail -1 | awk '\''{print $1}'\'')"'
+```
+
+Expected: only the single session row matching that UUID is shown. The output is still a table with headers, but contains exactly one data row.
+
 ## Acceptance Criteria
 
 - [ ] `ns2 session new` prints `Created session: <name> (<uuid>)` and exits 0
@@ -88,6 +96,7 @@ Expected: `No sessions found.` — no sessions are running.
 - [ ] Sessions created with no message have status `created`
 - [ ] `ns2 session list --status created` returns only `created` sessions
 - [ ] `ns2 session list --status running` returns `No sessions found.` when none are running
+- [ ] `ns2 session list --id <uuid>` returns exactly the session matching that UUID
 - [ ] IDs in list output match the UUIDs printed by `session new`
 
 ## Cleanup
