@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T09:34:05Z
+verified: 2026-04-24T12:32:23Z
 ---
 
 
@@ -94,7 +94,3 @@ Expected: `Exit code: 1` (or any non-zero value).
 - [ ] Error messages suggest the fix (`ns2 server start`)
 - [ ] No Rust panics, backtraces, or `unwrap` failure output is visible
 - [ ] No JSON error blobs or HTTP response bodies are printed raw to the user
-
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

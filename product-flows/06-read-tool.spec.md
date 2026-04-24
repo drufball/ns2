@@ -3,7 +3,7 @@ targets:
   - crates/tools/src/**/*.rs
   - crates/harness/src/**/*.rs
 severity: warning
-verified: 2026-04-22T19:19:38Z
+verified: 2026-04-24T10:37:33Z
 ---
 
 
@@ -20,7 +20,7 @@ Claude reads a file on disk using the `read` tool during an agent run.
 ```bash
 docker exec ns2-flow-06 bash /fixtures/init.sh
 docker exec ns2-flow-06 bash /fixtures/start-server.sh
-docker exec ns2-flow-06 bash /fixtures/create-read-file.sh
+docker exec ns2-flow-06 bash /fixtures/seeded-files.sh
 ```
 
 ## Steps
@@ -80,6 +80,3 @@ Re-tailing replays stored events. The output should show multiple turns: the use
 - [ ] Re-tailing a completed session replays all turns including tool call and result
 - [ ] No panics or unhandled errors in server output
 
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

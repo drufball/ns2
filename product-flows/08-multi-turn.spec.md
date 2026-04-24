@@ -4,7 +4,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-24T09:41:47Z
+verified: 2026-04-24T10:37:33Z
 ---
 
 
@@ -21,7 +21,7 @@ A user sends a follow-up message to a completed session and Claude responds with
 ```bash
 docker exec ns2-flow-08 bash /fixtures/init.sh
 docker exec ns2-flow-08 bash /fixtures/start-server.sh
-docker exec ns2-flow-08 bash /fixtures/create-multi-turn-file.sh
+docker exec ns2-flow-08 bash /fixtures/seeded-files.sh
 ```
 
 ## Steps
@@ -117,6 +117,3 @@ Expected: only the final assistant turn is replayed — no `[tool: read(...)]` l
 - [ ] `ns2 session tail --turns 1` replays only the final turn (no tool call, no first-run content)
 - [ ] No panics or unhandled errors in server output
 
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.
