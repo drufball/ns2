@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::SqlitePool;
 use std::str::FromStr;
-use types::{ContentBlock, Role, Session, SessionStatus, Turn};
+use types::{ContentBlock, Issue, IssueComment, IssueStatus, Role, Session, SessionStatus, Turn};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +45,20 @@ pub trait ContentBlockDb {
     async fn list_content_blocks(&self, turn_id: Uuid) -> Result<Vec<(Role, ContentBlock)>>;
 }
 
-pub trait Db: SessionDb + TurnDb + ContentBlockDb + Send + Sync {}
+#[async_trait]
+pub trait IssueDb {
+    async fn create_issue(&self, issue: &Issue) -> Result<()>;
+    async fn get_issue(&self, id: String) -> Result<Issue>;
+    async fn list_issues(
+        &self,
+        status: Option<IssueStatus>,
+        assignee: Option<String>,
+        parent_id: Option<String>,
+    ) -> Result<Vec<Issue>>;
+    async fn update_issue(&self, issue: &Issue) -> Result<()>;
+}
+
+pub trait Db: SessionDb + TurnDb + ContentBlockDb + IssueDb + Send + Sync {}
 
 pub struct SqliteDb {
     pool: SqlitePool,
@@ -272,6 +285,136 @@ impl ContentBlockDb for SqliteDb {
                 Ok((role, block))
             })
             .collect()
+    }
+}
+
+fn parse_issue_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue> {
+    use sqlx::Row;
+    let created_at_ts: i64 = row.get("created_at");
+    let updated_at_ts: i64 = row.get("updated_at");
+    let status_str: String = row.get("status");
+    let blocked_on_str: String = row.get("blocked_on");
+    let comments_str: String = row.get("comments");
+    let session_id_str: Option<String> = row.get("session_id");
+
+    let status = IssueStatus::from_str(&status_str).map_err(Error::Parse)?;
+    let created_at = Utc
+        .timestamp_opt(created_at_ts, 0)
+        .single()
+        .ok_or_else(|| Error::Parse("invalid created_at".into()))?;
+    let updated_at = Utc
+        .timestamp_opt(updated_at_ts, 0)
+        .single()
+        .ok_or_else(|| Error::Parse("invalid updated_at".into()))?;
+    let blocked_on: Vec<String> =
+        serde_json::from_str(&blocked_on_str).map_err(|e| Error::Parse(e.to_string()))?;
+    let comments: Vec<IssueComment> =
+        serde_json::from_str(&comments_str).map_err(|e| Error::Parse(e.to_string()))?;
+    let session_id = session_id_str
+        .as_deref()
+        .map(|s| Uuid::parse_str(s).map_err(|e| Error::Parse(e.to_string())))
+        .transpose()?;
+
+    Ok(Issue {
+        id: row.get("id"),
+        title: row.get("title"),
+        body: row.get("body"),
+        status,
+        assignee: row.get("assignee"),
+        session_id,
+        parent_id: row.get("parent_id"),
+        blocked_on,
+        comments,
+        created_at,
+        updated_at,
+    })
+}
+
+#[async_trait]
+impl IssueDb for SqliteDb {
+    async fn create_issue(&self, issue: &Issue) -> Result<()> {
+        let blocked_on =
+            serde_json::to_string(&issue.blocked_on).map_err(|e| Error::Parse(e.to_string()))?;
+        let comments =
+            serde_json::to_string(&issue.comments).map_err(|e| Error::Parse(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO issues (id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&issue.id)
+        .bind(&issue.title)
+        .bind(&issue.body)
+        .bind(issue.status.to_string())
+        .bind(&issue.assignee)
+        .bind(issue.session_id.as_ref().map(|id| id.to_string()))
+        .bind(&issue.parent_id)
+        .bind(&blocked_on)
+        .bind(&comments)
+        .bind(timestamp(&issue.created_at))
+        .bind(timestamp(&issue.updated_at))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_issue(&self, id: String) -> Result<Issue> {
+        let row = sqlx::query(
+            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        parse_issue_row(&row)
+    }
+
+    async fn list_issues(
+        &self,
+        status: Option<IssueStatus>,
+        assignee: Option<String>,
+        parent_id: Option<String>,
+    ) -> Result<Vec<Issue>> {
+        let rows = sqlx::query(
+            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues ORDER BY created_at DESC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let issues: Result<Vec<Issue>> = rows.iter().map(parse_issue_row).collect();
+        let issues = issues?;
+
+        Ok(issues
+            .into_iter()
+            .filter(|i| status.as_ref().is_none_or(|s| &i.status == s))
+            .filter(|i| assignee.as_ref().is_none_or(|a| i.assignee.as_deref() == Some(a.as_str())))
+            .filter(|i| parent_id.as_ref().is_none_or(|p| i.parent_id.as_deref() == Some(p.as_str())))
+            .collect())
+    }
+
+    async fn update_issue(&self, issue: &Issue) -> Result<()> {
+        let blocked_on =
+            serde_json::to_string(&issue.blocked_on).map_err(|e| Error::Parse(e.to_string()))?;
+        let comments =
+            serde_json::to_string(&issue.comments).map_err(|e| Error::Parse(e.to_string()))?;
+        let affected = sqlx::query(
+            "UPDATE issues SET title = ?, body = ?, status = ?, assignee = ?, session_id = ?, parent_id = ?, blocked_on = ?, comments = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&issue.title)
+        .bind(&issue.body)
+        .bind(issue.status.to_string())
+        .bind(&issue.assignee)
+        .bind(issue.session_id.as_ref().map(|id| id.to_string()))
+        .bind(&issue.parent_id)
+        .bind(&blocked_on)
+        .bind(&comments)
+        .bind(timestamp(&issue.updated_at))
+        .bind(&issue.id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
 }
 
@@ -599,5 +742,154 @@ mod tests {
         assert_eq!(turns[0].id, id_first,  "first inserted turn must be at index 0");
         assert_eq!(turns[1].id, id_second, "second inserted turn must be at index 1");
         assert_eq!(turns[2].id, id_third,  "third inserted turn must be at index 2");
+    }
+
+    // --- IssueDb tests ---
+
+    fn make_issue(id: &str) -> types::Issue {
+        types::Issue {
+            id: id.into(),
+            title: "Test issue".into(),
+            body: "Details".into(),
+            status: types::IssueStatus::Open,
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_create_and_get_issue(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let issue = make_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+        let fetched = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(fetched.id, "ab12");
+        assert_eq!(fetched.title, "Test issue");
+        assert_eq!(fetched.body, "Details");
+        assert_eq!(fetched.status, types::IssueStatus::Open);
+        assert!(fetched.assignee.is_none());
+        assert!(fetched.session_id.is_none());
+        assert!(fetched.parent_id.is_none());
+        assert!(fetched.blocked_on.is_empty());
+        assert!(fetched.comments.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_issue_not_found(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let result = db.get_issue("xxxx".into()).await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_empty(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let issues = db.list_issues(None, None, None).await.unwrap();
+        assert!(issues.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_filter_by_status(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let mut i1 = make_issue("aa11");
+        i1.status = types::IssueStatus::Open;
+        let mut i2 = make_issue("bb22");
+        i2.status = types::IssueStatus::Completed;
+        db.create_issue(&i1).await.unwrap();
+        db.create_issue(&i2).await.unwrap();
+
+        let open = db.list_issues(Some(types::IssueStatus::Open), None, None).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, "aa11");
+
+        let completed = db.list_issues(Some(types::IssueStatus::Completed), None, None).await.unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].id, "bb22");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_filter_by_assignee(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let mut i1 = make_issue("aa11");
+        i1.assignee = Some("swe".into());
+        let mut i2 = make_issue("bb22");
+        i2.assignee = Some("qa".into());
+        db.create_issue(&i1).await.unwrap();
+        db.create_issue(&i2).await.unwrap();
+
+        let swe_issues = db.list_issues(None, Some("swe".into()), None).await.unwrap();
+        assert_eq!(swe_issues.len(), 1);
+        assert_eq!(swe_issues[0].id, "aa11");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_filter_by_parent(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let parent = make_issue("pp00");
+        db.create_issue(&parent).await.unwrap();
+
+        let mut child = make_issue("cc11");
+        child.parent_id = Some("pp00".into());
+        db.create_issue(&child).await.unwrap();
+
+        let mut other = make_issue("oo22");
+        other.parent_id = Some("other".into());
+        db.create_issue(&other).await.unwrap();
+
+        let children = db.list_issues(None, None, Some("pp00".into())).await.unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, "cc11");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_update_issue(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let issue = make_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+
+        let mut updated = db.get_issue("ab12".into()).await.unwrap();
+        updated.title = "Updated title".into();
+        updated.status = types::IssueStatus::Running;
+        updated.assignee = Some("swe".into());
+        updated.blocked_on = vec!["xy34".into()];
+        updated.comments = vec![types::IssueComment {
+            author: "user".into(),
+            created_at: Utc::now(),
+            body: "A comment".into(),
+        }];
+        updated.updated_at = Utc::now();
+        db.update_issue(&updated).await.unwrap();
+
+        let fetched = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(fetched.title, "Updated title");
+        assert_eq!(fetched.status, types::IssueStatus::Running);
+        assert_eq!(fetched.assignee.as_deref(), Some("swe"));
+        assert_eq!(fetched.blocked_on, vec!["xy34"]);
+        assert_eq!(fetched.comments.len(), 1);
+        assert_eq!(fetched.comments[0].author, "user");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_update_issue_not_found(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let issue = make_issue("xxxx");
+        let result = db.update_issue(&issue).await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_issue_with_session_id(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session_id = Uuid::new_v4();
+        let mut issue = make_issue("ab12");
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+        let fetched = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(fetched.session_id, Some(session_id));
     }
 }

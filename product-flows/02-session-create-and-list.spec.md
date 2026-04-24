@@ -4,9 +4,8 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-24T10:37:33Z
+verified: 2026-04-24T14:12:36Z
 ---
-
 
 # Flow 02: Session Create and List
 
@@ -98,4 +97,3 @@ Expected: only the single session row matching that UUID is shown. The output is
 - [ ] `ns2 session list --status running` returns `No sessions found.` when none are running
 - [ ] `ns2 session list --id <uuid>` returns exactly the session matching that UUID
 - [ ] IDs in list output match the UUIDs printed by `session new`
-

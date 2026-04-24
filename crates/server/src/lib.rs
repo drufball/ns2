@@ -11,11 +11,11 @@ use axum::{
 use chrono::Utc;
 use db::SqliteDb;
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::{HashMap, HashSet}, convert::Infallible, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
-use types::{Session, SessionEvent, SessionStatus};
+use types::{Issue, IssueComment, IssueStatus, Session, SessionEvent, SessionStatus};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -374,6 +374,210 @@ async fn send_message(
     }
 }
 
+fn generate_issue_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    (0..4).map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char).collect()
+}
+
+#[derive(Deserialize)]
+struct CreateIssueRequest {
+    title: String,
+    body: String,
+    assignee: Option<String>,
+    parent_id: Option<String>,
+    blocked_on: Option<Vec<String>>,
+}
+
+// Wraps a present JSON field (including null) in Some, leaving absent fields as None.
+// Used with #[serde(default, deserialize_with = "deserialize_some")] to distinguish
+// "field absent" (None) from "field explicitly null" (Some(None)).
+fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct EditIssueRequest {
+    title: Option<String>,
+    body: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    assignee: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    parent_id: Option<Option<String>>,
+    blocked_on: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct ListIssuesQuery {
+    status: Option<String>,
+    assignee: Option<String>,
+    parent_id: Option<String>,
+    blocked_on: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AddCommentRequest {
+    author: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct CompleteIssueRequest {
+    comment: String,
+}
+
+async fn create_issue(
+    State(state): State<AppState>,
+    Json(req): Json<CreateIssueRequest>,
+) -> std::result::Result<(StatusCode, Json<Issue>), Error> {
+    let now = Utc::now();
+    let issue = Issue {
+        id: generate_issue_id(),
+        title: req.title,
+        body: req.body,
+        status: IssueStatus::Open,
+        assignee: req.assignee,
+        session_id: None,
+        parent_id: req.parent_id,
+        blocked_on: req.blocked_on.unwrap_or_default(),
+        comments: vec![],
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.create_issue(&issue).await?;
+    Ok((StatusCode::CREATED, Json(issue)))
+}
+
+async fn get_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let issue = state.db.get_issue(id).await?;
+    Ok(Json(issue))
+}
+
+async fn list_issues(
+    State(state): State<AppState>,
+    Query(params): Query<ListIssuesQuery>,
+) -> std::result::Result<Json<Vec<Issue>>, Error> {
+    let status = params
+        .status
+        .as_deref()
+        .map(|s| s.parse::<IssueStatus>().map_err(Error::BadRequest))
+        .transpose()?;
+    let mut issues = state
+        .db
+        .list_issues(status, params.assignee, params.parent_id)
+        .await?;
+    if let Some(blocked_on_filter) = &params.blocked_on {
+        issues.retain(|i| i.blocked_on.contains(blocked_on_filter));
+    }
+    Ok(Json(issues))
+}
+
+async fn edit_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EditIssueRequest>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let mut issue = state.db.get_issue(id.clone()).await?;
+    if let Some(title) = req.title {
+        issue.title = title;
+    }
+    if let Some(body) = req.body {
+        issue.body = body;
+    }
+    if let Some(assignee_opt) = req.assignee {
+        issue.assignee = assignee_opt;
+    }
+    if let Some(parent_opt) = req.parent_id {
+        issue.parent_id = parent_opt;
+    }
+    if let Some(blocked_on) = req.blocked_on {
+        issue.blocked_on = blocked_on;
+    }
+    issue.updated_at = Utc::now();
+    state.db.update_issue(&issue).await?;
+    Ok(Json(issue))
+}
+
+async fn add_comment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddCommentRequest>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let mut issue = state.db.get_issue(id.clone()).await?;
+    issue.comments.push(IssueComment {
+        author: req.author,
+        created_at: Utc::now(),
+        body: req.body,
+    });
+    issue.updated_at = Utc::now();
+    state.db.update_issue(&issue).await?;
+    Ok(Json(issue))
+}
+
+async fn start_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let mut issue = state.db.get_issue(id.clone()).await?;
+
+    if issue.assignee.is_none() {
+        return Err(Error::BadRequest("issue has no assignee; set one with `issue edit --assignee <agent>`".into()));
+    }
+    if issue.status != IssueStatus::Open {
+        return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
+    }
+
+    let now = Utc::now();
+    let session = Session {
+        id: Uuid::new_v4(),
+        name: format!("issue-{}", issue.id),
+        status: SessionStatus::Created,
+        agent: issue.assignee.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.create_session(&session).await?;
+
+    let initial_message = format!("{}\n\n{}", issue.title, issue.body);
+    let msg_tx = spawn_harness_sync(&state, session.clone());
+    msg_tx.send(initial_message).await.ok();
+
+    issue.session_id = Some(session.id);
+    issue.status = IssueStatus::Running;
+    issue.updated_at = Utc::now();
+    state.db.update_issue(&issue).await?;
+
+    Ok(Json(issue))
+}
+
+async fn complete_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CompleteIssueRequest>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let mut issue = state.db.get_issue(id.clone()).await?;
+    if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
+        return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
+    }
+    issue.comments.push(IssueComment {
+        author: "user".into(),
+        created_at: Utc::now(),
+        body: req.comment,
+    });
+    issue.status = IssueStatus::Completed;
+    issue.updated_at = Utc::now();
+    state.db.update_issue(&issue).await?;
+    Ok(Json(issue))
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -382,6 +586,13 @@ fn build_router(state: AppState) -> Router {
         .route("/sessions/:id", get(get_session))
         .route("/sessions/:id/events", get(session_events))
         .route("/sessions/:id/messages", post(send_message))
+        .route("/issues", post(create_issue))
+        .route("/issues", get(list_issues))
+        .route("/issues/:id", get(get_issue))
+        .route("/issues/:id", axum::routing::patch(edit_issue))
+        .route("/issues/:id/comments", post(add_comment))
+        .route("/issues/:id/start", post(start_issue))
+        .route("/issues/:id/complete", post(complete_issue))
         .with_state(state)
 }
 
@@ -1372,5 +1583,460 @@ mod tests {
             status == StatusCode::OK || status == StatusCode::NOT_FOUND,
             "expected 200 or 404, got {status}"
         );
+    }
+
+    // ─── Issue endpoint tests ─────────────────────────────────────────────────
+
+    fn issue_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_issue_returns_201() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Fix the bug",
+                "body": "Details here"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_issue_response_has_id_and_open_status() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Fix the bug",
+                "body": "Details here"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["id"].is_string());
+        assert_eq!(v["id"].as_str().unwrap().len(), 4);
+        assert_eq!(v["status"], "open");
+        assert_eq!(v["title"], "Fix the bug");
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_not_found_returns_404() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/issues/xxxx")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_returns_created_issue() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "My issue",
+                "body": "Body text"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(get_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["title"], "My issue");
+        assert_eq!(v["id"], id);
+    }
+
+    #[tokio::test]
+    async fn test_list_issues_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/issues")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_list_issues_returns_created_issues() {
+        let app = test_app().await;
+        app.clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Issue One", "body": "B1"
+            })))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Issue Two", "body": "B2"
+            })))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/issues")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_issues_filter_by_status() {
+        let app = test_app().await;
+        app.clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Open issue", "body": "B"
+            })))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/issues?status=open")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn test_list_issues_invalid_status_returns_400() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/issues?status=bogus")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_updates_title() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Old title", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let edit_resp = app
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "title": "New title"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["title"], "New title");
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_clears_parent_with_null() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Child", "body": "B", "parent_id": "abc1"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["parent_id"], "abc1");
+
+        let edit_resp = app
+            .clone()
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "parent_id": null
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["parent_id"].is_null(), "parent_id should be cleared to null");
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_absent_parent_leaves_unchanged() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Child", "body": "B", "parent_id": "abc1"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Patch only title — parent_id absent from request should leave it unchanged
+        let edit_resp = app
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "title": "Renamed"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["parent_id"], "abc1", "parent_id should be unchanged");
+    }
+
+    #[tokio::test]
+    async fn test_add_comment_appends_to_issue() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Issue", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let comment_resp = app
+            .oneshot(issue_req("POST", &format!("/issues/{id}/comments"), serde_json::json!({
+                "author": "user",
+                "body": "First comment"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(comment_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(comment_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let comments = v["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["author"], "user");
+        assert_eq!(comments[0]["body"], "First comment");
+    }
+
+    #[tokio::test]
+    async fn test_start_issue_without_assignee_returns_400() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "No assignee", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let start_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start_resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_start_issue_on_non_open_issue_returns_400() {
+        let app = test_app().await;
+        // Create with assignee so the first start succeeds
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Has assignee", "body": "B", "assignee": "swe"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // First start (should succeed and move to running)
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Second start should fail (already running)
+        let second_start = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_start.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_complete_issue_sets_status_and_adds_comment() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Issue", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let complete_resp = app
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+                "comment": "All done"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(complete_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "completed");
+        let comments = v["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["body"], "All done");
+    }
+
+    #[tokio::test]
+    async fn test_complete_already_completed_issue_returns_400() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Issue", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        app.clone()
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+                "comment": "First completion"
+            })))
+            .await
+            .unwrap();
+
+        let second = app
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+                "comment": "Should fail"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_list_issues_filter_by_blocked_on() {
+        let app = test_app().await;
+        let blocker = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Blocker", "body": "B"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(blocker).await;
+        let blocker_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        app.clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Blocked issue", "body": "B",
+                "blocked_on": [&blocker_id]
+            })))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues?blocked_on={blocker_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["title"], "Blocked issue");
     }
 }

@@ -305,6 +305,19 @@ mod tests {
             async fn list_content_blocks(&self, turn_id: Uuid) -> db::Result<Vec<(types::Role, types::ContentBlock)>>;
         }
 
+        #[async_trait]
+        impl db::IssueDb for TestDb {
+            async fn create_issue(&self, issue: &types::Issue) -> db::Result<()>;
+            async fn get_issue(&self, id: String) -> db::Result<types::Issue>;
+            async fn list_issues(
+                &self,
+                status: Option<types::IssueStatus>,
+                assignee: Option<String>,
+                parent_id: Option<String>,
+            ) -> db::Result<Vec<types::Issue>>;
+            async fn update_issue(&self, issue: &types::Issue) -> db::Result<()>;
+        }
+
         impl db::Db for TestDb {}
     }
 

@@ -3,9 +3,8 @@ targets:
   - crates/tools/src/**/*.rs
   - crates/harness/src/**/*.rs
 severity: warning
-verified: 2026-04-24T10:37:33Z
+verified: 2026-04-24T14:12:36Z
 ---
-
 
 # Flow 07: Multi-Tool (Write + Read)
 
@@ -94,4 +93,3 @@ Re-tailing replays stored events. The output should show multiple turns: the use
 - [ ] The session transitions to `completed`
 - [ ] `ns2 session tail` output includes `[tool: write(...)]`, `[result: ...]`, `[tool: read(...)]`, and `[result: ...]` lines for both tool calls
 - [ ] No panics or unhandled errors in server output
-

@@ -2,9 +2,8 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-24T12:32:23Z
+verified: 2026-04-24T14:02:58Z
 ---
-
 
 # CLI Commands Spec
 
@@ -35,6 +34,7 @@ Commands:
   session  Create agent sessions to complete tasks.
   agent    Create and list agents to use in sessions.
   spec     Create design docs and verify they are in sync.
+  issue    Track and manage work items.
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -431,6 +431,197 @@ Arguments:
           The spec file to verify. Required — you must verify specs one at a time.
 
 Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+---
+
+### `ns2 issue --help`
+
+```
+Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.
+
+Lifecycle:
+  open       issue created, not yet assigned to a session
+  running    an agent session is actively working on this issue
+  completed  work finished and reviewed
+  failed     session ended with an error
+
+Typical workflow:
+  id=$(ns2 issue new --title "..." --body "..." --assignee swe)
+  ns2 issue start --id "$id"
+  ns2 issue wait --id "$id"
+  ns2 issue complete --id "$id" --comment "Done: ..."
+
+Use `issue list` to see current issues; use `issue wait` to block until issues finish.
+
+Usage: ns2 issue <COMMAND>
+
+Commands:
+  new       Create a new issue.
+  edit      Edit an existing issue.
+  comment   Post a comment to an issue.
+  start     Create an agent session for this issue and start it.
+  complete  Mark an issue as completed.
+  list      List issues.
+  wait      Block until all specified issues reach a terminal state.
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue new --help`
+
+```
+Create a new issue. Prints the issue ID to stdout. Title and body are required.
+
+Usage: ns2 issue new [OPTIONS] --title <TITLE> --body <BODY>
+
+Options:
+      --title <TITLE>
+          Short description of the issue. Required.
+
+      --body <BODY>
+          Full issue body. Required.
+
+      --assignee <ASSIGNEE>
+          Agent type that should handle this issue (e.g. swe, qa-tester).
+
+      --parent <PARENT>
+          ID of the parent issue.
+
+      --blocked-on <BLOCKED_ON>...
+          Issue IDs that must be completed before this one. Repeat for multiple.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue edit --help`
+
+```
+Edit fields of an existing issue. Only the flags you provide are changed.
+
+Usage: ns2 issue edit [OPTIONS] --id <ID>
+
+Options:
+      --id <ID>
+          The issue ID to edit. Required.
+
+      --title <TITLE>
+          New title.
+
+      --body <BODY>
+          New body.
+
+      --assignee <ASSIGNEE>
+          New assignee agent type. Pass empty string to clear.
+
+      --parent <PARENT>
+          New parent issue ID. Pass empty string to clear.
+
+      --blocked-on [<BLOCKED_ON>...]
+          Replace the blocked-on list. Pass with no value to clear.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue comment --help`
+
+```
+Post a comment to an issue.
+
+Usage: ns2 issue comment [OPTIONS] --id <ID> --body <BODY>
+
+Options:
+      --id <ID>
+          The issue ID. Required.
+
+      --body <BODY>
+          The comment body. Required.
+
+      --author <AUTHOR>
+          Author name (defaults to 'user').
+          
+          [default: user]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue start --help`
+
+```
+Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.
+
+Usage: ns2 issue start --id <ID>
+
+Options:
+      --id <ID>
+          The issue ID. Required.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue complete --help`
+
+```
+Marks an issue completed and adds a final summary comment. The --comment flag is required.
+
+Usage: ns2 issue complete --id <ID> --comment <COMMENT>
+
+Options:
+      --id <ID>
+          The issue ID. Required.
+
+      --comment <COMMENT>
+          A final summary of what was done. Required.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue list --help`
+
+```
+List issues, newest first. Use flags to filter.
+
+Output columns: id, title, status, assignee, created_at
+
+Usage: ns2 issue list [OPTIONS]
+
+Options:
+      --status <STATUS>
+          Show only issues in this status. Values: open, running, completed, failed.
+
+      --assignee <ASSIGNEE>
+          Show only issues assigned to this agent type.
+
+      --parent <PARENT>
+          Show only issues with this parent issue ID.
+
+      --blocked-on <BLOCKED_ON>
+          Show only issues blocked on this issue ID.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue wait --help`
+
+```
+Polls the listed issues every second and exits once all of them are in 'completed' or 'failed' state. Exits 0 if all completed; exits non-zero if any failed.
+
+Usage: ns2 issue wait [OPTIONS]
+
+Options:
+      --id <IDS>...
+          Issue IDs to wait on. Repeat for multiple.
+
   -h, --help
           Print help (see a summary with '-h')
 ```

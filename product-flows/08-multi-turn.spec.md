@@ -4,9 +4,8 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-24T10:37:33Z
+verified: 2026-04-24T14:12:36Z
 ---
-
 
 # Flow 08: Multi-Turn Conversation
 
@@ -116,4 +115,3 @@ Expected: only the final assistant turn is replayed — no `[tool: read(...)]` l
 - [ ] `ns2 session tail` output includes `[tool: read(...)]` and `[result: ...]` lines for the first-run tool call only — the second run must not re-read the file
 - [ ] `ns2 session tail --turns 1` replays only the final turn (no tool call, no first-run content)
 - [ ] No panics or unhandled errors in server output
-
