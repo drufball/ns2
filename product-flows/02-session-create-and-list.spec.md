@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-22T19:19:38Z
+verified: 2026-04-24T09:34:05Z
 ---
 
 
