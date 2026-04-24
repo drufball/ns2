@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
-use types::Session;
+use types::{Issue, Session};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -38,6 +38,11 @@ enum Command {
     Spec {
         #[command(subcommand)]
         action: SpecAction,
+    },
+    #[command(about = "Track and manage work items.", long_about = "Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.\n\nLifecycle:\n  open       issue created, not yet assigned to a session\n  running    an agent session is actively working on this issue\n  completed  work finished and reviewed\n  failed     session ended with an error\n\nTypical workflow:\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue start --id \"$id\"\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done: ...\"\n\nUse `issue list` to see current issues; use `issue wait` to block until issues finish.")]
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
     },
 }
 
@@ -148,6 +153,75 @@ enum SpecAction {
     },
 }
 
+#[derive(Subcommand)]
+enum IssueAction {
+    #[command(about = "Create a new issue.", long_about = "Create a new issue. Prints the issue ID to stdout. Title and body are required.")]
+    New {
+        #[arg(long, help = "Short description of the issue. Required.")]
+        title: String,
+        #[arg(long, help = "Full issue body. Required.")]
+        body: String,
+        #[arg(long, help = "Agent type that should handle this issue (e.g. swe, qa-tester).")]
+        assignee: Option<String>,
+        #[arg(long, help = "ID of the parent issue.")]
+        parent: Option<String>,
+        #[arg(long = "blocked-on", num_args = 1.., help = "Issue IDs that must be completed before this one. Repeat for multiple.")]
+        blocked_on: Vec<String>,
+    },
+    #[command(about = "Edit an existing issue.", long_about = "Edit fields of an existing issue. Only the flags you provide are changed.")]
+    Edit {
+        #[arg(long, help = "The issue ID to edit. Required.")]
+        id: String,
+        #[arg(long, help = "New title.")]
+        title: Option<String>,
+        #[arg(long, help = "New body.")]
+        body: Option<String>,
+        #[arg(long, help = "New assignee agent type. Pass empty string to clear.")]
+        assignee: Option<String>,
+        #[arg(long, help = "New parent issue ID. Pass empty string to clear.")]
+        parent: Option<String>,
+        #[arg(long = "blocked-on", num_args = 0.., help = "Replace the blocked-on list. Pass with no value to clear.")]
+        blocked_on: Option<Vec<String>>,
+    },
+    #[command(about = "Post a comment to an issue.")]
+    Comment {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+        #[arg(long, help = "The comment body. Required.")]
+        body: String,
+        #[arg(long, default_value = "user", help = "Author name (defaults to 'user').")]
+        author: String,
+    },
+    #[command(about = "Create an agent session for this issue and start it.", long_about = "Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.")]
+    Start {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+    },
+    #[command(about = "Mark an issue as completed.", long_about = "Marks an issue completed and adds a final summary comment. The --comment flag is required.")]
+    Complete {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+        #[arg(long, help = "A final summary of what was done. Required.")]
+        comment: String,
+    },
+    #[command(about = "List issues.", long_about = "List issues, newest first. Use flags to filter.\n\nOutput columns: id, title, status, assignee, created_at")]
+    List {
+        #[arg(long, help = "Show only issues in this status. Values: open, running, completed, failed.")]
+        status: Option<String>,
+        #[arg(long, help = "Show only issues assigned to this agent type.")]
+        assignee: Option<String>,
+        #[arg(long, help = "Show only issues with this parent issue ID.")]
+        parent: Option<String>,
+        #[arg(long = "blocked-on", help = "Show only issues blocked on this issue ID.")]
+        blocked_on: Option<String>,
+    },
+    #[command(about = "Block until all specified issues reach a terminal state.", long_about = "Polls the listed issues every second and exits once all of them are in 'completed' or 'failed' state. Exits 0 if all completed; exits non-zero if any failed.")]
+    Wait {
+        #[arg(long = "id", num_args = 1.., help = "Issue IDs to wait on. Repeat for multiple.")]
+        ids: Vec<String>,
+    },
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 fn load_dotenv() {
@@ -178,6 +252,17 @@ pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
     let data_dir = PathBuf::from(&home).join(".ns2").join(&repo_name);
     let pid_file = data_dir.join(format!("server-{port}.pid"));
     (data_dir, pid_file)
+}
+
+fn print_issue_row(issue: &Issue) {
+    println!(
+        "{:<6}  {:<30}  {:<10}  {:<12}  {}",
+        issue.id,
+        if issue.title.len() > 30 { &issue.title[..30] } else { &issue.title },
+        issue.status.to_string(),
+        issue.assignee.as_deref().unwrap_or("-"),
+        issue.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+    );
 }
 
 fn handle_connection_error(err: &reqwest::Error) -> ! {
@@ -342,6 +427,10 @@ async fn resolve_session_id(server: &str, id: Option<String>, name: Option<Strin
         eprintln!("Must provide --id or --name");
         std::process::exit(1);
     }
+}
+
+pub fn issue_is_terminal(status: &types::IssueStatus) -> bool {
+    matches!(status, types::IssueStatus::Completed | types::IssueStatus::Failed)
 }
 
 #[tokio::main]
@@ -769,6 +858,208 @@ async fn main() {
                 println!("Verified {path}");
             }
         },
+        Command::Issue { action } => {
+            let client = reqwest::Client::new();
+            match action {
+                IssueAction::New { title, body, assignee, parent, blocked_on } => {
+                    let url = format!("{}/issues", cli.server);
+                    let req_body = json!({
+                        "title": title,
+                        "body": body,
+                        "assignee": assignee,
+                        "parent_id": parent,
+                        "blocked_on": blocked_on,
+                    });
+                    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        eprintln!("Error: {}", resp.status());
+                        std::process::exit(1);
+                    }
+                    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
+                    eprintln!("Created issue: {} ({})", issue.title, issue.id);
+                    println!("{}", issue.id);
+                }
+                IssueAction::Edit { id, title, body, assignee, parent, blocked_on } => {
+                    let url = format!("{}/issues/{}", cli.server, id);
+                    let mut req_body = serde_json::Map::new();
+                    if let Some(t) = title {
+                        req_body.insert("title".into(), json!(t));
+                    }
+                    if let Some(b) = body {
+                        req_body.insert("body".into(), json!(b));
+                    }
+                    if let Some(a) = assignee {
+                        if a.is_empty() {
+                            req_body.insert("assignee".into(), json!(null));
+                        } else {
+                            req_body.insert("assignee".into(), json!(a));
+                        }
+                    }
+                    if let Some(p) = parent {
+                        if p.is_empty() {
+                            req_body.insert("parent_id".into(), json!(null));
+                        } else {
+                            req_body.insert("parent_id".into(), json!(p));
+                        }
+                    }
+                    if let Some(bo) = blocked_on {
+                        req_body.insert("blocked_on".into(), json!(bo));
+                    }
+                    let resp = client
+                        .patch(&url)
+                        .json(&serde_json::Value::Object(req_body))
+                        .send()
+                        .await
+                        .unwrap_or_else(|e| handle_connection_error(&e));
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            eprintln!("Error: issue not found: {id}");
+                        } else {
+                            eprintln!("Error: {}", resp.status());
+                        }
+                        std::process::exit(1);
+                    }
+                    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
+                    eprintln!("Updated issue {}.", issue.id);
+                }
+                IssueAction::Comment { id, body, author } => {
+                    let url = format!("{}/issues/{}/comments", cli.server, id);
+                    let req_body = json!({ "author": author, "body": body });
+                    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            eprintln!("Error: issue not found: {id}");
+                        } else {
+                            eprintln!("Error: {}", resp.status());
+                        }
+                        std::process::exit(1);
+                    }
+                    eprintln!("Comment added to issue {id}.");
+                }
+                IssueAction::Start { id } => {
+                    let url = format!("{}/issues/{}/start", cli.server, id);
+                    let resp = client.post(&url).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            eprintln!("Error: issue not found: {id}");
+                        } else {
+                            eprintln!("Error: {}", resp.status());
+                        }
+                        std::process::exit(1);
+                    }
+                    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
+                    eprintln!("Started issue {id}. Session: {}", issue.session_id.map(|id| id.to_string()).unwrap_or_default());
+                }
+                IssueAction::Complete { id, comment } => {
+                    let url = format!("{}/issues/{}/complete", cli.server, id);
+                    let req_body = json!({ "comment": comment });
+                    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            eprintln!("Error: issue not found: {id}");
+                        } else {
+                            eprintln!("Error: {}", resp.status());
+                        }
+                        std::process::exit(1);
+                    }
+                    eprintln!("Issue {id} marked as completed.");
+                }
+                IssueAction::List { status, assignee, parent, blocked_on } => {
+                    let mut url = format!("{}/issues", cli.server);
+                    let mut params: Vec<String> = vec![];
+                    if let Some(s) = &status {
+                        params.push(format!("status={s}"));
+                    }
+                    if let Some(a) = &assignee {
+                        params.push(format!("assignee={a}"));
+                    }
+                    if let Some(p) = &parent {
+                        params.push(format!("parent_id={p}"));
+                    }
+                    if let Some(bo) = &blocked_on {
+                        params.push(format!("blocked_on={bo}"));
+                    }
+                    if !params.is_empty() {
+                        url = format!("{url}?{}", params.join("&"));
+                    }
+                    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        eprintln!("Error: {}", resp.status());
+                        std::process::exit(1);
+                    }
+                    let issues: Vec<Issue> = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
+                    if issues.is_empty() {
+                        println!("No issues found.");
+                    } else {
+                        println!("{:<6}  {:<30}  {:<10}  {:<12}  created_at", "id", "title", "status", "assignee");
+                        for issue in &issues {
+                            print_issue_row(issue);
+                        }
+                    }
+                }
+                IssueAction::Wait { ids } => {
+                    if ids.is_empty() {
+                        eprintln!("Error: at least one --id is required");
+                        std::process::exit(1);
+                    }
+                    let mut any_failed = false;
+                    loop {
+                        let mut all_done = true;
+                        for id in &ids {
+                            let url = format!("{}/issues/{}", cli.server, id);
+                            let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+                                handle_connection_error(&e);
+                            });
+                            if !resp.status().is_success() {
+                                eprintln!("Error fetching issue {id}: {}", resp.status());
+                                std::process::exit(1);
+                            }
+                            let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+                                eprintln!("Error parsing response: {e}");
+                                std::process::exit(1);
+                            });
+                            if issue_is_terminal(&issue.status) {
+                                if issue.status == types::IssueStatus::Failed {
+                                    any_failed = true;
+                                }
+                            } else {
+                                all_done = false;
+                            }
+                        }
+                        if all_done {
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                    if any_failed {
+                        eprintln!("One or more issues failed.");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -777,6 +1068,26 @@ mod tests {
     use super::*;
     use types::*;
     use uuid::Uuid;
+
+    #[test]
+    fn issue_is_terminal_completed_is_true() {
+        assert!(issue_is_terminal(&types::IssueStatus::Completed));
+    }
+
+    #[test]
+    fn issue_is_terminal_failed_is_true() {
+        assert!(issue_is_terminal(&types::IssueStatus::Failed));
+    }
+
+    #[test]
+    fn issue_is_terminal_open_is_false() {
+        assert!(!issue_is_terminal(&types::IssueStatus::Open));
+    }
+
+    #[test]
+    fn issue_is_terminal_running_is_false() {
+        assert!(!issue_is_terminal(&types::IssueStatus::Running));
+    }
 
     fn make_turn() -> Turn {
         Turn {

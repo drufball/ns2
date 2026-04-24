@@ -4,6 +4,61 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+pub enum IssueStatus {
+    Open,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for IssueStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueStatus::Open => write!(f, "open"),
+            IssueStatus::Running => write!(f, "running"),
+            IssueStatus::Completed => write!(f, "completed"),
+            IssueStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl std::str::FromStr for IssueStatus {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "open" => Ok(IssueStatus::Open),
+            "running" => Ok(IssueStatus::Running),
+            "completed" => Ok(IssueStatus::Completed),
+            "failed" => Ok(IssueStatus::Failed),
+            _ => Err(format!("unknown issue status: {s}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueComment {
+    pub author: String,
+    pub created_at: DateTime<Utc>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Issue {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub status: IssueStatus,
+    pub assignee: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub parent_id: Option<String>,
+    pub blocked_on: Vec<String>,
+    pub comments: Vec<IssueComment>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Created,
     Running,
@@ -381,5 +436,58 @@ mod tests {
         assert_eq!(json, "\"assistant\"");
         let decoded: Role = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, Role::Assistant);
+    }
+
+    // --- IssueStatus ---
+
+    #[test]
+    fn issue_status_display_round_trip() {
+        for status in [
+            IssueStatus::Open,
+            IssueStatus::Running,
+            IssueStatus::Completed,
+            IssueStatus::Failed,
+        ] {
+            let s = status.to_string();
+            let parsed: IssueStatus = s.parse().expect("should parse");
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn issue_status_from_str_unknown_returns_err() {
+        let result: std::result::Result<IssueStatus, _> = "bogus".parse();
+        assert!(result.is_err());
+    }
+
+    // --- Issue serde round-trip ---
+
+    #[test]
+    fn issue_serde_round_trip() {
+        let issue = Issue {
+            id: "ab12".into(),
+            title: "Fix the bug".into(),
+            body: "Details here".into(),
+            status: IssueStatus::Open,
+            assignee: Some("swe".into()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec!["xy34".into()],
+            comments: vec![IssueComment {
+                author: "user".into(),
+                created_at: Utc::now(),
+                body: "A comment".into(),
+            }],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&issue).expect("serialize");
+        let decoded: Issue = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.id, "ab12");
+        assert_eq!(decoded.title, "Fix the bug");
+        assert_eq!(decoded.blocked_on, vec!["xy34"]);
+        assert_eq!(decoded.comments.len(), 1);
+        assert_eq!(decoded.comments[0].author, "user");
+        assert_eq!(decoded.status, IssueStatus::Open);
     }
 }
