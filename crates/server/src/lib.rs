@@ -88,6 +88,11 @@ struct SendMessageRequest {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct UpdateSessionStatusRequest {
+    status: String,
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
@@ -116,7 +121,7 @@ async fn create_session(
     state.db.create_session(&session).await?;
 
     if has_message {
-        let msg_tx = spawn_harness_sync(&state, session.clone());
+        let msg_tx = spawn_harness_sync(&state, session.clone(), None);
         msg_tx.send(initial_message).await.ok();
     }
 
@@ -131,6 +136,7 @@ async fn create_session(
 fn spawn_harness_sync(
     state: &AppState,
     session: Session,
+    issue_id: Option<String>,
 ) -> tokio::sync::mpsc::Sender<String> {
     let (tx, _rx) = tokio::sync::broadcast::channel::<SessionEvent>(256);
     let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<String>(16);
@@ -153,6 +159,38 @@ fn spawn_harness_sync(
     };
 
     let session_id = session_clone.id;
+
+    // If this session is linked to an issue, subscribe to the event channel now so we can
+    // watch for SessionDone and SessionError events and propagate them to the issue status.
+    // The harness is designed to stay alive waiting for more messages, so we cannot rely on
+    // harness::run returning — instead we react to individual turn completions.
+    let issue_watcher = issue_id.map(|id| {
+        let mut rx = tx.subscribe();
+        let db_watch = Arc::clone(&state.db);
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    SessionEvent::SessionDone { .. } => {
+                        if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
+                            issue.status = IssueStatus::Completed;
+                            issue.updated_at = Utc::now();
+                            let _ = db_watch.update_issue(&issue).await;
+                        }
+                        break;
+                    }
+                    SessionEvent::Error { .. } => {
+                        if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
+                            issue.status = IssueStatus::Failed;
+                            issue.updated_at = Utc::now();
+                            let _ = db_watch.update_issue(&issue).await;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+    });
 
     tokio::spawn(async move {
         // Insert into maps atomically before yielding back to callers.
@@ -181,6 +219,11 @@ fn spawn_harness_sync(
         {
             let mut smap = msg_senders_map.lock().await;
             smap.remove(&session_id);
+        }
+
+        // Ensure the watcher task is cleaned up when the harness exits.
+        if let Some(watcher) = issue_watcher {
+            watcher.abort();
         }
     });
 
@@ -365,13 +408,27 @@ async fn send_message(
             drop(senders);
             drop(spawning);
 
-            let msg_tx = spawn_harness_sync(&state, session);
+            let msg_tx = spawn_harness_sync(&state, session, None);
             msg_tx.send(req.message).await.ok();
             Ok(StatusCode::OK)
         }
         // `completed` or `failed` with no sender means the harness already exited.
         _ => Err(Error::NotFound),
     }
+}
+
+async fn update_session_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateSessionStatusRequest>,
+) -> std::result::Result<Json<Session>, Error> {
+    let new_status = req
+        .status
+        .parse::<SessionStatus>()
+        .map_err(Error::BadRequest)?;
+    state.db.update_session_status(id, new_status).await?;
+    let session = state.db.get_session(id).await?;
+    Ok(Json(session))
 }
 
 fn generate_issue_id() -> String {
@@ -546,14 +603,16 @@ async fn start_issue(
     };
     state.db.create_session(&session).await?;
 
-    let initial_message = format!("{}\n\n{}", issue.title, issue.body);
-    let msg_tx = spawn_harness_sync(&state, session.clone());
-    msg_tx.send(initial_message).await.ok();
-
+    // Update issue to Running before spawning the harness so the DB write cannot
+    // race with the harness auto-completing the issue on a fast (stub) client.
     issue.session_id = Some(session.id);
     issue.status = IssueStatus::Running;
     issue.updated_at = Utc::now();
     state.db.update_issue(&issue).await?;
+
+    let initial_message = format!("{}\n\n{}", issue.title, issue.body);
+    let msg_tx = spawn_harness_sync(&state, session.clone(), Some(issue.id.clone()));
+    msg_tx.send(initial_message).await.ok();
 
     Ok(Json(issue))
 }
@@ -586,6 +645,7 @@ fn build_router(state: AppState) -> Router {
         .route("/sessions/:id", get(get_session))
         .route("/sessions/:id/events", get(session_events))
         .route("/sessions/:id/messages", post(send_message))
+        .route("/sessions/:id/status", axum::routing::patch(update_session_status))
         .route("/issues", post(create_issue))
         .route("/issues", get(list_issues))
         .route("/issues/:id", get(get_issue))
@@ -1998,6 +2058,148 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- issue auto-completion when session terminates ---
+
+    #[tokio::test]
+    async fn test_issue_auto_completes_when_session_succeeds() {
+        let (app, state) = test_app_with_state().await;
+
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Auto complete test", "body": "body", "assignee": "swe"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Poll until the issue reaches a terminal state (harness uses TestClient → completes fast).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+            if issue.status == IssueStatus::Completed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("issue did not auto-complete within 5 seconds; status={}", issue.status);
+            }
+        }
+    }
+
+    // --- PATCH /sessions/:id/status ---
+
+    async fn patch_session_status(app: Router, id: &str, body: serde_json::Value) -> axum::response::Response {
+        app.oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/sessions/{id}/status"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_patch_session_status_happy_path() {
+        let app = test_app().await;
+
+        // Create a session first
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({"name": "status-test"})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        // Patch the status to "completed"
+        let resp = patch_session_status(app, &id, serde_json::json!({"status": "completed"})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"], id, "response must contain the session id");
+        assert_eq!(v["status"], "completed", "status must be updated to completed");
+    }
+
+    #[tokio::test]
+    async fn test_patch_session_status_not_found_returns_404() {
+        let app = test_app().await;
+        let fake_id = uuid::Uuid::new_v4();
+
+        let resp = patch_session_status(app, &fake_id.to_string(), serde_json::json!({"status": "running"})).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string(), "should contain an error field");
+    }
+
+    #[tokio::test]
+    async fn test_patch_session_status_invalid_status_returns_400() {
+        let app = test_app().await;
+
+        // Create a session first
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({"name": "bad-status"})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        let resp = patch_session_status(app, &id, serde_json::json!({"status": "bogus"})).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string(), "should contain an error field");
+    }
+
+    #[tokio::test]
+    async fn test_patch_session_status_all_valid_statuses() {
+        for status in ["created", "running", "completed", "failed", "cancelled"] {
+            let app = test_app().await;
+
+            let create_resp = app
+                .clone()
+                .oneshot(create_session_req(serde_json::json!({"name": format!("sess-{status}")})).await)
+                .await
+                .unwrap();
+            let body = response_body_bytes(create_resp).await;
+            let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let id = created["id"].as_str().unwrap().to_owned();
+
+            let resp = patch_session_status(app, &id, serde_json::json!({"status": status})).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "status '{status}' should be accepted"
+            );
+            let body = response_body_bytes(resp).await;
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["status"], status);
+        }
     }
 
     #[tokio::test]

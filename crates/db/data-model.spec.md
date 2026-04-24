@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-04-24T13:29:11Z
+verified: 2026-04-24T15:24:42Z
 ---
 
 # Data Model Spec
