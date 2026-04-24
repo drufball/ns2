@@ -17,15 +17,6 @@ cargo llvm-cov --summary-only
 - Use red-green TDD for all development.
 - When debugging, create a test that reproduces the reported error before touching any code.
 - Unit tests must mock all traits imported from other crates.
-
-## Product flows
-
-`product-flows/` contains end-to-end flow specs for the smoke-tester agent. When implementing features that add or change CLI flags or server behavior:
-
-1. Review the relevant flow specs and update any steps that should demonstrate the new behavior.
-2. Add a new flow spec if the feature introduces a distinct user-facing workflow.
-3. Run `ns2 spec verify` on any flows you touch, then confirm `ns2 spec sync --error-on-warnings` is clean.
-
 ## Dogfooding
 
 You must dogfood ns2 as part of your development workflow. At the start of every session, run `ns2 --help` and `ns2 agent list` for context.
