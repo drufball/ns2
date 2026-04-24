@@ -4,7 +4,7 @@ targets:
   - crates/anthropic/src/**/*.rs
   - crates/server/src/**/*.rs
 severity: warning
-verified: 2026-04-24T09:41:03Z
+verified: 2026-04-24T10:37:33Z
 ---
 
 
@@ -85,6 +85,3 @@ Re-tailing a completed session replays the stored content. Confirm the response 
 - [ ] Re-tailing a completed session replays the stored content identically
 - [ ] No panics, stack traces, or unhandled errors in server output
 
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

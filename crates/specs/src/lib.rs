@@ -72,7 +72,7 @@ pub fn format_spec_file(def: &SpecDef) -> String {
     }
     out.push_str("---\n");
     if !def.body.is_empty() {
-        out.push_str(&format!("\n\n{}", def.body));
+        out.push_str(&format!("\n{}", def.body));
     }
     out
 }

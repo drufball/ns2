@@ -3,7 +3,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T09:34:05Z
+verified: 2026-04-24T12:32:23Z
 ---
 
 
@@ -86,7 +86,3 @@ Expected: `PID file removed (expected)`.
 - [ ] `ns2 server stop` prints `Server stopped (pid <N>)` and terminates the server process
 - [ ] After stop, port 9876 refuses connections
 - [ ] After stop, the PID file is removed
-
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

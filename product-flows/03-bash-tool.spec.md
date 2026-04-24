@@ -3,7 +3,7 @@ targets:
   - crates/tools/src/**/*.rs
   - crates/harness/src/**/*.rs
 severity: warning
-verified: 2026-04-22T19:19:38Z
+verified: 2026-04-24T10:37:33Z
 ---
 
 
@@ -90,6 +90,3 @@ The tail output should show a `[tool: bash(...)]` line with `ls /`, a `[result: 
 - [ ] For the `ls /` session: the result includes `repo` and Claude describes the directory listing
 - [ ] No panics or unhandled errors in server output
 
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

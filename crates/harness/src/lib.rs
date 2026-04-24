@@ -131,7 +131,7 @@ async fn run_tool_dispatch_loop(
             model: config.model.clone(),
             system: system.clone(),
             messages: messages.clone(),
-            max_tokens: 4096,
+            max_tokens: 64000,
             tools: tool_definitions.clone(),
         };
 

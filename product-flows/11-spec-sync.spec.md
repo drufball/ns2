@@ -3,7 +3,7 @@ targets:
   - crates/specs/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T09:34:05Z
+verified: 2026-04-24T12:32:23Z
 ---
 
 
@@ -22,6 +22,7 @@ No API key required. No server needed.
 
 ```bash
 docker exec ns2-flow-11 bash /fixtures/init.sh
+docker exec ns2-flow-11 bash /fixtures/codebase-layout.sh
 ```
 
 The server is intentionally not started — spec commands are filesystem-only.
@@ -105,7 +106,3 @@ Expected: `Exit code: 0` (all specs with valid frontmatter are clean; legacy spe
 - [ ] A spec without a `verified` field treats all matched files as stale
 - [ ] Error output includes the spec path and each stale file path
 - [ ] No server required
-
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

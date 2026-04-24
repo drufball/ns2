@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-24T09:41:03Z
+verified: 2026-04-24T10:37:33Z
 ---
 
 
@@ -99,6 +99,3 @@ Expected: only the single session row matching that UUID is shown. The output is
 - [ ] `ns2 session list --id <uuid>` returns exactly the session matching that UUID
 - [ ] IDs in list output match the UUIDs printed by `session new`
 
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.

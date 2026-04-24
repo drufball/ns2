@@ -216,7 +216,8 @@ pub fn format_session_event(event: &types::SessionEvent) -> Option<String> {
     }
 }
 
-fn print_session_event(event: &types::SessionEvent) {
+fn print_session_event(event: &types::SessionEvent, to_stderr: bool) {
+    use std::io::Write;
     use types::SessionEvent::*;
     match event {
         // Text deltas stream without a newline; flush so the terminal shows them immediately.
@@ -225,17 +226,25 @@ fn print_session_event(event: &types::SessionEvent) {
             ..
         } => {
             if let Some(text) = format_session_event(event) {
-                print!("{text}");
-                use std::io::Write;
-                std::io::stdout().flush().ok();
+                if to_stderr {
+                    eprint!("{text}");
+                    std::io::stderr().flush().ok();
+                } else {
+                    print!("{text}");
+                    std::io::stdout().flush().ok();
+                }
             }
         }
-        // Errors go to stderr.
+        // Errors always go to stderr.
         Error { message } => eprintln!("[error] {message}"),
         // Everything else: print the formatted string (which already includes a newline).
         _ => {
             if let Some(output) = format_session_event(event) {
-                print!("{output}");
+                if to_stderr {
+                    eprint!("{output}");
+                } else {
+                    print!("{output}");
+                }
             }
         }
     }
@@ -268,7 +277,7 @@ pub fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
     out
 }
 
-async fn stream_events(url: &str) {
+async fn stream_events(url: &str, to_stderr: bool) {
     use futures::StreamExt;
     let client = reqwest::Client::new();
     let resp = client
@@ -291,7 +300,7 @@ async fn stream_events(url: &str) {
             for line in frames {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if let Ok(event) = serde_json::from_str::<types::SessionEvent>(data) {
-                        print_session_event(&event);
+                        print_session_event(&event, to_stderr);
                         if matches!(event, types::SessionEvent::SessionDone { .. }) {
                             return;
                         }
@@ -366,7 +375,7 @@ async fn main() {
                         Arc::new(tools::EditTool),
                     ],
                     model: std::env::var("ANTHROPIC_MODEL")
-                        .unwrap_or_else(|_| "claude-opus-4-5".to_string()),
+                        .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
                 };
                 if let Err(e) = server::run(config).await {
                     eprintln!("Server error: {e}");
@@ -495,9 +504,10 @@ async fn main() {
                 println!("{}", session.id);
 
                 if wait {
-                    // last_turns=1: show only the final turn, not full history
+                    // last_turns=1: show only the final turn, not full history.
+                    // Output goes to stderr so stdout stays UUID-only for scripting.
                     let events_url = format!("{}/sessions/{}/events?last_turns=1", cli.server, session.id);
-                    stream_events(&events_url).await;
+                    stream_events(&events_url, true).await;
                 }
             }
             SessionAction::Tail { id, name, turns } => {
@@ -506,7 +516,7 @@ async fn main() {
                 if let Some(n) = turns {
                     url = format!("{url}?last_turns={n}");
                 }
-                stream_events(&url).await;
+                stream_events(&url, false).await;
             }
             SessionAction::Send { id, name, message } => {
                 let session_id = resolve_session_id(&cli.server, id, name).await;
@@ -542,9 +552,9 @@ async fn main() {
                 if agent_list.is_empty() {
                     println!("No agents found.");
                 } else {
-                    println!("{:<20}  description", "name");
+                    println!("{:<20} description", "name");
                     for a in &agent_list {
-                        println!("{:<20}  {}", a.name, a.description);
+                        println!("{:<20} {}", a.name, a.description);
                     }
                 }
             }
@@ -588,7 +598,7 @@ async fn main() {
                     std::process::exit(1);
                 });
                 if description.is_none() && body.is_none() {
-                    eprintln!("Error: must provide at least one of --description or --body");
+                    eprintln!("Error: at least one of --description or --body must be provided");
                     std::process::exit(1);
                 }
                 let dir = agents::agents_dir().unwrap_or_else(|| {

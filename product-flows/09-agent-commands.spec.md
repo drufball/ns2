@@ -3,7 +3,7 @@ targets:
   - crates/agents/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T09:34:05Z
+verified: 2026-04-24T12:32:23Z
 ---
 
 
@@ -222,7 +222,3 @@ The existing `reviewer.md` file is unchanged.
 - [ ] `ns2 agent edit --name <n>` with no other flags exits non-zero with `Error: at least one of --description or --body must be provided`
 - [ ] `ns2 agent new` with a name that already exists exits non-zero without overwriting the file
 - [ ] None of these commands require a running server
-
-## Cleanup
-
-Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.
