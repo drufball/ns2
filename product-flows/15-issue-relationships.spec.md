@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-24T13:59:54Z
+verified: 2026-04-24T14:12:36Z
 ---
 
 # Flow 15: Issue Relationships

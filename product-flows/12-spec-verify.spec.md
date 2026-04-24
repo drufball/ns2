@@ -3,9 +3,8 @@ targets:
   - crates/specs/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T12:32:23Z
+verified: 2026-04-24T14:12:36Z
 ---
-
 
 # Flow 12: Spec Verify
 
