@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-24T14:02:58Z
+verified: 2026-04-24T15:24:08Z
 ---
 
 # CLI Commands Spec
@@ -14,24 +14,26 @@ This spec serves as feature reference and `--help` specification. The code in `m
 ### `ns2 --help`
 
 ```
-ns2 is a session-based agent orchestration tool.
+ns2 is an issue-driven agent orchestration tool.
 
 Concepts:
   agent    a named system prompt stored in .ns2/agents/; defines how the model behaves
-  session  a single task run — send messages in, the agent processes and responds
+  issue    a work item assigned to an agent; the primary way to get work done
+  session  internal implementation detail — created automatically when an issue starts
 
 Typical workflow:
   ns2 server start
   ns2 agent list
-  id=$(ns2 session new --agent swe --message "...")
-  ns2 session tail --id "$id"         # blocks until done; exits non-zero on failure
-  ns2 session send --id "$id" --message "..."
+  id=$(ns2 issue new --title "..." --body "..." --assignee swe)
+  ns2 issue start --id "$id"
+  ns2 issue wait --id "$id"
+  ns2 issue complete --id "$id" --comment "Done"
 
 Usage: ns2 [OPTIONS] <COMMAND>
 
 Commands:
   server   Localhost server. Must be running for all commands.
-  session  Create agent sessions to complete tasks.
+  session  Inspect agent sessions (implementation detail — use `issue` to get work done).
   agent    Create and list agents to use in sessions.
   spec     Create design docs and verify they are in sync.
   issue    Track and manage work items.
@@ -102,7 +104,9 @@ Options:
 ### `ns2 session --help`
 
 ```
-Sessions are how you get work done. Create one with an agent type and initial message; the agent processes it and produces output. Use tail to watch progress; use send to give follow-up instructions.
+Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue start` instead, which creates a session automatically.
+
+Use session commands for inspection: tail output, list recent runs, or stop a runaway session.
 
 Lifecycle:
   created    session exists but no message sent yet; agent not started
@@ -118,7 +122,8 @@ Commands:
   new   Start a new agent session and print its ID to stdout.
   tail  Stream a session's output to stdout.
   send  Queue a message to a session.
-  stop  Cancel a running or waiting session.
+  stop  Cancel a running or created session.
+  wait  Block until all specified sessions reach a terminal state.
   help  Print this message or the help of the given subcommand(s)
 
 Options:
@@ -243,6 +248,23 @@ Options:
 
       --name <NAME>
           Identify session by name (alternative to --id).
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 session wait --help`
+
+```
+Polls the listed sessions every second and exits once all of them are in 'completed', 'failed', or 'cancelled' state.
+
+Exits 0 if all sessions completed or were cancelled; exits 1 if any session failed or does not exist.
+
+Usage: ns2 session wait [OPTIONS]
+
+Options:
+      --id <IDS>...
+          Session IDs to wait on. Repeat for multiple.
 
   -h, --help
           Print help (see a summary with '-h')

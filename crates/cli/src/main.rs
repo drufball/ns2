@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "ns2")]
-#[command(about = "A session-based agent orchestration tool.")]
-#[command(long_about = "ns2 is a session-based agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  session  a single task run — send messages in, the agent processes and responds\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 session new --agent swe --message \"...\")\n  ns2 session tail --id \"$id\"         # blocks until done; exits non-zero on failure\n  ns2 session send --id \"$id\" --message \"...\"")]
+#[command(about = "An issue-driven agent orchestration tool.")]
+#[command(long_about = "ns2 is an issue-driven agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  issue    a work item assigned to an agent; the primary way to get work done\n  session  internal implementation detail — created automatically when an issue starts\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue start --id \"$id\"\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done\"")]
 struct Cli {
     #[arg(long, default_value = "http://localhost:9876", help = "Base URL of the ns2 server.")]
     server: String,
@@ -24,7 +24,7 @@ enum Command {
         #[command(subcommand)]
         action: ServerAction,
     },
-    #[command(about = "Create agent sessions to complete tasks.", long_about = "Sessions are how you get work done. Create one with an agent type and initial message; the agent processes it and produces output. Use tail to watch progress; use send to give follow-up instructions.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop")]
+    #[command(about = "Inspect agent sessions (implementation detail — use `issue` to get work done).", long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue start` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop")]
     Session {
         #[command(subcommand)]
         action: SessionAction,
@@ -125,6 +125,11 @@ enum SessionAction {
         id: Option<String>,
         #[arg(long, help = "Identify session by name (alternative to --id).")]
         name: Option<String>,
+    },
+    #[command(about = "Block until all specified sessions reach a terminal state.", long_about = "Polls the listed sessions every second and exits once all of them are in 'completed', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions completed or were cancelled; exits 1 if any session failed or does not exist.")]
+    Wait {
+        #[arg(long = "id", num_args = 1.., help = "Session UUIDs to wait on. Repeat for multiple.")]
+        ids: Vec<String>,
     },
 }
 
@@ -447,6 +452,13 @@ pub fn issue_is_terminal(status: &types::IssueStatus) -> bool {
     matches!(status, types::IssueStatus::Completed | types::IssueStatus::Failed)
 }
 
+pub fn session_is_terminal(status: &types::SessionStatus) -> bool {
+    matches!(
+        status,
+        types::SessionStatus::Completed | types::SessionStatus::Failed | types::SessionStatus::Cancelled
+    )
+}
+
 #[tokio::main]
 async fn main() {
     load_dotenv();
@@ -639,6 +651,67 @@ async fn main() {
                 let session_id = resolve_session_id(&cli.server, id, name).await;
                 // For MVP, just print "not implemented" — real cancellation is out of scope
                 println!("Stop not yet implemented for session {session_id}");
+            }
+            SessionAction::Wait { ids } => {
+                if ids.is_empty() {
+                    eprintln!("Error: at least one --id is required");
+                    std::process::exit(1);
+                }
+                let client = reqwest::Client::new();
+                // Validate that all session IDs parse as valid UUIDs up-front.
+                for id in &ids {
+                    if id.parse::<Uuid>().is_err() {
+                        eprintln!("Error: invalid session ID: {id}");
+                        std::process::exit(1);
+                    }
+                }
+                let mut terminal_statuses: std::collections::HashMap<String, types::SessionStatus> =
+                    std::collections::HashMap::new();
+                loop {
+                    let mut all_done = true;
+                    for id in &ids {
+                        if terminal_statuses.contains_key(id.as_str()) {
+                            continue;
+                        }
+                        let url = format!("{}/sessions/{}", cli.server, id);
+                        let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+                            handle_connection_error(&e);
+                        });
+                        if !resp.status().is_success() {
+                            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                                eprintln!("Error: session not found: {id}");
+                            } else {
+                                print_error_response(resp).await;
+                            }
+                            std::process::exit(1);
+                        }
+                        let session: Session = resp.json().await.unwrap_or_else(|e| {
+                            eprintln!("Error parsing response: {e}");
+                            std::process::exit(1);
+                        });
+                        if session_is_terminal(&session.status) {
+                            terminal_statuses.insert(id.clone(), session.status);
+                        } else {
+                            all_done = false;
+                        }
+                    }
+                    if all_done {
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                // Print one line per session: <uuid>  <status>
+                let mut any_failed = false;
+                for id in &ids {
+                    let status = terminal_statuses.get(id.as_str()).expect("all ids terminal");
+                    println!("{id}  {status}");
+                    if *status == types::SessionStatus::Failed {
+                        any_failed = true;
+                    }
+                }
+                if any_failed {
+                    std::process::exit(1);
+                }
             }
         },
         Command::Agent { action } => match action {
@@ -1366,6 +1439,55 @@ mod tests {
                 assert!(id.is_none());
             }
             _ => panic!("expected session list command"),
+        }
+    }
+
+    // --- session_is_terminal tests ---
+
+    #[test]
+    fn session_is_terminal_completed_is_true() {
+        assert!(session_is_terminal(&types::SessionStatus::Completed));
+    }
+
+    #[test]
+    fn session_is_terminal_failed_is_true() {
+        assert!(session_is_terminal(&types::SessionStatus::Failed));
+    }
+
+    #[test]
+    fn session_is_terminal_cancelled_is_true() {
+        assert!(session_is_terminal(&types::SessionStatus::Cancelled));
+    }
+
+    #[test]
+    fn session_is_terminal_created_is_false() {
+        assert!(!session_is_terminal(&types::SessionStatus::Created));
+    }
+
+    #[test]
+    fn session_is_terminal_running_is_false() {
+        assert!(!session_is_terminal(&types::SessionStatus::Running));
+    }
+
+    // --- session wait clap parse test ---
+
+    #[test]
+    fn session_wait_parses_multiple_ids() {
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid2 = "660f9511-f3ac-52e5-b827-557766551111";
+        let cli = Cli::try_parse_from([
+            "ns2", "session", "wait",
+            "--id", uuid1,
+            "--id", uuid2,
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Wait { ids } } => {
+                assert_eq!(ids.len(), 2);
+                assert!(ids.iter().any(|id| id == uuid1));
+                assert!(ids.iter().any(|id| id == uuid2));
+            }
+            _ => panic!("expected session wait command"),
         }
     }
 }
