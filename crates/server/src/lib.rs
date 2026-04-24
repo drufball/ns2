@@ -212,9 +212,15 @@ fn event_from(ev: &SessionEvent) -> Event {
     Event::default().data(serde_json::to_string(ev).unwrap_or_default())
 }
 
+#[derive(Deserialize)]
+struct SessionEventsQuery {
+    last_turns: Option<usize>,
+}
+
 async fn session_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(params): Query<SessionEventsQuery>,
 ) -> Sse<impl futures::Stream<Item = std::result::Result<Event, Infallible>>> {
     // Subscribe BEFORE reading history to avoid race
     let live_rx = {
@@ -230,7 +236,14 @@ async fn session_events(
 
     if let Ok(ref sess) = session {
         if let Ok(turns) = state.db.list_turns(id).await {
-            for turn in &turns {
+            // Apply last_turns filter: if last_turns=0, skip all; if last_turns=N, take last N; if absent, take all
+            let turns_to_replay: Vec<_> = match params.last_turns {
+                Some(0) => vec![],
+                Some(n) => turns.iter().rev().take(n).rev().cloned().collect(),
+                None => turns.clone(),
+            };
+
+            for turn in &turns_to_replay {
                 history.push(SessionEvent::TurnStarted { turn: turn.clone() });
                 if let Ok(blocks) = state.db.list_content_blocks(turn.id).await {
                     for (i, (_role, block)) in blocks.into_iter().enumerate() {
@@ -1074,6 +1087,227 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(has_session_done, "completed session events must include SessionDone");
+    }
+
+    // --- GET /sessions/:id/events?last_turns=N ---
+
+    /// Test that last_turns=0 skips all history and only emits SessionDone for terminal sessions.
+    #[tokio::test]
+    async fn test_session_events_last_turns_zero_skips_history() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a session and manually mark it completed with some turns
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "turns-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        
+        // Create 3 turns
+        for _ in 0..3 {
+            let turn = types::Turn {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                token_count: Some(10),
+                created_at: chrono::Utc::now(),
+            };
+            state.db.create_turn(&turn).await.unwrap();
+            state
+                .db
+                .create_content_block(
+                    turn.id,
+                    0,
+                    &types::Role::Assistant,
+                    &types::ContentBlock::Text { text: "hello".into() },
+                )
+                .await
+                .unwrap();
+        }
+        
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Request with last_turns=0
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/events?last_turns=0", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        // Should NOT have any TurnStarted events
+        let has_turn_started = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<SessionEvent>(json)
+                .map(|ev| matches!(ev, SessionEvent::TurnStarted { .. }))
+                .unwrap_or(false)
+        });
+        assert!(!has_turn_started, "last_turns=0 should skip all history turns");
+        
+        // Should still have SessionDone
+        let has_session_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<SessionEvent>(json)
+                .map(|ev| matches!(ev, SessionEvent::SessionDone { .. }))
+                .unwrap_or(false)
+        });
+        assert!(has_session_done, "completed session should still emit SessionDone");
+    }
+
+    /// Test that last_turns=1 emits only the last turn's events.
+    #[tokio::test]
+    async fn test_session_events_last_turns_one_emits_last_turn() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "turns-test-1".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        
+        // Create 3 turns with distinct content
+        let mut turn_ids = Vec::new();
+        for i in 0..3 {
+            let turn = types::Turn {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                token_count: Some(10),
+                created_at: chrono::Utc::now(),
+            };
+            turn_ids.push(turn.id);
+            state.db.create_turn(&turn).await.unwrap();
+            state
+                .db
+                .create_content_block(
+                    turn.id,
+                    0,
+                    &types::Role::Assistant,
+                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                )
+                .await
+                .unwrap();
+        }
+        
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Request with last_turns=1
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/events?last_turns=1", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        // Count TurnStarted events
+        let turn_started_count = raw
+            .lines()
+            .filter(|l| l.starts_with("data: "))
+            .filter(|l| {
+                let json = &l["data: ".len()..];
+                serde_json::from_str::<SessionEvent>(json)
+                    .map(|ev| matches!(ev, SessionEvent::TurnStarted { .. }))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(turn_started_count, 1, "last_turns=1 should emit exactly 1 turn");
+
+        // Should contain the last turn's content
+        assert!(raw.contains("turn-2"), "should contain last turn's content");
+        // Should NOT contain earlier turns' content
+        assert!(!raw.contains("turn-0"), "should not contain first turn's content");
+        assert!(!raw.contains("turn-1"), "should not contain second turn's content");
+    }
+
+    /// Test that absent last_turns param emits all history (current behavior).
+    #[tokio::test]
+    async fn test_session_events_no_last_turns_emits_all_history() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "turns-test-all".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        
+        // Create 3 turns
+        for i in 0..3 {
+            let turn = types::Turn {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                token_count: Some(10),
+                created_at: chrono::Utc::now(),
+            };
+            state.db.create_turn(&turn).await.unwrap();
+            state
+                .db
+                .create_content_block(
+                    turn.id,
+                    0,
+                    &types::Role::Assistant,
+                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                )
+                .await
+                .unwrap();
+        }
+        
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Request without last_turns param
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/events", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        // Should contain all turns' content
+        assert!(raw.contains("turn-0"), "should contain first turn's content");
+        assert!(raw.contains("turn-1"), "should contain second turn's content");
+        assert!(raw.contains("turn-2"), "should contain last turn's content");
     }
 
     /// A Completed session must still accept new messages via POST /sessions/:id/messages.
