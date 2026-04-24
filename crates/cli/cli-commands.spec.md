@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-23T19:56:21Z
+verified: 2026-04-24T09:03:39Z
 ---
 
 
@@ -143,6 +143,9 @@ Options:
       --status <STATUS>
           Show only sessions in this state. Values: created, running, completed, failed, cancelled.
 
+      --id <ID>
+          Show only the session with this UUID. Cannot be combined with --status.
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -163,6 +166,9 @@ Options:
 
       --message <MESSAGE>
           The opening task or instruction for the agent. If omitted, the session waits for your first `session send`.
+
+      --wait
+          Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on completed, non-zero on failed/cancelled. Requires --message.
 
   -h, --help
           Print help (see a summary with '-h')
@@ -191,6 +197,9 @@ Options:
 
       --name <NAME>
           Identify session by name (alternative to --id).
+
+      --turns <TURNS>
+          Only replay the last N turns of history before streaming live. 0 skips all history.
 
   -h, --help
           Print help (see a summary with '-h')

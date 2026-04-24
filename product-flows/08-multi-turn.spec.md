@@ -4,7 +4,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-22T19:19:38Z
+verified: 2026-04-24T09:41:47Z
 ---
 
 
@@ -96,6 +96,14 @@ docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session list --status completed
 
 Expected: the same session still appears with status `completed`.
 
+### Step 7: Re-tail with --turns 1 to replay only the final turn
+
+```bash
+docker exec ns2-flow-08 bash -c 'cd /repo && ns2 session tail --id "$(cat /tmp/session_id.txt)" --turns 1'
+```
+
+Expected: only the final assistant turn is replayed — no `[tool: read(...)]` line, no first-run content, just the last response containing `15484` followed by `[done]`.
+
 ## Acceptance Criteria
 
 - [ ] First session run completes with `completed` status
@@ -104,8 +112,9 @@ Expected: the same session still appears with status `completed`.
 - [ ] Claude's second response references `7742` (from context, not a new tool call)
 - [ ] Claude's second response contains `15484` (7742 doubled)
 - [ ] The session returns to `completed` after the second run
-- [ ] `session tail` after the second run shows two sets of turn events (two `[done]` markers)
+- [ ] `session tail` after the second run shows two sets of turn events ending in a single `[done]`
 - [ ] `ns2 session tail` output includes `[tool: read(...)]` and `[result: ...]` lines for the first-run tool call only — the second run must not re-read the file
+- [ ] `ns2 session tail --turns 1` replays only the final turn (no tool call, no first-run content)
 - [ ] No panics or unhandled errors in server output
 
 ## Cleanup

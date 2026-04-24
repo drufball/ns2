@@ -82,6 +82,8 @@ enum SessionAction {
     List {
         #[arg(long, help = "Show only sessions in this state. Values: created, running, completed, failed, cancelled.")]
         status: Option<String>,
+        #[arg(long, conflicts_with = "status", help = "Show only the session with this UUID. Cannot be combined with --status.")]
+        id: Option<String>,
     },
     #[command(about = "Start a new agent session and print its ID to stdout.", long_about = "Start a new agent session. Session ID is printed to stdout (suitable for capture via `$(...)`). Human-readable confirmation to stderr. If `--message` is provided, the agent starts immediately. Without `--message`, the session remains in `created` state — useful when you want to set up the session before sending the first message.")]
     New {
@@ -91,6 +93,8 @@ enum SessionAction {
         agent: Option<String>,
         #[arg(long, help = "The opening task or instruction for the agent. If omitted, the session waits for your first `session send`.")]
         message: Option<String>,
+        #[arg(long, requires = "message", help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on completed, non-zero on failed/cancelled. Requires --message.")]
+        wait: bool,
     },
     #[command(about = "Stream a session's output to stdout.", long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session completed successfully\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name.")]
     Tail {
@@ -98,6 +102,8 @@ enum SessionAction {
         id: Option<String>,
         #[arg(long, help = "Identify session by name (alternative to --id).")]
         name: Option<String>,
+        #[arg(long, help = "Only replay the last N turns of history before streaming live. 0 skips all history.")]
+        turns: Option<usize>,
     },
     #[command(about = "Queue a message to a session.", long_about = "Queue a message to a session.\n\nUse this to give follow-up instructions, provide additional context, or correct an agent that's going down an incorrect path. The message is queued immediately; the agent picks it up on its next turn. Messages can only be sent to sessions that are in the `created` or `running` state.")]
     Send {
@@ -262,6 +268,43 @@ pub fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
     out
 }
 
+async fn stream_events(url: &str) {
+    use futures::StreamExt;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap_or_else(|e| handle_connection_error(&e));
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap_or_else(|e| {
+            eprintln!("Stream error: {e}");
+            std::process::exit(1);
+        });
+        if let Ok(s) = std::str::from_utf8(&chunk) {
+            let frames = parse_sse_frames(&mut buffer, s);
+            for line in frames {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Ok(event) = serde_json::from_str::<types::SessionEvent>(data) {
+                        print_session_event(&event);
+                        if matches!(event, types::SessionEvent::SessionDone { .. }) {
+                            return;
+                        }
+                        if matches!(event, types::SessionEvent::Error { .. }) {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn resolve_session_id(server: &str, id: Option<String>, name: Option<String>) -> Uuid {
     if let Some(id) = id {
         id.parse().unwrap_or_else(|_| {
@@ -369,36 +412,67 @@ async fn main() {
             }
         },
         Command::Session { action } => match action {
-            SessionAction::List { status } => {
-                let mut url = format!("{}/sessions", cli.server);
-                if let Some(s) = &status {
-                    url = format!("{url}?status={s}");
-                }
+            SessionAction::List { status, id } => {
                 let client = reqwest::Client::new();
-                let resp = client.get(&url).send().await.unwrap_or_else(|e| {
-                    handle_connection_error(&e);
-                });
-                if !resp.status().is_success() {
-                    eprintln!("Error: {}", resp.status());
-                    std::process::exit(1);
-                }
-                let sessions: Vec<Session> = resp.json().await.unwrap_or_else(|e| {
-                    eprintln!("Error parsing response: {e}");
-                    std::process::exit(1);
-                });
-                if sessions.is_empty() {
-                    println!("No sessions found.");
-                } else {
+
+                // If --id is provided, fetch the specific session
+                if let Some(session_id) = id {
+                    let session_uuid: Uuid = session_id.parse().unwrap_or_else(|_| {
+                        eprintln!("Invalid session ID: {session_id}");
+                        std::process::exit(1);
+                    });
+                    let url = format!("{}/sessions/{}", cli.server, session_uuid);
+                    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            eprintln!("Error: session not found: {session_uuid}");
+                        } else {
+                            eprintln!("Error: {}", resp.status());
+                        }
+                        std::process::exit(1);
+                    }
+                    let session: Session = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
                     println!("{:<36}  {:<20}  {:<10}  created_at", "id", "name", "status");
-                    for s in &sessions {
-                        println!(
-                            "{:<36}  {:<20}  {:<10}  {}",
-                            s.id, s.name, s.status, s.created_at
-                        );
+                    println!(
+                        "{:<36}  {:<20}  {:<10}  {}",
+                        session.id, session.name, session.status, session.created_at
+                    );
+                } else {
+                    // List all sessions with optional status filter
+                    let mut url = format!("{}/sessions", cli.server);
+                    if let Some(s) = &status {
+                        url = format!("{url}?status={s}");
+                    }
+                    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if !resp.status().is_success() {
+                        eprintln!("Error: {}", resp.status());
+                        std::process::exit(1);
+                    }
+                    let sessions: Vec<Session> = resp.json().await.unwrap_or_else(|e| {
+                        eprintln!("Error parsing response: {e}");
+                        std::process::exit(1);
+                    });
+                    if sessions.is_empty() {
+                        println!("No sessions found.");
+                    } else {
+                        println!("{:<36}  {:<20}  {:<10}  created_at", "id", "name", "status");
+                        for s in &sessions {
+                            println!(
+                                "{:<36}  {:<20}  {:<10}  {}",
+                                s.id, s.name, s.status, s.created_at
+                            );
+                        }
                     }
                 }
             }
-            SessionAction::New { name, agent, message } => {
+            SessionAction::New { name, agent, message, wait } => {
                 let url = format!("{}/sessions", cli.server);
                 let body = json!({
                     "name": name,
@@ -419,47 +493,20 @@ async fn main() {
                 });
                 eprintln!("Created session: {} ({})", session.name, session.id);
                 println!("{}", session.id);
-            }
-            SessionAction::Tail { id, name } => {
-                let session_id = resolve_session_id(&cli.server, id, name).await;
-                let url = format!("{}/sessions/{}/events", cli.server, session_id);
 
-                let client = reqwest::Client::new();
-                let resp = client
-                    .get(&url)
-                    .header("Accept", "text/event-stream")
-                    .send()
-                    .await
-                    .unwrap_or_else(|e| handle_connection_error(&e));
-
-                use futures::StreamExt;
-                let mut stream = resp.bytes_stream();
-                let mut buffer = String::new();
-
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.unwrap_or_else(|e| {
-                        eprintln!("Stream error: {e}");
-                        std::process::exit(1);
-                    });
-                    if let Ok(s) = std::str::from_utf8(&chunk) {
-                        let frames = parse_sse_frames(&mut buffer, s);
-                        for line in frames {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if let Ok(event) =
-                                    serde_json::from_str::<types::SessionEvent>(data)
-                                {
-                                    print_session_event(&event);
-                                    if matches!(event, types::SessionEvent::SessionDone { .. }) {
-                                        return;
-                                    }
-                                    if matches!(event, types::SessionEvent::Error { .. }) {
-                                        std::process::exit(1);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if wait {
+                    // last_turns=1: show only the final turn, not full history
+                    let events_url = format!("{}/sessions/{}/events?last_turns=1", cli.server, session.id);
+                    stream_events(&events_url).await;
                 }
+            }
+            SessionAction::Tail { id, name, turns } => {
+                let session_id = resolve_session_id(&cli.server, id, name).await;
+                let mut url = format!("{}/sessions/{}/events", cli.server, session_id);
+                if let Some(n) = turns {
+                    url = format!("{url}?last_turns={n}");
+                }
+                stream_events(&url).await;
             }
             SessionAction::Send { id, name, message } => {
                 let session_id = resolve_session_id(&cli.server, id, name).await;
@@ -891,5 +938,86 @@ mod tests {
             pid_file.to_string_lossy().ends_with(".pid"),
             "pid_file should end with .pid"
         );
+    }
+
+    // --- CLI flag parsing tests ---
+
+    use clap::Parser;
+
+    #[test]
+    fn session_tail_parses_turns_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc", "--turns", "5"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Tail { turns, .. } } => {
+                assert_eq!(turns, Some(5));
+            }
+            _ => panic!("expected session tail command"),
+        }
+    }
+
+    #[test]
+    fn session_tail_turns_zero_is_valid() {
+        let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc", "--turns", "0"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Tail { turns, .. } } => {
+                assert_eq!(turns, Some(0));
+            }
+            _ => panic!("expected session tail command"),
+        }
+    }
+
+    #[test]
+    fn session_tail_no_turns_flag_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Tail { turns, .. } } => {
+                assert_eq!(turns, None);
+            }
+            _ => panic!("expected session tail command"),
+        }
+    }
+
+    #[test]
+    fn session_new_parses_wait_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "new", "--message", "do the thing", "--wait"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::New { wait, .. } } => {
+                assert!(wait);
+            }
+            _ => panic!("expected session new command"),
+        }
+    }
+
+    #[test]
+    fn session_new_no_wait_flag_is_false() {
+        let cli = Cli::try_parse_from(["ns2", "session", "new"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::New { wait, .. } } => {
+                assert!(!wait);
+            }
+            _ => panic!("expected session new command"),
+        }
+    }
+
+    #[test]
+    fn session_list_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "list", "--id", "550e8400-e29b-41d4-a716-446655440000"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::List { id, .. } } => {
+                assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+            }
+            _ => panic!("expected session list command"),
+        }
+    }
+
+    #[test]
+    fn session_list_no_id_flag_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "session", "list"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::List { id, .. } } => {
+                assert!(id.is_none());
+            }
+            _ => panic!("expected session list command"),
+        }
     }
 }

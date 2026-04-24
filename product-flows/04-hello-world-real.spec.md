@@ -4,7 +4,7 @@ targets:
   - crates/anthropic/src/**/*.rs
   - crates/server/src/**/*.rs
 severity: warning
-verified: 2026-04-22T19:19:38Z
+verified: 2026-04-24T09:41:03Z
 ---
 
 
@@ -32,6 +32,14 @@ docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session new --message "hello" |
 ```
 
 Expected: a UUID printed alongside `Session created:`.
+
+### (Alternative) Create a session with --wait
+
+```bash
+docker exec ns2-flow-04 bash -c 'cd /repo && ns2 session new --message "hello" --wait | tee /tmp/wait_session_id.txt'
+```
+
+Expected: the command blocks until Claude responds. Output is the session UUID followed by the final assistant turn only. The command exits 0 on successful completion.
 
 ### Tail the session
 
@@ -69,6 +77,7 @@ Re-tailing a completed session replays the stored content. Confirm the response 
 
 - [ ] `ns2 server start` picks up `ANTHROPIC_API_KEY` from the `.env` file
 - [ ] `ns2 session new --message "hello"` creates a session that transitions to `running`
+- [ ] `ns2 session new --message "hello" --wait` blocks until completion and exits 0
 - [ ] `ns2 session tail` streams real text from the Anthropic API
 - [ ] The response is coherent natural language (not the stub string "I'm a stub assistant.")
 - [ ] The session transitions to `completed` after the response is fully streamed

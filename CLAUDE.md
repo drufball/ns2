@@ -17,7 +17,6 @@ cargo llvm-cov --summary-only
 - Use red-green TDD for all development.
 - When debugging, create a test that reproduces the reported error before touching any code.
 - Unit tests must mock all traits imported from other crates.
-
 ## Dogfooding
 
 You must dogfood ns2 as part of your development workflow. At the start of every session, run `ns2 --help` and `ns2 agent list` for context.
