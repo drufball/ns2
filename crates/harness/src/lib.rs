@@ -768,7 +768,7 @@ mod tests {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
-            .args(["init", "--bare"])
+            .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
             .status()
             .expect("git init --bare");
@@ -830,7 +830,7 @@ mod tests {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
-            .args(["init", "--bare"])
+            .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
             .status()
             .expect("git init --bare");
@@ -888,7 +888,7 @@ mod tests {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
-            .args(["init", "--bare"])
+            .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
             .status()
             .expect("git init --bare");

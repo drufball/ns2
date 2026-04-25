@@ -3,7 +3,7 @@ targets:
   - crates/tools/src/**/*.rs
   - crates/harness/src/**/*.rs
 severity: warning
-verified: 2026-04-25T18:44:20Z
+verified: 2026-04-25T18:57:12Z
 ---
 
 # Flow 03: Bash Tool

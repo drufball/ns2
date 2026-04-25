@@ -617,7 +617,7 @@ mod tests {
     pub(crate) fn setup_git_repo_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
-            .args(["init", "--bare"])
+            .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
             .status()
             .expect("git init --bare");
