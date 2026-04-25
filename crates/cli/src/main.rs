@@ -503,6 +503,15 @@ pub fn issue_is_terminal(status: &types::IssueStatus) -> bool {
     matches!(status, types::IssueStatus::Completed | types::IssueStatus::Failed)
 }
 
+/// Check whether every node in the issue tree (roots AND all descendants) is terminal.
+/// Used by `issue wait` to decide when to stop polling.
+pub fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
+    fn node_terminal(node: &IssueTreeNode) -> bool {
+        issue_is_terminal(&node.issue.status) && node.children.iter().all(node_terminal)
+    }
+    roots.iter().all(node_terminal)
+}
+
 pub fn session_is_terminal(status: &types::SessionStatus) -> bool {
     matches!(
         status,
@@ -558,7 +567,10 @@ pub fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, is_root
 
     if is_root {
         let snippet_part = if let Some(ref snippet) = node.snippet {
-            let s = truncate_str(snippet, 30);
+            // Sanitize: replace newlines/carriage-returns with spaces so the
+            // line-count assumption used for ANSI cursor-up redraw is not broken.
+            let clean: String = snippet.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+            let s = truncate_str(&clean, 30);
             if s.is_empty() {
                 String::new()
             } else {
@@ -577,13 +589,26 @@ pub fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, is_root
 pub fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for (ri, root) in roots.iter().enumerate() {
+        let is_last_root = ri + 1 == roots.len();
         let root_prefix = if roots.len() > 1 {
-            if ri + 1 < roots.len() { "├── " } else { "└── " }
+            if !is_last_root { "├── " } else { "└── " }
         } else {
             ""
         };
         lines.push(render_tree_line(root, root_prefix, tick, true));
-        render_children(&root.children, "", tick, &mut lines);
+        // When there are multiple roots, children must be indented relative to the
+        // root's own connector so the tree lines up correctly:
+        //   ├── Root A          <- root_prefix = "├── "
+        //   │   ├── Child 1     <- parent_indent = "│   "
+        //   │   └── Child 2
+        //   └── Root B          <- root_prefix = "└── "
+        //       └── Child 3     <- parent_indent = "    "
+        let child_indent = if roots.len() > 1 {
+            if !is_last_root { "│   " } else { "    " }
+        } else {
+            ""
+        };
+        render_children(&root.children, child_indent, tick, &mut lines);
     }
     lines
 }
@@ -612,9 +637,8 @@ fn render_children(children: &[IssueTreeNode], parent_indent: &str, tick: usize,
 /// Running sessions get an animated braille spinner; terminal sessions get a static symbol.
 pub fn session_status_symbol(status: &types::SessionStatus, tick: usize) -> (String, &'static str) {
     match status {
-        types::SessionStatus::Running | types::SessionStatus::Created => {
-            (spinner_char(tick).to_string(), "running")
-        }
+        types::SessionStatus::Running => (spinner_char(tick).to_string(), "running"),
+        types::SessionStatus::Created => (spinner_char(tick).to_string(), "created"),
         types::SessionStatus::Completed => ("✔".to_string(), "completed"),
         types::SessionStatus::Failed => ("✗".to_string(), "failed"),
         types::SessionStatus::Cancelled => ("●".to_string(), "cancelled"),
@@ -640,7 +664,7 @@ pub fn render_session_line(
     let (sym, label) = session_status_symbol(status, tick);
     let snippet_part = match snippet {
         Some(s) if !s.trim().is_empty() => {
-            let trimmed = s.trim().replace('\n', " ");
+            let trimmed = s.trim().replace(['\n', '\r'], " ");
             format!("{}  ", truncate_str(&trimmed, 40))
         }
         _ => String::new(),
@@ -1509,11 +1533,6 @@ async fn main() {
                         }
                     }
 
-                    // Check if all roots are terminal.
-                    fn all_roots_terminal(roots: &[IssueTreeNode]) -> bool {
-                        roots.iter().all(|r| issue_is_terminal(&r.issue.status))
-                    }
-
                     use std::io::Write;
 
                     let mut tick: usize = 0;
@@ -1573,7 +1592,7 @@ async fn main() {
                         prev_line_count = lines.len();
 
                         // Check if all done
-                        if all_roots_terminal(&roots) {
+                        if all_nodes_terminal(&roots) {
                             for root in &roots {
                                 if root.issue.status == types::IssueStatus::Failed {
                                     any_failed = true;
@@ -2582,5 +2601,220 @@ mod tests {
         let id = "550e8400-e29b-41d4-a716-446655440000";
         let line = render_session_line(id, "", None, &types::SessionStatus::Completed, 0);
         assert!(line.contains("[550e8400] -:"), "empty name should render as dash");
+    }
+
+    // ─── P1: all_nodes_terminal must check entire tree, not just roots ────────
+
+    #[test]
+    fn all_nodes_terminal_returns_false_when_child_is_running() {
+        // Root is completed but child is still running — should NOT be terminal.
+        let running_child = IssueTreeNode {
+            issue: make_tree_issue("ch01", "Child", types::IssueStatus::Running),
+            snippet: None,
+            children: vec![],
+        };
+        let roots = vec![IssueTreeNode {
+            issue: make_tree_issue("rt01", "Root", types::IssueStatus::Completed),
+            snippet: None,
+            children: vec![running_child],
+        }];
+        assert!(
+            !all_nodes_terminal(&roots),
+            "should be false when any child is still running"
+        );
+    }
+
+    #[test]
+    fn all_nodes_terminal_returns_true_when_all_nodes_done() {
+        let done_child = IssueTreeNode {
+            issue: make_tree_issue("ch02", "Child", types::IssueStatus::Completed),
+            snippet: None,
+            children: vec![],
+        };
+        let roots = vec![IssueTreeNode {
+            issue: make_tree_issue("rt02", "Root", types::IssueStatus::Completed),
+            snippet: None,
+            children: vec![done_child],
+        }];
+        assert!(
+            all_nodes_terminal(&roots),
+            "should be true when all nodes are terminal"
+        );
+    }
+
+    #[test]
+    fn all_nodes_terminal_returns_false_when_grandchild_is_running() {
+        let running_grandchild = IssueTreeNode {
+            issue: make_tree_issue("gc01", "Grandchild", types::IssueStatus::Running),
+            snippet: None,
+            children: vec![],
+        };
+        let done_child = IssueTreeNode {
+            issue: make_tree_issue("ch03", "Child", types::IssueStatus::Completed),
+            snippet: None,
+            children: vec![running_grandchild],
+        };
+        let roots = vec![IssueTreeNode {
+            issue: make_tree_issue("rt03", "Root", types::IssueStatus::Completed),
+            snippet: None,
+            children: vec![done_child],
+        }];
+        assert!(
+            !all_nodes_terminal(&roots),
+            "should be false when a grandchild is still running"
+        );
+    }
+
+    // ─── P2a: Multi-root children indentation ────────────────────────────────
+
+    #[test]
+    fn multi_root_non_last_root_children_indented_with_pipe() {
+        // When there are 2 roots and the first root (├──) has children,
+        // those children should be indented with "│   " (continuing bar).
+        let child = IssueTreeNode {
+            issue: make_tree_issue("ch10", "Child of A", types::IssueStatus::Running),
+            snippet: None,
+            children: vec![],
+        };
+        let roots = vec![
+            IssueTreeNode {
+                issue: make_tree_issue("aa10", "Root A", types::IssueStatus::Running),
+                snippet: None,
+                children: vec![child],
+            },
+            IssueTreeNode {
+                issue: make_tree_issue("bb10", "Root B", types::IssueStatus::Completed),
+                snippet: None,
+                children: vec![],
+            },
+        ];
+        let lines = render_issue_tree(&roots, 0);
+        // lines[0] = Root A (├── prefix)
+        // lines[1] = Child of A — must start with "│   " because Root A is non-last
+        // lines[2] = Root B (└── prefix)
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines[1].starts_with("│   "),
+            "child of non-last root must start with │   , got: {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn multi_root_last_root_children_indented_with_spaces() {
+        // When there are 2 roots and the last root (└──) has children,
+        // those children should be indented with "    " (four spaces, no bar).
+        let child = IssueTreeNode {
+            issue: make_tree_issue("ch11", "Child of B", types::IssueStatus::Running),
+            snippet: None,
+            children: vec![],
+        };
+        let roots = vec![
+            IssueTreeNode {
+                issue: make_tree_issue("aa11", "Root A", types::IssueStatus::Completed),
+                snippet: None,
+                children: vec![],
+            },
+            IssueTreeNode {
+                issue: make_tree_issue("bb11", "Root B", types::IssueStatus::Running),
+                snippet: None,
+                children: vec![child],
+            },
+        ];
+        let lines = render_issue_tree(&roots, 0);
+        // lines[0] = Root A (├── prefix)
+        // lines[1] = Root B (└── prefix)
+        // lines[2] = Child of B — must start with "    " (4 spaces) because Root B is last
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines[2].starts_with("    "),
+            "child of last root must start with 4 spaces, got: {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[2].starts_with("│"),
+            "child of last root must NOT start with │, got: {:?}",
+            lines[2]
+        );
+    }
+
+    // ─── P2b: Snippet newline sanitization ───────────────────────────────────
+
+    #[test]
+    fn render_tree_line_snippet_with_newline_is_sanitized() {
+        let node = IssueTreeNode {
+            issue: make_tree_issue("ab99", "Task", types::IssueStatus::Running),
+            snippet: Some("line one\nline two".to_string()),
+            children: vec![],
+        };
+        let line = render_tree_line(&node, "", 0, true);
+        // The output line must NOT contain a literal newline character
+        assert!(
+            !line.contains('\n'),
+            "rendered tree line must not contain literal newline, got: {:?}",
+            line
+        );
+        // The snippet content should appear with a space substituted for the newline
+        assert!(
+            line.contains("line one line two"),
+            "newline in snippet should be replaced with space, got: {:?}",
+            line
+        );
+    }
+
+    #[test]
+    fn render_tree_line_snippet_with_carriage_return_is_sanitized() {
+        let node = IssueTreeNode {
+            issue: make_tree_issue("ab98", "Task", types::IssueStatus::Running),
+            snippet: Some("line one\r\nline two".to_string()),
+            children: vec![],
+        };
+        let line = render_tree_line(&node, "", 0, true);
+        assert!(
+            !line.contains('\n'),
+            "rendered tree line must not contain literal newline"
+        );
+        assert!(
+            !line.contains('\r'),
+            "rendered tree line must not contain carriage return"
+        );
+    }
+
+    // ─── P3: session_status_symbol Created label ─────────────────────────────
+
+    #[test]
+    fn session_status_symbol_created_returns_created_label() {
+        let (sym, label) = session_status_symbol(&types::SessionStatus::Created, 0);
+        // Symbol should still be a spinner (animated)
+        assert_eq!(sym, SPINNER_FRAMES[0].to_string(), "created status should use spinner");
+        // Label must NOT be "running" — should be "created" or "waiting"
+        assert_ne!(
+            label, "running",
+            "Created status label must not be 'running', should be 'created'"
+        );
+        assert_eq!(label, "created", "Created status should have label 'created'");
+    }
+
+    // ─── P4: render_session_line sanitizes \r in snippet ─────────────────────
+
+    #[test]
+    fn render_session_line_snippet_with_carriage_return_is_sanitized() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let line = render_session_line(
+            id,
+            "task",
+            Some("first\r\nsecond"),
+            &types::SessionStatus::Running,
+            0,
+        );
+        assert!(
+            !line.contains('\r'),
+            "render_session_line must not embed carriage return in output, got: {:?}",
+            line
+        );
+        assert!(
+            !line.contains('\n'),
+            "render_session_line must not embed literal newline in output"
+        );
     }
 }
