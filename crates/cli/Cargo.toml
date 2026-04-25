@@ -25,3 +25,6 @@ tools = { path = "../tools" }
 futures = "0.3"
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
