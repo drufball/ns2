@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-24T15:24:20Z
+verified: 2026-04-25T10:03:20Z
 ---
 
 # Flow 05: Error Handling When Server Is Down

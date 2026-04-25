@@ -4,7 +4,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-04-24T15:24:20Z
+verified: 2026-04-25T10:02:12Z
 ---
 
 # Agent Sessions Spec
@@ -38,9 +38,9 @@ created → running → [waiting → running → ... →] completed | failed | c
 
 ## State & Persistence
 
-- **SQLite:** source of truth. session metadata, status, full turn + message history, tool call results
-- **In-memory:** active tokio task handle per running session, SSE subscriber list per session
-- Server is largely stateless — on restart, sessions in `running` state are marked `failed` and can be retried
+- **SQLite:** source of truth. Session metadata, status, full turn + message history, tool call results. A fresh harness can reconstruct the complete conversation from the DB with no in-memory dependency.
+- **In-memory:** active tokio task handle per running session, SSE broadcast channel per session. These are ephemeral — dropped on harness exit or server restart.
+- Server is stateless except for SSE channels — on restart, orphaned `running` sessions are swept to `failed` and can be reopened; `completed` sessions remain intact and accept new messages by spawning a fresh harness that loads history from SQLite.
 
 ## Concurrency
 

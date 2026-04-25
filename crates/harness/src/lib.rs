@@ -315,6 +315,7 @@ mod tests {
                 assignee: Option<String>,
                 parent_id: Option<String>,
             ) -> db::Result<Vec<types::Issue>>;
+            async fn list_issues_by_session_id(&self, session_id: uuid::Uuid) -> db::Result<Vec<types::Issue>>;
             async fn update_issue(&self, issue: &types::Issue) -> db::Result<()>;
         }
 

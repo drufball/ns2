@@ -172,6 +172,8 @@ enum IssueAction {
         parent: Option<String>,
         #[arg(long = "blocked-on", num_args = 1.., help = "Issue IDs that must be completed before this one. Repeat for multiple.")]
         blocked_on: Vec<String>,
+        #[arg(long, help = "Immediately start the issue after creating it. Requires --assignee.")]
+        start: bool,
     },
     #[command(about = "Edit an existing issue.", long_about = "Edit fields of an existing issue. Only the flags you provide are changed.")]
     Edit {
@@ -208,6 +210,15 @@ enum IssueAction {
         id: String,
         #[arg(long, help = "A final summary of what was done. Required.")]
         comment: String,
+    },
+    #[command(about = "Move a failed or completed issue back to open.", long_about = "Moves a failed or completed issue back to open so work can resume on the same thread. Preserves all existing comments.\n\n- failed → reopen → clears the session_id link so a fresh session will be created on next start.\n- completed → reopen → keeps the session_id so the existing session history is resumed on next start.\n\nOnly failed or completed issues can be reopened. Attempting to reopen an issue in any other state is an error.")]
+    Reopen {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+        #[arg(long, help = "Append a comment to the issue thread before transitioning back to open. Author is 'user'.")]
+        comment: Option<String>,
+        #[arg(long, help = "Immediately start the issue after reopening it.")]
+        start: bool,
     },
     #[command(about = "List issues.", long_about = "List issues, newest first. Use flags to filter.\n\nOutput columns: id, title, status, assignee, created_at")]
     List {
@@ -948,7 +959,11 @@ async fn main() {
         Command::Issue { action } => {
             let client = reqwest::Client::new();
             match action {
-                IssueAction::New { title, body, assignee, parent, blocked_on } => {
+                IssueAction::New { title, body, assignee, parent, blocked_on, start } => {
+                    if start && assignee.is_none() {
+                        eprintln!("Error: --start requires --assignee (start needs an agent to run)");
+                        std::process::exit(1);
+                    }
                     if let Some(ref a) = assignee {
                         if let Some(dir) = agents::agents_dir() {
                             if agents::load_agent(&dir, a).is_none() {
@@ -977,6 +992,25 @@ async fn main() {
                     });
                     eprintln!("Created issue: {} ({})", issue.title, issue.id);
                     println!("{}", issue.id);
+
+                    if start {
+                        let start_url = format!("{}/issues/{}/start", cli.server, issue.id);
+                        let start_resp = client.post(&start_url).send().await.unwrap_or_else(|e| {
+                            handle_connection_error(&e);
+                        });
+                        if !start_resp.status().is_success() {
+                            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
+                                eprintln!("Error: issue not found: {}", issue.id);
+                                std::process::exit(1);
+                            }
+                            print_error_response(start_resp).await;
+                        }
+                        let started: Issue = start_resp.json().await.unwrap_or_else(|e| {
+                            eprintln!("Error parsing response: {e}");
+                            std::process::exit(1);
+                        });
+                        eprintln!("Started issue {}. Session: {}", started.id, started.session_id.map(|id| id.to_string()).unwrap_or_default());
+                    }
                 }
                 IssueAction::Edit { id, title, body, assignee, parent, blocked_on } => {
                     let url = format!("{}/issues/{}", cli.server, id);
@@ -1076,6 +1110,40 @@ async fn main() {
                         print_error_response(resp).await;
                     }
                     eprintln!("Issue {id} marked as completed.");
+                }
+                IssueAction::Reopen { id, comment, start } => {
+                    let url = format!("{}/issues/{}/reopen", cli.server, id);
+                    let req_body = json!({ "comment": comment });
+                    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
+                        handle_connection_error(&e);
+                    });
+                    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                        eprintln!("Error: issue not found: {id}");
+                        std::process::exit(1);
+                    }
+                    if !resp.status().is_success() {
+                        print_error_response(resp).await;
+                    }
+                    eprintln!("Issue {id} reopened.");
+
+                    if start {
+                        let start_url = format!("{}/issues/{}/start", cli.server, id);
+                        let start_resp = client.post(&start_url).send().await.unwrap_or_else(|e| {
+                            handle_connection_error(&e);
+                        });
+                        if !start_resp.status().is_success() {
+                            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
+                                eprintln!("Error: issue not found: {id}");
+                                std::process::exit(1);
+                            }
+                            print_error_response(start_resp).await;
+                        }
+                        let started: Issue = start_resp.json().await.unwrap_or_else(|e| {
+                            eprintln!("Error parsing response: {e}");
+                            std::process::exit(1);
+                        });
+                        eprintln!("Started issue {id}. Session: {}", started.session_id.map(|id| id.to_string()).unwrap_or_default());
+                    }
                 }
                 IssueAction::List { status, assignee, parent, blocked_on } => {
                     let mut url = format!("{}/issues", cli.server);
@@ -1488,6 +1556,104 @@ mod tests {
                 assert!(ids.iter().any(|id| id == uuid2));
             }
             _ => panic!("expected session wait command"),
+        }
+    }
+
+    // --- issue reopen CLI parse tests ---
+
+    #[test]
+    fn issue_reopen_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Reopen { id, .. } } => {
+                assert_eq!(id, "ab12");
+            }
+            _ => panic!("expected issue reopen command"),
+        }
+    }
+
+    #[test]
+    fn issue_reopen_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "reopen"]);
+        assert!(result.is_err(), "reopen without --id should fail to parse");
+    }
+
+    #[test]
+    fn issue_reopen_parses_comment_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "reopen", "--id", "ab12", "--comment", "fix the test",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Reopen { id, comment, .. } } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(comment.as_deref(), Some("fix the test"));
+            }
+            _ => panic!("expected issue reopen command"),
+        }
+    }
+
+    #[test]
+    fn issue_reopen_no_comment_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Reopen { comment, .. } } => {
+                assert!(comment.is_none());
+            }
+            _ => panic!("expected issue reopen command"),
+        }
+    }
+
+    #[test]
+    fn issue_reopen_parses_start_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12", "--start"])
+            .unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Reopen { start, .. } } => {
+                assert!(start);
+            }
+            _ => panic!("expected issue reopen command"),
+        }
+    }
+
+    #[test]
+    fn issue_reopen_no_start_flag_is_false() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Reopen { start, .. } } => {
+                assert!(!start);
+            }
+            _ => panic!("expected issue reopen command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_parses_start_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "new", "--title", "t", "--body", "b", "--assignee", "swe", "--start",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { start, .. },
+            } => {
+                assert!(start);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_start_flag_is_false() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"])
+            .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { start, .. },
+            } => {
+                assert!(!start);
+            }
+            _ => panic!("expected issue new command"),
         }
     }
 }

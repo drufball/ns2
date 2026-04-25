@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-24T15:24:20Z
+verified: 2026-04-25T10:03:20Z
 ---
 
 # Flow 13: Issue Lifecycle
@@ -92,7 +92,30 @@ docker exec ns2-flow-13 bash -c 'cd /repo && ns2 issue list --status completed'
 
 Expected: the issue shows with status `completed`.
 
-### Step 7: Add a completion comment
+### Step 7: Verify the agent posted a final-turn comment automatically
+
+```bash
+docker exec ns2-flow-13 bash -c '
+  ISSUE=$(cat /tmp/issue_id.txt)
+  curl -sf "http://localhost:9876/issues/$ISSUE" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+comments = d[\"comments\"]
+agent_comments = [c for c in comments if c[\"author\"] == \"swe\"]
+print(\"Agent comments:\", len(agent_comments))
+if len(agent_comments) >= 1:
+    print(\"OK\")
+else:
+    print(\"FAIL\")
+    sys.exit(1)
+"
+'
+```
+
+Expected: `OK` — the `issue_watcher` task automatically posted the agent's final turn text
+as a comment (author = `"swe"`) before transitioning the issue to `completed`.
+
+### Step 8: Add a manual completion comment
 
 ```bash
 docker exec ns2-flow-13 bash -c 'cd /repo && ns2 issue complete --id "$(cat /tmp/issue_id.txt)" --comment "Verified: hello.txt created with correct content."'
@@ -103,7 +126,7 @@ Expected output on stderr:
 Issue <id> marked completed.
 ```
 
-### Step 8: Add a regular comment
+### Step 9: Add a regular comment
 
 ```bash
 docker exec ns2-flow-13 bash -c 'cd /repo && ns2 issue comment --id "$(cat /tmp/issue_id.txt)" --body "Good work!" --author reviewer'
@@ -122,6 +145,7 @@ Expected: command exits 0 with no error.
 - [ ] The session receives the issue title and body as the opening message
 - [ ] `ns2 issue wait --id <id>` blocks until the issue reaches a terminal state
 - [ ] `ns2 issue wait` exits 0 when the issue completes successfully
-- [ ] `ns2 issue complete --id <id> --comment "..."` adds a summary comment
+- [ ] When the session completes, the agent's final turn text is automatically posted as a comment with `author == assignee`
+- [ ] `ns2 issue complete --id <id> --comment "..."` adds a manual summary comment (in addition to the auto-posted agent comment)
 - [ ] `ns2 issue comment` adds comments with the specified author
 - [ ] Issue status transitions: open → running → completed
