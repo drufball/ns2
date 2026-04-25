@@ -1,6 +1,8 @@
+use agents::{AgentHooks, HookCommand, HookEntry};
 use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 use async_trait::async_trait;
 use chrono::Utc;
+use regex::Regex;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use types::{ContentBlock, ContentBlockDelta, Role, Session, SessionEvent, SessionStatus, Turn};
@@ -15,6 +17,154 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// ── Hook execution ────────────────────────────────────────────────────────────
+
+/// Run a single hook command with JSON on stdin.
+/// Returns `(exit_code, stdout, stderr)`.
+/// Kills the process and returns exit_code=1 on timeout.
+async fn run_hook(cmd: &HookCommand, stdin_json: &str) -> (i32, String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+    use tokio::time::{sleep, Duration};
+
+    let mut child = match Command::new("sh")
+        .arg("-c")
+        .arg(&cmd.command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to spawn hook command '{}': {e}", cmd.command);
+            return (1, String::new(), format!("failed to spawn: {e}"));
+        }
+    };
+
+    // Write stdin and close the pipe
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_json.as_bytes()).await;
+    }
+
+    // Take stdout/stderr handles for reading
+    let mut stdout_handle = child.stdout.take();
+    let mut stderr_handle = child.stderr.take();
+
+    // Read stdout and stderr concurrently with a timeout on the entire operation
+    let duration = Duration::from_secs(cmd.timeout);
+    tokio::select! {
+        result = async {
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            if let Some(ref mut h) = stdout_handle {
+                let _ = h.read_to_end(&mut stdout_buf).await;
+            }
+            if let Some(ref mut h) = stderr_handle {
+                let _ = h.read_to_end(&mut stderr_buf).await;
+            }
+            let status = child.wait().await;
+            (status, stdout_buf, stderr_buf)
+        } => {
+            let (status, stdout_buf, stderr_buf) = result;
+            let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(1);
+            let stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
+            (exit_code, stdout, stderr)
+        }
+        _ = sleep(duration) => {
+            tracing::warn!("hook command '{}' timed out after {}s", cmd.command, cmd.timeout);
+            let _ = child.kill().await;
+            (1, String::new(), format!("hook timed out after {}s", cmd.timeout))
+        }
+    }
+}
+
+/// Find all `HookEntry`s whose matcher regex matches `tool_name`.
+fn matching_hook_entries<'a>(entries: &'a [HookEntry], tool_name: &str) -> Vec<&'a HookEntry> {
+    entries
+        .iter()
+        .filter(|e| {
+            e.matcher
+                .as_deref()
+                .map(|pat| Regex::new(pat).map(|re| re.is_match(tool_name)).unwrap_or(false))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Run PreToolUse hooks for `tool_name`.
+/// Returns `Some(blocked_message)` if any hook exits non-zero (tool should be skipped),
+/// or `None` if all hooks pass.
+async fn run_pre_tool_use_hooks(
+    hooks: &AgentHooks,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Option<String> {
+    let stdin = serde_json::json!({
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    });
+    let stdin_str = stdin.to_string();
+
+    for entry in matching_hook_entries(&hooks.pre_tool_use, tool_name) {
+        for cmd in &entry.hooks {
+            let (exit_code, _stdout, stderr) = run_hook(cmd, &stdin_str).await;
+            if exit_code != 0 {
+                return Some(if stderr.is_empty() {
+                    format!("Hook blocked tool '{tool_name}' (exit {exit_code})")
+                } else {
+                    stderr
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Run PostToolUse hooks for `tool_name`. Exit code is always ignored.
+async fn run_post_tool_use_hooks(
+    hooks: &AgentHooks,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    tool_result: &str,
+) {
+    let stdin = serde_json::json!({
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_result": tool_result,
+    });
+    let stdin_str = stdin.to_string();
+
+    for entry in matching_hook_entries(&hooks.post_tool_use, tool_name) {
+        for cmd in &entry.hooks {
+            run_hook(cmd, &stdin_str).await;
+        }
+    }
+}
+
+/// Run Stop hooks.
+/// Returns `Some(injected_message)` if any hook exits non-zero (the message should be
+/// injected into the conversation to continue the loop), or `None` to allow completion.
+async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> {
+    let stdin = serde_json::json!({ "session_id": session_id.to_string() });
+    let stdin_str = stdin.to_string();
+
+    for entry in &hooks.stop {
+        for cmd in &entry.hooks {
+            let (exit_code, stdout, _stderr) = run_hook(cmd, &stdin_str).await;
+            if exit_code != 0 {
+                return Some(if stdout.is_empty() {
+                    format!("Stop hook exited with code {exit_code}")
+                } else {
+                    stdout
+                });
+            }
+        }
+    }
+    None
+}
 
 pub struct StubClient;
 
@@ -110,8 +260,9 @@ async fn run_tool_dispatch_loop(
     client: &Arc<dyn AnthropicClient>,
     db: &Arc<dyn db::Db>,
     event_tx: &broadcast::Sender<SessionEvent>,
+    hooks: &AgentHooks,
     mut messages: Vec<(Role, Vec<ContentBlock>)>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let tool_definitions: Vec<types::ToolDefinition> =
         config.tools.iter().map(|t| t.definition()).collect();
 
@@ -123,8 +274,25 @@ async fn run_tool_dispatch_loop(
             let dir = agents::agents_dir()?;
             agents::load_agent(&dir, name)
         })
-        .map(|def| def.body)
-        .filter(|s| !s.is_empty());
+        .and_then(|def| {
+            let agent_body = def.body;
+            if def.include_project_config {
+                // Try to find the git root via agents_dir (agents_dir = git_root/.ns2/agents)
+                let project = agents::agents_dir()
+                    .as_deref()
+                    .and_then(|d| d.parent())
+                    .and_then(|d| d.parent())
+                    .and_then(agents::load_project_config)
+                    .unwrap_or_default();
+                if project.is_empty() {
+                    if agent_body.is_empty() { None } else { Some(agent_body) }
+                } else {
+                    Some(format!("{agent_body}\n\n{project}"))
+                }
+            } else {
+                if agent_body.is_empty() { None } else { Some(agent_body) }
+            }
+        });
 
     loop {
         let request = MessageRequest {
@@ -169,7 +337,13 @@ async fn run_tool_dispatch_loop(
 
         match response.stop_reason.as_str() {
             "tool_use" => { /* dispatch tools below */ }
-            "end_turn" => break,
+            "end_turn" => {
+                // Run Stop hooks; if any exit non-zero, return their stdout as an injected message
+                if let Some(injected) = run_stop_hooks(hooks, config.session.id).await {
+                    return Ok(Some(injected));
+                }
+                break;
+            }
             "max_tokens" => {
                 let _ = event_tx.send(SessionEvent::Error {
                     message: "session hit max_tokens limit".to_string(),
@@ -190,12 +364,24 @@ async fn run_tool_dispatch_loop(
 
         for block in &response.content {
             if let ContentBlock::ToolUse { id, name, input } = block {
-                let result = match config.tools.iter().find(|t| t.definition().name == *name) {
-                    Some(tool) => match tool.execute(input.clone()).await {
-                        Ok(output) => output,
-                        Err(e) => format!("Error: {e}"),
-                    },
-                    None => format!("Error: unknown tool '{name}'"),
+                // Run PreToolUse hooks
+                let result = if let Some(blocked) =
+                    run_pre_tool_use_hooks(hooks, name, input).await
+                {
+                    // Hook blocked the tool — return hook stderr as the tool result
+                    blocked
+                } else {
+                    // Run the actual tool
+                    let tool_output = match config.tools.iter().find(|t| t.definition().name == *name) {
+                        Some(tool) => match tool.execute(input.clone()).await {
+                            Ok(output) => output,
+                            Err(e) => format!("Error: {e}"),
+                        },
+                        None => format!("Error: unknown tool '{name}'"),
+                    };
+                    // Run PostToolUse hooks (exit code ignored)
+                    run_post_tool_use_hooks(hooks, name, input, &tool_output).await;
+                    tool_output
                 };
                 tool_result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
@@ -231,7 +417,7 @@ async fn run_tool_dispatch_loop(
         messages.push((Role::User, tool_result_blocks));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 pub async fn run(
@@ -241,6 +427,39 @@ pub async fn run(
     event_tx: broadcast::Sender<SessionEvent>,
     mut msg_rx: mpsc::Receiver<String>,
 ) -> Result<()> {
+    // Load hooks from the agent definition (once, at harness start).
+    // When include_project_config is true, also load project hooks from
+    // .claude/settings.json and merge them (agent hooks take precedence).
+    let hooks = {
+        let agent_def = config
+            .session
+            .agent
+            .as_deref()
+            .and_then(|name| {
+                let dir = agents::agents_dir()?;
+                agents::load_agent(&dir, name)
+            });
+
+        match agent_def {
+            None => AgentHooks::default(),
+            Some(def) => {
+                let agent_hooks = def.hooks;
+                if def.include_project_config {
+                    // Derive git root from agents_dir (.ns2/agents → .ns2 → git_root)
+                    let project_hooks = agents::agents_dir()
+                        .as_deref()
+                        .and_then(|d| d.parent())
+                        .and_then(|d| d.parent())
+                        .map(agents::load_project_hooks)
+                        .unwrap_or_default();
+                    agents::merge_hooks(agent_hooks, project_hooks)
+                } else {
+                    agent_hooks
+                }
+            }
+        }
+    };
+
     loop {
         // Wait for the next user message. When the sender is dropped, recv() returns None → exit.
         let message = match msg_rx.recv().await {
@@ -257,8 +476,34 @@ pub async fn run(
         // Load full conversation history from DB (including the message we just stored)
         let history = load_history(&db, config.session.id).await?;
 
-        // Run the tool dispatch loop
-        run_tool_dispatch_loop(&config, &client, &db, &event_tx, history).await?;
+        // Run the tool dispatch loop. It returns Some(injected_message) when a Stop
+        // hook blocks completion and injects a message for the next turn.
+        let mut current_history = history;
+        loop {
+            match run_tool_dispatch_loop(
+                &config,
+                &client,
+                &db,
+                &event_tx,
+                &hooks,
+                current_history,
+            )
+            .await?
+            {
+                None => break, // normal completion
+                Some(injected) => {
+                    // Stop hook rejected; inject the message and continue
+                    persist_user_message(
+                        &db,
+                        config.session.id,
+                        &injected,
+                        &event_tx,
+                    )
+                    .await?;
+                    current_history = load_history(&db, config.session.id).await?;
+                }
+            }
+        }
 
         // Mark session completed and emit done event
         db.update_session_status(config.session.id, SessionStatus::Completed).await?;
@@ -1762,6 +2007,8 @@ mod tests {
             name: agent_name.to_string(),
             description: "test agent".to_string(),
             body: "You are a test harness agent with a non-empty body.".to_string(),
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
         };
         agents::write_agent(&dir, &def).unwrap();
 
@@ -1817,6 +2064,8 @@ mod tests {
             name: agent_name.to_string(),
             description: "test agent with no body".to_string(),
             body: String::new(), // empty body
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
         };
         agents::write_agent(&dir, &def).unwrap();
 
@@ -1852,6 +2101,752 @@ mod tests {
         assert!(
             client_ref.captured().is_none(),
             "empty agent body must NOT become the system prompt (system must be None)"
+        );
+    }
+
+    /// When `include_project_config: true`, the CLAUDE.md content is appended to the
+    /// agent body in the system prompt, separated by `\n\n`.
+    /// Skips when not inside a git repo (e.g. cargo-mutants temp dir).
+    #[tokio::test]
+    async fn test_include_project_config_true_appends_claude_md_to_system_prompt() {
+        // Skip when not inside a git repo
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let agent_name = "harness_test_include_project_config";
+        let agent_body = "You are a coding agent.";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent with include_project_config".to_string(),
+            body: agent_body.to_string(),
+            include_project_config: true,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+        };
+
+        // Derive the git root from agents_dir (agents_dir = git_root/.ns2/agents)
+        // We go up two levels: .ns2/agents -> .ns2 -> git_root
+        let git_root = dir.parent().and_then(|p| p.parent());
+        let project_content = git_root.and_then(|r| agents::load_project_config(r));
+
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+
+        result.unwrap();
+
+        let captured = client_ref.captured();
+        assert!(captured.is_some(), "system prompt must be Some when agent body is non-empty");
+
+        let system = captured.unwrap();
+        assert!(
+            system.starts_with(agent_body),
+            "system prompt must start with agent body, got: {:?}",
+            &system[..system.len().min(80)]
+        );
+
+        // If CLAUDE.md exists (it does in this repo), it must be appended
+        if let Some(project) = project_content {
+            if !project.is_empty() {
+                assert!(
+                    system.contains(&project),
+                    "system prompt must contain project config when include_project_config=true"
+                );
+                let expected = format!("{agent_body}\n\n{project}");
+                assert_eq!(
+                    system, expected,
+                    "system prompt must be agent_body + \\n\\n + project config"
+                );
+            }
+        }
+    }
+
+    /// When `include_project_config: false` (default), the system prompt equals
+    /// only the agent body — CLAUDE.md content is NOT appended.
+    /// Skips when not inside a git repo.
+    #[tokio::test]
+    async fn test_include_project_config_false_leaves_system_prompt_unchanged() {
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let agent_name = "harness_test_no_project_config";
+        let agent_body = "You are a plain agent without project config.";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent without include_project_config".to_string(),
+            body: agent_body.to_string(),
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+        };
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+
+        result.unwrap();
+
+        let captured = client_ref.captured();
+        assert!(captured.is_some(), "system prompt must be Some when agent body is non-empty");
+        assert_eq!(
+            captured.as_deref(),
+            Some(agent_body),
+            "system prompt must equal exactly the agent body when include_project_config=false"
+        );
+    }
+
+    // ── Hook dispatch tests (GH #33) ─────────────────────────────────────────
+
+    // Helper: build a HookCommand using a shell snippet.
+    fn hook_cmd(script: &str, timeout: u64) -> agents::HookCommand {
+        agents::HookCommand { command: script.to_string(), timeout }
+    }
+
+    /// PreToolUse hook exits 0 → tool runs normally.
+    #[tokio::test]
+    async fn test_pre_tool_use_hook_exit_0_allows_tool() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            pre_tool_use: vec![HookEntry {
+                matcher: Some("read".to_string()),
+                hooks: vec![hook_cmd("exit 0", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        // Verify directly via run_pre_tool_use_hooks
+        let result =
+            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"})).await;
+        assert!(result.is_none(), "exit 0 hook must not block the tool, got: {result:?}");
+    }
+
+    /// PreToolUse hook exits 1 → tool is blocked; hook stderr is returned.
+    #[tokio::test]
+    async fn test_pre_tool_use_hook_exit_1_blocks_tool_returns_stderr() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            pre_tool_use: vec![HookEntry {
+                matcher: Some("bash".to_string()),
+                hooks: vec![hook_cmd("echo 'blocked by policy' >&2; exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let result =
+            run_pre_tool_use_hooks(&hooks, "bash", &serde_json::json!({})).await;
+        assert!(result.is_some(), "exit 1 hook must block the tool");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("blocked by policy"),
+            "blocked message must contain hook stderr, got: {msg:?}"
+        );
+    }
+
+    /// PreToolUse hook with matcher "bash" does NOT match tool "read".
+    #[tokio::test]
+    async fn test_pre_tool_use_hook_matcher_does_not_match_different_tool() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            pre_tool_use: vec![HookEntry {
+                matcher: Some("bash".to_string()),
+                hooks: vec![hook_cmd("exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        // "read" should not be matched by "bash"
+        let result =
+            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({})).await;
+        assert!(result.is_none(), "hook for 'bash' must not match tool 'read'");
+    }
+
+    /// PostToolUse hook runs after tool; non-zero exit is ignored (no error propagated).
+    #[tokio::test]
+    async fn test_post_tool_use_hook_non_zero_exit_is_ignored() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            post_tool_use: vec![HookEntry {
+                matcher: Some(".*".to_string()),
+                hooks: vec![hook_cmd("exit 42", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        // Should complete without any error
+        run_post_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), "result").await;
+        // If we get here, the non-zero exit was ignored as expected.
+    }
+
+    /// Stop hook exits 0 → session completes normally (run_stop_hooks returns None).
+    #[tokio::test]
+    async fn test_stop_hook_exit_0_allows_completion() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("exit 0", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        assert!(result.is_none(), "exit 0 stop hook must allow completion, got: {result:?}");
+    }
+
+    /// Stop hook exits 1 → injects stdout as user message (run_stop_hooks returns Some).
+    #[tokio::test]
+    async fn test_stop_hook_exit_1_injects_stdout_as_user_message() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("echo 'please continue'; exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        assert!(result.is_some(), "exit 1 stop hook must inject a message");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("please continue"),
+            "injected message must contain hook stdout, got: {msg:?}"
+        );
+    }
+
+    /// Hook timeout kills command and treats as exit 1 (times out after `timeout` seconds).
+    #[tokio::test]
+    async fn test_hook_timeout_kills_command_and_returns_exit_1() {
+        // Use a very short timeout (1s) and a command that sleeps longer (5s)
+        let cmd = hook_cmd("sleep 5", 1);
+        let (exit_code, _stdout, stderr) = run_hook(&cmd, "{}").await;
+        assert_eq!(exit_code, 1, "timed-out hook must return exit_code=1");
+        assert!(
+            stderr.contains("timed out"),
+            "stderr must mention timeout, got: {stderr:?}"
+        );
+    }
+
+    /// Integration: PreToolUse hook exit 0 lets the tool run; result is the tool's output.
+    #[tokio::test]
+    async fn test_integration_pre_tool_use_exit_0_tool_runs_normally() {
+        use agents::{AgentHooks, HookEntry};
+        use std::sync::Mutex;
+
+        // Track what's stored as ToolResult
+        let results_store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let results_store_c = Arc::clone(&results_store);
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                results_store_c.lock().unwrap().push(content.clone());
+            }
+            Ok(())
+        });
+        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+
+        let hooks = AgentHooks {
+            pre_tool_use: vec![HookEntry {
+                matcher: Some("read".to_string()),
+                hooks: vec![hook_cmd("exit 0", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let session = make_session();
+        let (event_tx, _rx) = broadcast::channel(64);
+
+        // Run the tool dispatch loop directly with hooks
+        let history = vec![(
+            Role::User,
+            vec![ContentBlock::Text { text: "go".into() }],
+        )];
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![Arc::new(AlwaysOkTool)],
+        };
+        let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "should complete normally");
+
+        let results = results_store.lock().unwrap();
+        assert_eq!(results.len(), 1, "expected one tool result");
+        assert_eq!(results[0], "file content here", "tool should have run normally");
+    }
+
+    /// Integration: PreToolUse hook exit 1 blocks tool; hook stderr becomes tool result.
+    #[tokio::test]
+    async fn test_integration_pre_tool_use_exit_1_blocks_tool() {
+        use agents::{AgentHooks, HookEntry};
+        use std::sync::Mutex;
+
+        let results_store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let results_store_c = Arc::clone(&results_store);
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                results_store_c.lock().unwrap().push(content.clone());
+            }
+            Ok(())
+        });
+        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+
+        let hooks = AgentHooks {
+            pre_tool_use: vec![HookEntry {
+                matcher: Some("read".to_string()),
+                hooks: vec![hook_cmd("echo 'tool blocked by hook' >&2; exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let session = make_session();
+        let (event_tx, _rx) = broadcast::channel(64);
+
+        let history = vec![(
+            Role::User,
+            vec![ContentBlock::Text { text: "go".into() }],
+        )];
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![Arc::new(AlwaysOkTool)],
+        };
+        let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+
+        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+            .await
+            .unwrap();
+
+        let results = results_store.lock().unwrap();
+        assert_eq!(results.len(), 1, "expected one tool result (the blocked message)");
+        assert!(
+            results[0].contains("tool blocked by hook"),
+            "tool result must be hook stderr when blocked, got: {:?}",
+            results[0]
+        );
+    }
+
+    /// Integration: PostToolUse hook runs after tool; non-zero exit does not alter tool result.
+    #[tokio::test]
+    async fn test_integration_post_tool_use_hook_does_not_alter_result() {
+        use agents::{AgentHooks, HookEntry};
+        use std::sync::Mutex;
+
+        let results_store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let results_store_c = Arc::clone(&results_store);
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                results_store_c.lock().unwrap().push(content.clone());
+            }
+            Ok(())
+        });
+        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+
+        let hooks = AgentHooks {
+            post_tool_use: vec![HookEntry {
+                matcher: Some(".*".to_string()),
+                // Non-zero exit — must not alter the tool result
+                hooks: vec![hook_cmd("exit 99", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let session = make_session();
+        let (event_tx, _rx) = broadcast::channel(64);
+
+        let history = vec![(
+            Role::User,
+            vec![ContentBlock::Text { text: "go".into() }],
+        )];
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![Arc::new(AlwaysOkTool)],
+        };
+        let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+
+        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+            .await
+            .unwrap();
+
+        let results = results_store.lock().unwrap();
+        assert_eq!(results.len(), 1, "expected one tool result");
+        assert_eq!(
+            results[0], "file content here",
+            "PostToolUse hook must not alter the tool result"
+        );
+    }
+
+    /// Integration: Stop hook exit 0 lets session complete without injecting a message.
+    #[tokio::test]
+    async fn test_integration_stop_hook_exit_0_lets_session_complete() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("exit 0", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let session = make_session();
+        let (event_tx, _rx) = broadcast::channel(64);
+
+        let history = vec![(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![],
+        };
+        // StubClient returns end_turn
+        let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
+        let mock_db = permissive_mock_db();
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "stop hook exit 0 must return None (normal completion)");
+    }
+
+    /// Integration: Stop hook exit 1 injects stdout as user message (returns Some).
+    #[tokio::test]
+    async fn test_integration_stop_hook_exit_1_injects_user_message() {
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("echo 'do more work'; exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let session = make_session();
+        let (event_tx, _rx) = broadcast::channel(64);
+
+        let history = vec![(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![],
+        };
+        let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
+        let mock_db = permissive_mock_db();
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "stop hook exit 1 must inject a user message");
+        let injected = result.unwrap();
+        assert!(
+            injected.contains("do more work"),
+            "injected message must contain hook stdout, got: {injected:?}"
+        );
+    }
+
+    // ── GH#33 project hook inheritance tests ─────────────────────────────────
+
+    // A process-wide lock to prevent concurrent tests from racing over .claude/settings.json.
+    fn settings_json_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// When `include_project_config: true` and `.claude/settings.json` has a PostToolUse
+    /// hook, the project hook runs during a tool-dispatching session (the log file is written).
+    ///
+    /// Skips when not inside a git repo (agents_dir() returns None).
+    #[tokio::test]
+    async fn test_include_project_config_true_runs_project_hook() {
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Derive git root from agents_dir (.ns2/agents → .ns2 → git_root)
+        let git_root = match dir.parent().and_then(|p| p.parent()) {
+            Some(r) => r.to_path_buf(),
+            None => return,
+        };
+
+        // Write a temp sentinel file the hook will touch
+        let log_file = std::env::temp_dir().join(format!(
+            "ns2_proj_hook_test_{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let log_path = log_file.to_string_lossy().to_string();
+
+        // Acquire lock to prevent concurrent access to .claude/settings.json
+        let _guard = settings_json_lock().lock().unwrap();
+
+        // Write .claude/settings.json with a PostToolUse hook
+        let claude_dir = git_root.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
+        // Save any existing settings.json to restore later
+        let original_settings = std::fs::read_to_string(&settings_path).ok();
+        std::fs::write(
+            &settings_path,
+            format!(
+                r#"{{
+                    "hooks": {{
+                        "PostToolUse": [
+                            {{
+                                "matcher": ".*",
+                                "hooks": [
+                                    {{"type": "command", "command": "echo project-hook >> {log_path}", "timeout": 10}}
+                                ]
+                            }}
+                        ]
+                    }}
+                }}"#
+            ),
+        ).unwrap();
+
+        // Write the agent with include_project_config: true and no agent-level hooks
+        let agent_name = "harness_test_project_hook_true";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent for project hook inheritance".to_string(),
+            body: "You are a test agent.".to_string(),
+            include_project_config: true,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![Arc::new(AlwaysOkTool)],
+        };
+        let client = Arc::new(ToolUseClient::new());
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(128);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("read the file".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup agent and restore/remove settings.json (while still holding the lock)
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+        match original_settings {
+            Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
+            None => { let _ = std::fs::remove_file(&settings_path); }
+        }
+        drop(_guard);
+
+        result.unwrap();
+
+        // The log file must exist and contain the hook output
+        let log_content = std::fs::read_to_string(&log_file)
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(&log_file);
+        assert!(
+            log_content.contains("project-hook"),
+            "project PostToolUse hook must have run (log file contents: {log_content:?})"
+        );
+    }
+
+    /// When `include_project_config: false`, the project `.claude/settings.json` PostToolUse
+    /// hook must NOT run even if the file exists.
+    ///
+    /// Skips when not inside a git repo (agents_dir() returns None).
+    #[tokio::test]
+    async fn test_include_project_config_false_does_not_run_project_hook() {
+        let dir = match agents::agents_dir() {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let git_root = match dir.parent().and_then(|p| p.parent()) {
+            Some(r) => r.to_path_buf(),
+            None => return,
+        };
+
+        // Write a temp sentinel file the hook would touch if it ran
+        let log_file = std::env::temp_dir().join(format!(
+            "ns2_proj_hook_false_test_{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let log_path = log_file.to_string_lossy().to_string();
+
+        // Acquire lock to prevent concurrent access to .claude/settings.json
+        let _guard = settings_json_lock().lock().unwrap();
+
+        // Write .claude/settings.json with a PostToolUse hook
+        let claude_dir = git_root.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.json");
+        let original_settings = std::fs::read_to_string(&settings_path).ok();
+        std::fs::write(
+            &settings_path,
+            format!(
+                r#"{{
+                    "hooks": {{
+                        "PostToolUse": [
+                            {{
+                                "matcher": ".*",
+                                "hooks": [
+                                    {{"type": "command", "command": "echo project-hook >> {log_path}", "timeout": 10}}
+                                ]
+                            }}
+                        ]
+                    }}
+                }}"#
+            ),
+        ).unwrap();
+
+        // Write the agent with include_project_config: FALSE
+        let agent_name = "harness_test_project_hook_false";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "test agent without project hook inheritance".to_string(),
+            body: "You are a test agent.".to_string(),
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "test".into(),
+            tools: vec![Arc::new(AlwaysOkTool)],
+        };
+        let client = Arc::new(ToolUseClient::new());
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(128);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("read the file".into()).await.unwrap();
+        drop(msg_tx);
+
+        let result = run(config, client, db, event_tx, msg_rx).await;
+
+        // Cleanup (while still holding the lock)
+        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
+        match original_settings {
+            Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
+            None => { let _ = std::fs::remove_file(&settings_path); }
+        }
+        drop(_guard);
+
+        result.unwrap();
+
+        // The log file must NOT exist (project hook must not have run)
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
+        let _ = std::fs::remove_file(&log_file);
+        assert!(
+            !log_content.contains("project-hook"),
+            "project hook must NOT run when include_project_config=false (log: {log_content:?})"
         );
     }
 }

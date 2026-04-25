@@ -2352,10 +2352,13 @@ mod tests {
     async fn test_issue_auto_completes_when_session_succeeds() {
         let (app, state) = test_app_with_state().await;
 
+        // Use a non-existent agent name so the harness does not load any agent
+        // definition from disk (which would pull in include_project_config and
+        // real project hooks that depend on the working-tree state).
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", serde_json::json!({
-                "title": "Auto complete test", "body": "body", "assignee": "swe"
+                "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
             })))
             .await
             .unwrap();

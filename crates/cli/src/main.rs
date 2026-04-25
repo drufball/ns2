@@ -768,6 +768,8 @@ async fn main() {
                     name: name.clone(),
                     description: description.unwrap_or_default(),
                     body: body.unwrap_or_default(),
+                    include_project_config: false,
+                    hooks: agents::AgentHooks::default(),
                 };
                 if let Err(e) = agents::write_agent(&dir, &def) {
                     eprintln!("Error writing agent file: {e}");

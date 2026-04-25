@@ -1,6 +1,7 @@
 ---
 name: code-review
 description: Code review covering architecture adherence, testability, test coverage, and code quality.
+include_project_config: true
 ---
 
 
