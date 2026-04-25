@@ -3,7 +3,7 @@ targets:
   - crates/tools/src/**/*.rs
   - crates/harness/src/**/*.rs
 severity: warning
-verified: 2026-04-25T13:38:10Z
+verified: 2026-04-25T18:44:20Z
 ---
 
 # Flow 06: Read Tool

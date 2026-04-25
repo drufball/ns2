@@ -220,6 +220,8 @@ pub struct HarnessConfig {
     pub session: Session,
     pub model: String,
     pub tools: Vec<Arc<dyn tools::Tool>>,
+    /// Injectable git root for tests. Production code passes `None`; tests pass `Some(temp_dir)`.
+    pub git_root: Option<PathBuf>,
 }
 
 /// Load conversation history from the DB for a session.
@@ -295,38 +297,11 @@ async fn run_tool_dispatch_loop(
     db: &Arc<dyn db::Db>,
     event_tx: &broadcast::Sender<SessionEvent>,
     hooks: &AgentHooks,
+    system: Option<String>,
     mut messages: Vec<(Role, Vec<ContentBlock>)>,
 ) -> Result<Option<String>> {
     let tool_definitions: Vec<types::ToolDefinition> =
         config.tools.iter().map(|t| t.definition()).collect();
-
-    let system = config
-        .session
-        .agent
-        .as_deref()
-        .and_then(|name| {
-            let dir = agents::agents_dir()?;
-            agents::load_agent(&dir, name)
-        })
-        .and_then(|def| {
-            let agent_body = def.body;
-            if def.include_project_config {
-                // Try to find the git root via agents_dir (agents_dir = git_root/.ns2/agents)
-                let project = agents::agents_dir()
-                    .as_deref()
-                    .and_then(|d| d.parent())
-                    .and_then(|d| d.parent())
-                    .and_then(agents::load_project_config)
-                    .unwrap_or_default();
-                if project.is_empty() {
-                    if agent_body.is_empty() { None } else { Some(agent_body) }
-                } else {
-                    Some(format!("{agent_body}\n\n{project}"))
-                }
-            } else {
-                if agent_body.is_empty() { None } else { Some(agent_body) }
-            }
-        });
 
     loop {
         let request = MessageRequest {
@@ -477,29 +452,45 @@ pub async fn run(
         ];
     }
 
+    // Resolve the effective git root (injected in tests; discovered via git in production).
+    let effective_root = config.git_root.clone().or_else(workspace::git_root);
+    let agents_dir = effective_root.as_ref().map(|r| r.join(".ns2").join("agents"));
+
+    // Pre-compute the system prompt once (it does not change across turns).
+    let system: Option<String> = config.session.agent.as_deref().and_then(|name| {
+        let dir = agents_dir.as_ref()?;
+        agents::load_agent(dir, name)
+    }).and_then(|def| {
+        let agent_body = def.body;
+        if def.include_project_config {
+            let project = effective_root.as_deref()
+                .and_then(agents::load_project_config)
+                .unwrap_or_default();
+            if project.is_empty() {
+                if agent_body.is_empty() { None } else { Some(agent_body) }
+            } else {
+                Some(format!("{agent_body}\n\n{project}"))
+            }
+        } else {
+            if agent_body.is_empty() { None } else { Some(agent_body) }
+        }
+    });
+
     // Load hooks from the agent definition (once, at harness start).
     // When include_project_config is true, also load project hooks from
     // .claude/settings.json and merge them (agent hooks take precedence).
     let hooks = {
-        let agent_def = config
-            .session
-            .agent
-            .as_deref()
-            .and_then(|name| {
-                let dir = agents::agents_dir()?;
-                agents::load_agent(&dir, name)
-            });
+        let agent_def = config.session.agent.as_deref().and_then(|name| {
+            let dir = agents_dir.as_ref()?;
+            agents::load_agent(dir, name)
+        });
 
         match agent_def {
             None => AgentHooks::default(),
             Some(def) => {
                 let agent_hooks = def.hooks;
                 if def.include_project_config {
-                    // Derive git root from agents_dir (.ns2/agents → .ns2 → git_root)
-                    let project_hooks = agents::agents_dir()
-                        .as_deref()
-                        .and_then(|d| d.parent())
-                        .and_then(|d| d.parent())
+                    let project_hooks = effective_root.as_deref()
                         .map(agents::load_project_hooks)
                         .unwrap_or_default();
                     agents::merge_hooks(agent_hooks, project_hooks)
@@ -536,6 +527,7 @@ pub async fn run(
                 &db,
                 &event_tx,
                 &hooks,
+                system.clone(),
                 current_history,
             )
             .await?
@@ -964,6 +956,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
 
         let client = Arc::new(StubClient);
@@ -1008,6 +1001,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1053,6 +1047,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1073,6 +1068,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1116,6 +1112,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1206,6 +1203,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(MultiBlockClient);
         let db = Arc::new(mock_db);
@@ -1238,6 +1236,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1335,6 +1334,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -1402,6 +1402,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysErrTool)],
+            git_root: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -1551,6 +1552,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client = Arc::new(TwoToolClient { call_count: std::sync::atomic::AtomicU32::new(0) });
         let db = Arc::new(mock_db);
@@ -1660,6 +1662,7 @@ mod tests {
             },
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
 
         let db = Arc::new(mock_db);
@@ -1733,6 +1736,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(MaxTokensClient);
         let db = Arc::new(mock_db);
@@ -1829,6 +1833,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)], // only "read", not "nonexistent_tool"
+            git_root: None,
         };
         let client = Arc::new(UnknownToolClient::new());
         let db = Arc::new(mock_db);
@@ -1876,6 +1881,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![], // empty
+            git_root: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1952,6 +1958,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -2015,6 +2022,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client = Arc::new(TwoToolOrderingClient {
             call_count: std::sync::atomic::AtomicU32::new(0),
@@ -2108,6 +2116,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(KnownTokenClient);
         let db = Arc::new(mock_db);
@@ -2236,6 +2245,7 @@ mod tests {
             },
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
 
         let db = Arc::new(mock_db);
@@ -2326,6 +2336,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -2346,11 +2357,10 @@ mod tests {
     /// When an agent exists with a non-empty body, its body becomes the system prompt.
     #[tokio::test]
     async fn test_agent_with_nonempty_body_becomes_system_prompt() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
         let agent_name = "harness_test_nonempty_body";
         let def = agents::AgentDef {
             name: agent_name.to_string(),
@@ -2359,7 +2369,7 @@ mod tests {
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -2374,6 +2384,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: Some(tmp.path().to_path_buf()),
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -2383,9 +2394,7 @@ mod tests {
         msg_tx.send("hello".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         assert_eq!(
             client_ref.captured().as_deref(),
@@ -2396,11 +2405,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_with_empty_body_produces_no_system_prompt() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
         let agent_name = "harness_test_empty_body";
         let def = agents::AgentDef {
             name: agent_name.to_string(),
@@ -2409,7 +2417,7 @@ mod tests {
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -2424,6 +2432,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: Some(tmp.path().to_path_buf()),
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -2433,9 +2442,7 @@ mod tests {
         msg_tx.send("hello".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         assert!(
             client_ref.captured().is_none(),
@@ -2445,11 +2452,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_include_project_config_true_appends_claude_md_to_system_prompt() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let project_content = "# Project Instructions\n\nDo good work.";
+        std::fs::write(tmp.path().join("CLAUDE.md"), project_content).unwrap();
 
         let agent_name = "harness_test_include_project_config";
         let agent_body = "You are a coding agent.";
@@ -2460,7 +2468,7 @@ mod tests {
             include_project_config: true,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -2471,16 +2479,12 @@ mod tests {
             updated_at: Utc::now(),
         };
         let mock_db = permissive_mock_db();
-
         let config = HarnessConfig {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: Some(tmp.path().to_path_buf()),
         };
-
-        let git_root = dir.parent().and_then(|p| p.parent());
-        let project_content = git_root.and_then(|r| agents::load_project_config(r));
-
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
         let db = Arc::new(mock_db);
@@ -2489,42 +2493,21 @@ mod tests {
         msg_tx.send("hello".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
-        let captured = client_ref.captured();
-        assert!(captured.is_some(), "system prompt must be Some when agent body is non-empty");
-
-        let system = captured.unwrap();
-        assert!(
-            system.starts_with(agent_body),
-            "system prompt must start with agent body, got: {:?}",
-            &system[..system.len().min(80)]
-        );
-
-        if let Some(project) = project_content {
-            if !project.is_empty() {
-                assert!(
-                    system.contains(&project),
-                    "system prompt must contain project config when include_project_config=true"
-                );
-                let expected = format!("{agent_body}\n\n{project}");
-                assert_eq!(
-                    system, expected,
-                    "system prompt must be agent_body + \\n\\n + project config"
-                );
-            }
-        }
+        let system = client_ref.captured().expect("system prompt must be Some");
+        let expected = format!("{agent_body}\n\n{project_content}");
+        assert_eq!(system, expected, "system prompt must be agent_body + \\n\\n + CLAUDE.md");
     }
 
     #[tokio::test]
     async fn test_include_project_config_false_leaves_system_prompt_unchanged() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Write a CLAUDE.md that must NOT appear in the system prompt
+        std::fs::write(tmp.path().join("CLAUDE.md"), "Project config that must be ignored.").unwrap();
 
         let agent_name = "harness_test_no_project_config";
         let agent_body = "You are a plain agent without project config.";
@@ -2535,7 +2518,7 @@ mod tests {
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -2550,6 +2533,7 @@ mod tests {
             session: session.clone(),
             model: "claude-opus-4-5".into(),
             tools: vec![],
+            git_root: Some(tmp.path().to_path_buf()),
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -2559,14 +2543,10 @@ mod tests {
         msg_tx.send("hello".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
-        let captured = client_ref.captured();
-        assert!(captured.is_some(), "system prompt must be Some when agent body is non-empty");
         assert_eq!(
-            captured.as_deref(),
+            client_ref.captured().as_deref(),
             Some(agent_body),
             "system prompt must equal exactly the agent body when include_project_config=false"
         );
@@ -2736,11 +2716,12 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
             .await
             .unwrap();
         assert!(result.is_none(), "should complete normally");
@@ -2789,11 +2770,12 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
             .await
             .unwrap();
 
@@ -2845,11 +2827,12 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
             .await
             .unwrap();
 
@@ -2884,12 +2867,13 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![],
+            git_root: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
         let mock_db = permissive_mock_db();
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
             .await
             .unwrap();
         assert!(result.is_none(), "stop hook exit 0 must return None (normal completion)");
@@ -2918,12 +2902,13 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![],
+            git_root: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
         let mock_db = permissive_mock_db();
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, history)
+        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
             .await
             .unwrap();
         assert!(result.is_some(), "stop hook exit 1 must inject a user message");
@@ -2936,23 +2921,11 @@ mod tests {
 
     // ── GH#33 project hook inheritance tests ─────────────────────────────────
 
-    fn settings_json_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[tokio::test]
     async fn test_include_project_config_true_runs_project_hook() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let git_root = match dir.parent().and_then(|p| p.parent()) {
-            Some(r) => r.to_path_buf(),
-            None => return,
-        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
 
         let log_file = std::env::temp_dir().join(format!(
             "ns2_proj_hook_test_{}.txt",
@@ -2960,27 +2933,12 @@ mod tests {
         ));
         let log_path = log_file.to_string_lossy().to_string();
 
-        let _guard = settings_json_lock().lock().unwrap();
-
-        let claude_dir = git_root.join(".claude");
+        let claude_dir = tmp.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
-        let settings_path = claude_dir.join("settings.json");
-        let original_settings = std::fs::read_to_string(&settings_path).ok();
         std::fs::write(
-            &settings_path,
+            claude_dir.join("settings.json"),
             format!(
-                r#"{{
-                    "hooks": {{
-                        "PostToolUse": [
-                            {{
-                                "matcher": ".*",
-                                "hooks": [
-                                    {{"type": "command", "command": "echo project-hook >> {log_path}", "timeout": 10}}
-                                ]
-                            }}
-                        ]
-                    }}
-                }}"#
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":".*","hooks":[{{"type":"command","command":"echo project-hook >> {log_path}","timeout":10}}]}}]}}}}"#
             ),
         ).unwrap();
 
@@ -2992,7 +2950,7 @@ mod tests {
             include_project_config: true,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -3007,6 +2965,7 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: Some(tmp.path().to_path_buf()),
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -3015,16 +2974,7 @@ mod tests {
         msg_tx.send("read the file".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        match original_settings {
-            Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
-            None => { let _ = std::fs::remove_file(&settings_path); }
-        }
-        drop(_guard);
-
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         let _ = std::fs::remove_file(&log_file);
@@ -3036,16 +2986,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_include_project_config_false_does_not_run_project_hook() {
-        let dir = match agents::agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let git_root = match dir.parent().and_then(|p| p.parent()) {
-            Some(r) => r.to_path_buf(),
-            None => return,
-        };
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
 
         let log_file = std::env::temp_dir().join(format!(
             "ns2_proj_hook_false_test_{}.txt",
@@ -3053,27 +2996,12 @@ mod tests {
         ));
         let log_path = log_file.to_string_lossy().to_string();
 
-        let _guard = settings_json_lock().lock().unwrap();
-
-        let claude_dir = git_root.join(".claude");
+        let claude_dir = tmp.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
-        let settings_path = claude_dir.join("settings.json");
-        let original_settings = std::fs::read_to_string(&settings_path).ok();
         std::fs::write(
-            &settings_path,
+            claude_dir.join("settings.json"),
             format!(
-                r#"{{
-                    "hooks": {{
-                        "PostToolUse": [
-                            {{
-                                "matcher": ".*",
-                                "hooks": [
-                                    {{"type": "command", "command": "echo project-hook >> {log_path}", "timeout": 10}}
-                                ]
-                            }}
-                        ]
-                    }}
-                }}"#
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":".*","hooks":[{{"type":"command","command":"echo project-hook >> {log_path}","timeout":10}}]}}]}}}}"#
             ),
         ).unwrap();
 
@@ -3085,7 +3013,7 @@ mod tests {
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
-        agents::write_agent(&dir, &def).unwrap();
+        agents::write_agent(&agents_dir, &def).unwrap();
 
         let session = types::Session {
             id: Uuid::new_v4(),
@@ -3100,6 +3028,7 @@ mod tests {
             session: session.clone(),
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
+            git_root: Some(tmp.path().to_path_buf()),
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -3108,16 +3037,7 @@ mod tests {
         msg_tx.send("read the file".into()).await.unwrap();
         drop(msg_tx);
 
-        let result = run(config, client, db, event_tx, msg_rx).await;
-
-        let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-        match original_settings {
-            Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
-            None => { let _ = std::fs::remove_file(&settings_path); }
-        }
-        drop(_guard);
-
-        result.unwrap();
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         let _ = std::fs::remove_file(&log_file);

@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-25T13:34:59Z
+verified: 2026-04-25T18:44:20Z
 ---
 
 # Flow 13: Issue Lifecycle
