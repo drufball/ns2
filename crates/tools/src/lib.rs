@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -15,13 +16,30 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Resolve a path against an optional cwd.
+/// - If `cwd` is `Some` and `path` is relative, returns `cwd.join(path)`.
+/// - If `path` is absolute, returns it unchanged regardless of `cwd`.
+/// - If `cwd` is `None`, returns the path unchanged.
+fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Some(base) = cwd {
+        base.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> types::ToolDefinition;
     async fn execute(&self, input: serde_json::Value) -> Result<String>;
 }
 
-pub struct ReadTool;
+pub struct ReadTool {
+    pub cwd: Option<PathBuf>,
+}
 
 #[async_trait]
 impl Tool for ReadTool {
@@ -48,12 +66,15 @@ impl Tool for ReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::InvalidInput("missing required field: path".into()))?;
 
-        let content = tokio::fs::read_to_string(path).await?;
+        let resolved = resolve_path(self.cwd.as_deref(), path);
+        let content = tokio::fs::read_to_string(&resolved).await?;
         Ok(content)
     }
 }
 
-pub struct BashTool;
+pub struct BashTool {
+    pub cwd: Option<PathBuf>,
+}
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
@@ -92,14 +113,18 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(Error::Io)?;
+            .kill_on_drop(true);
+
+        if let Some(ref cwd) = self.cwd {
+            cmd.current_dir(cwd);
+        }
+
+        let child = cmd.spawn().map_err(Error::Io)?;
 
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
@@ -125,7 +150,9 @@ impl Tool for BashTool {
     }
 }
 
-pub struct WriteTool;
+pub struct WriteTool {
+    pub cwd: Option<PathBuf>,
+}
 
 #[async_trait]
 impl Tool for WriteTool {
@@ -161,20 +188,24 @@ impl Tool for WriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::InvalidInput("missing required field: content".into()))?;
 
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        let resolved = resolve_path(self.cwd.as_deref(), path);
+
+        if let Some(parent) = resolved.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
 
         let bytes = content.as_bytes();
-        tokio::fs::write(path, bytes).await?;
+        tokio::fs::write(&resolved, bytes).await?;
 
-        Ok(format!("Wrote {} bytes to {}", bytes.len(), path))
+        Ok(format!("Wrote {} bytes to {}", bytes.len(), resolved.display()))
     }
 }
 
-pub struct EditTool;
+pub struct EditTool {
+    pub cwd: Option<PathBuf>,
+}
 
 #[async_trait]
 impl Tool for EditTool {
@@ -228,9 +259,12 @@ impl Tool for EditTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
+        let resolved = resolve_path(self.cwd.as_deref(), path);
+        let resolved_str = resolved.to_string_lossy();
+
+        let contents = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                Error::InvalidInput(format!("file not found: {path}"))
+                Error::InvalidInput(format!("file not found: {resolved_str}"))
             } else {
                 Error::Io(e)
             }
@@ -238,7 +272,7 @@ impl Tool for EditTool {
 
         if !contents.contains(old_string) {
             return Err(Error::InvalidInput(format!(
-                "old_string not found in {path}"
+                "old_string not found in {resolved_str}"
             )));
         }
 
@@ -249,9 +283,9 @@ impl Tool for EditTool {
             (contents.replacen(old_string, new_string, 1), 1)
         };
 
-        tokio::fs::write(path, new_contents.as_bytes()).await?;
+        tokio::fs::write(&resolved, new_contents.as_bytes()).await?;
 
-        Ok(format!("Replaced {count} occurrence(s) in {path}"))
+        Ok(format!("Replaced {count} occurrence(s) in {resolved_str}"))
     }
 }
 
@@ -260,13 +294,153 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // ── cwd tests ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bash_tool_cwd_pwd_shows_given_directory() {
+        // BashTool with cwd set should run commands in that directory.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let tool = BashTool { cwd: Some(dir.path().to_path_buf()) };
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}))
+            .await
+            .expect("pwd should succeed");
+        // The real path is used to handle symlinks (e.g. /var vs /private/var on macOS).
+        let real_dir = std::fs::canonicalize(dir.path()).unwrap();
+        assert!(
+            result.trim() == real_dir.to_str().unwrap()
+                || result.trim().ends_with(real_dir.to_str().unwrap()),
+            "pwd output '{result}' should equal cwd '{}'",
+            real_dir.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_tool_no_cwd_inherits_process_cwd() {
+        // BashTool with cwd=None should inherit the process's current directory.
+        let tool = BashTool { cwd: None };
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}))
+            .await
+            .expect("pwd should succeed");
+        assert!(!result.trim().is_empty(), "pwd must produce output");
+    }
+
+    #[tokio::test]
+    async fn read_tool_relative_path_resolved_against_cwd() {
+        // ReadTool with cwd=Some(dir) should read <dir>/foo.txt when given "foo.txt".
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("foo.txt");
+        tokio::fs::write(&file_path, "relative content").await.unwrap();
+
+        let tool = ReadTool { cwd: Some(dir.path().to_path_buf()) };
+        let result = tool
+            .execute(serde_json::json!({"path": "foo.txt"}))
+            .await
+            .expect("read should succeed");
+        assert_eq!(result, "relative content");
+    }
+
+    #[tokio::test]
+    async fn read_tool_absolute_path_unaffected_by_cwd() {
+        // ReadTool: an absolute path must bypass cwd entirely.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let abs_file = tempfile::NamedTempFile::new().unwrap();
+        let abs_path = abs_file.path().to_str().unwrap().to_owned();
+        tokio::fs::write(&abs_path, "absolute content").await.unwrap();
+
+        let tool = ReadTool { cwd: Some(dir.path().to_path_buf()) };
+        let result = tool
+            .execute(serde_json::json!({"path": abs_path}))
+            .await
+            .expect("read absolute path should succeed");
+        assert_eq!(result, "absolute content");
+    }
+
+    #[tokio::test]
+    async fn write_tool_relative_path_resolved_against_cwd() {
+        // WriteTool with cwd=Some(dir) should write to <dir>/out.txt when given "out.txt".
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let tool = WriteTool { cwd: Some(dir.path().to_path_buf()) };
+        tool.execute(serde_json::json!({"path": "out.txt", "content": "hi"}))
+            .await
+            .expect("write should succeed");
+
+        let written = tokio::fs::read_to_string(dir.path().join("out.txt")).await.unwrap();
+        assert_eq!(written, "hi");
+    }
+
+    #[tokio::test]
+    async fn write_tool_absolute_path_unaffected_by_cwd() {
+        // WriteTool: an absolute path must bypass cwd.
+        let cwd_dir = tempfile::tempdir().expect("create temp dir");
+        let abs_dir = tempfile::tempdir().expect("create abs temp dir");
+        let abs_path = abs_dir.path().join("absolute.txt");
+        let abs_path_str = abs_path.to_str().unwrap().to_owned();
+
+        let tool = WriteTool { cwd: Some(cwd_dir.path().to_path_buf()) };
+        tool.execute(serde_json::json!({"path": abs_path_str, "content": "abs content"}))
+            .await
+            .expect("write absolute path should succeed");
+
+        let written = tokio::fs::read_to_string(&abs_path).await.unwrap();
+        assert_eq!(written, "abs content");
+        // Verify the file was NOT written inside cwd_dir
+        assert!(!cwd_dir.path().join("absolute.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn edit_tool_relative_path_resolved_against_cwd() {
+        // EditTool with cwd=Some(dir) should edit <dir>/edit.txt when given "edit.txt".
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("edit.txt");
+        tokio::fs::write(&file_path, "hello world").await.unwrap();
+
+        let tool = EditTool { cwd: Some(dir.path().to_path_buf()) };
+        let result = tool
+            .execute(serde_json::json!({
+                "path": "edit.txt",
+                "old_string": "world",
+                "new_string": "rust"
+            }))
+            .await
+            .expect("edit should succeed");
+        assert!(result.contains("1"), "should report 1 replacement");
+
+        let contents = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(contents, "hello rust");
+    }
+
+    #[tokio::test]
+    async fn edit_tool_absolute_path_unaffected_by_cwd() {
+        // EditTool: an absolute path must bypass cwd.
+        let cwd_dir = tempfile::tempdir().expect("create temp dir");
+        let abs_file = tempfile::NamedTempFile::new().unwrap();
+        let abs_path = abs_file.path().to_str().unwrap().to_owned();
+        tokio::fs::write(&abs_path, "foo bar").await.unwrap();
+
+        let tool = EditTool { cwd: Some(cwd_dir.path().to_path_buf()) };
+        tool.execute(serde_json::json!({
+            "path": abs_path,
+            "old_string": "foo",
+            "new_string": "baz"
+        }))
+        .await
+        .expect("edit absolute path should succeed");
+
+        let contents = tokio::fs::read_to_string(&abs_path).await.unwrap();
+        assert_eq!(contents, "baz bar");
+    }
+
+    // ── existing tests ─────────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn read_tool_happy_path() {
         let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
         write!(tmp, "hello from file").expect("write temp file");
         let path = tmp.path().to_str().unwrap().to_owned();
 
-        let tool = ReadTool;
+        let tool = ReadTool { cwd: None };
         let result = tool.execute(serde_json::json!({"path": path})).await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         assert_eq!(result.unwrap(), "hello from file");
@@ -274,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_tool_file_not_found() {
-        let tool = ReadTool;
+        let tool = ReadTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"path": "/nonexistent/path/that/does/not/exist.txt"}))
             .await;
@@ -284,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_tool_missing_path_field() {
-        let tool = ReadTool;
+        let tool = ReadTool { cwd: None };
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidInput(_)));
@@ -292,14 +466,14 @@ mod tests {
 
     #[test]
     fn read_tool_definition_has_correct_name() {
-        let tool = ReadTool;
+        let tool = ReadTool { cwd: None };
         let def = tool.definition();
         assert_eq!(def.name, "read");
     }
 
     #[test]
     fn read_tool_definition_schema_has_path_property() {
-        let tool = ReadTool;
+        let tool = ReadTool { cwd: None };
         let def = tool.definition();
         assert_eq!(def.input_schema["type"], "object");
         assert!(def.input_schema["properties"]["path"].is_object());
@@ -311,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_happy_path() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}))
             .await;
@@ -322,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_stderr_labeled_in_output() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         // Write to both stdout and stderr
         let result = tool
             .execute(serde_json::json!({"command": "echo out; echo err >&2"}))
@@ -337,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_nonzero_exit_returns_exit_error() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"command": "exit 1"}))
             .await;
@@ -350,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_timeout_returns_timeout_error() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"command": "sleep 60", "timeout_ms": 100}))
             .await;
@@ -363,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_missing_command_field() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidInput(_)));
@@ -371,7 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_tool_signal_killed_returns_exit_error_minus_one() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"command": "kill -9 $$"}))
             .await;
@@ -384,7 +558,7 @@ mod tests {
 
     #[test]
     fn bash_tool_definition_has_correct_name() {
-        let tool = BashTool;
+        let tool = BashTool { cwd: None };
         let def = tool.definition();
         assert_eq!(def.name, "bash");
     }
@@ -397,7 +571,7 @@ mod tests {
         let path = dir.path().join("out.txt");
         let path_str = path.to_str().unwrap().to_owned();
 
-        let tool = WriteTool;
+        let tool = WriteTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"path": path_str, "content": "hello write"}))
             .await;
@@ -413,7 +587,7 @@ mod tests {
         let path = dir.path().join("subdir").join("nested").join("out.txt");
         let path_str = path.to_str().unwrap().to_owned();
 
-        let tool = WriteTool;
+        let tool = WriteTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"path": path_str, "content": "nested content"}))
             .await;
@@ -425,7 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_tool_missing_path_field() {
-        let tool = WriteTool;
+        let tool = WriteTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"content": "some content"}))
             .await;
@@ -435,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_tool_missing_content_field() {
-        let tool = WriteTool;
+        let tool = WriteTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({"path": "/tmp/test.txt"}))
             .await;
@@ -445,7 +619,7 @@ mod tests {
 
     #[test]
     fn write_tool_definition_has_correct_name() {
-        let tool = WriteTool;
+        let tool = WriteTool { cwd: None };
         let def = tool.definition();
         assert_eq!(def.name, "write");
     }
@@ -458,7 +632,7 @@ mod tests {
         write!(tmp, "hello world").expect("write temp file");
         let path = tmp.path().to_str().unwrap().to_owned();
 
-        let tool = EditTool;
+        let tool = EditTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({
                 "path": path,
@@ -478,7 +652,7 @@ mod tests {
         write!(tmp, "hello world").expect("write temp file");
         let path = tmp.path().to_str().unwrap().to_owned();
 
-        let tool = EditTool;
+        let tool = EditTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({
                 "path": path,
@@ -492,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_tool_file_not_found() {
-        let tool = EditTool;
+        let tool = EditTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({
                 "path": "/nonexistent/path/that/does/not/exist.txt",
@@ -510,7 +684,7 @@ mod tests {
         write!(tmp, "foo foo foo").expect("write temp file");
         let path = tmp.path().to_str().unwrap().to_owned();
 
-        let tool = EditTool;
+        let tool = EditTool { cwd: None };
         let result = tool
             .execute(serde_json::json!({
                 "path": path,
@@ -527,7 +701,7 @@ mod tests {
 
     #[test]
     fn edit_tool_definition_has_correct_name() {
-        let tool = EditTool;
+        let tool = EditTool { cwd: None };
         let def = tool.definition();
         assert_eq!(def.name, "edit");
     }

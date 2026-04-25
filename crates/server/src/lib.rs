@@ -530,6 +530,28 @@ fn generate_issue_id() -> String {
     (0..4).map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char).collect()
 }
 
+/// Convert a title string into a URL-safe slug.
+/// - Lowercase all characters
+/// - Replace any run of non-alphanumeric characters with a single `-`
+/// - Trim leading/trailing `-`
+fn slugify(title: &str) -> String {
+    let lower = title.to_lowercase();
+    // Replace runs of non-alphanumeric characters with a single dash
+    let mut result = String::new();
+    let mut in_sep = false;
+    for ch in lower.chars() {
+        if ch.is_alphanumeric() {
+            result.push(ch);
+            in_sep = false;
+        } else if !in_sep {
+            result.push('-');
+            in_sep = true;
+        }
+    }
+    // Trim leading and trailing dashes
+    result.trim_matches('-').to_string()
+}
+
 #[derive(Deserialize)]
 struct CreateIssueRequest {
     title: String,
@@ -537,6 +559,7 @@ struct CreateIssueRequest {
     assignee: Option<String>,
     parent_id: Option<String>,
     blocked_on: Option<Vec<String>>,
+    branch: Option<String>,
 }
 
 // Wraps a present JSON field (including null) in Some, leaving absent fields as None.
@@ -559,6 +582,7 @@ struct EditIssueRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     parent_id: Option<Option<String>>,
     blocked_on: Option<Vec<String>>,
+    branch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -585,11 +609,29 @@ async fn create_issue(
     Json(req): Json<CreateIssueRequest>,
 ) -> std::result::Result<(StatusCode, Json<Issue>), Error> {
     let now = Utc::now();
+    let id = generate_issue_id();
+
+    // Compute the branch:
+    // 1. Explicit branch in request → use as-is
+    // 2. parent_id provided → inherit parent's branch
+    // 3. Otherwise → generate slug from "<id>-<slugified-title>"
+    let branch = if let Some(b) = req.branch {
+        b
+    } else if let Some(ref parent_id) = req.parent_id {
+        match state.db.get_issue(parent_id.clone()).await {
+            Ok(parent) => parent.branch,
+            Err(_) => format!("{}-{}", id, slugify(&req.title)),
+        }
+    } else {
+        format!("{}-{}", id, slugify(&req.title))
+    };
+
     let issue = Issue {
-        id: generate_issue_id(),
+        id,
         title: req.title,
         body: req.body,
         status: IssueStatus::Open,
+        branch,
         assignee: req.assignee,
         session_id: None,
         parent_id: req.parent_id,
@@ -649,6 +691,9 @@ async fn edit_issue(
     }
     if let Some(blocked_on) = req.blocked_on {
         issue.blocked_on = blocked_on;
+    }
+    if let Some(branch) = req.branch {
+        issue.branch = branch;
     }
     issue.updated_at = Utc::now();
     state.db.update_issue(&issue).await?;
@@ -2594,6 +2639,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status: types::IssueStatus::Running,
+            branch: String::new(),
             assignee: None,
             session_id: Some(session.id),
             parent_id: None,
@@ -2705,6 +2751,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status,
+            branch: String::new(),
             assignee: None,
             session_id: Some(Uuid::new_v4()),
             parent_id: None,
@@ -3136,6 +3183,7 @@ mod tests {
             title: "Multi-turn test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::Running,
+            branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,
@@ -3245,6 +3293,188 @@ mod tests {
         );
     }
 
+    // ─── Slug function tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_slugify_simple_title() {
+        assert_eq!(slugify("Fix the bug"), "fix-the-bug");
+    }
+
+    #[test]
+    fn test_slugify_capitals() {
+        assert_eq!(slugify("My Feature Request"), "my-feature-request");
+    }
+
+    #[test]
+    fn test_slugify_slashes() {
+        assert_eq!(slugify("feat/new-feature"), "feat-new-feature");
+    }
+
+    #[test]
+    fn test_slugify_consecutive_specials() {
+        assert_eq!(slugify("foo--bar"), "foo-bar");
+        assert_eq!(slugify("foo  bar"), "foo-bar");
+        assert_eq!(slugify("a!@#b"), "a-b");
+    }
+
+    #[test]
+    fn test_slugify_leading_trailing() {
+        assert_eq!(slugify("  leading and trailing  "), "leading-and-trailing");
+        assert_eq!(slugify("--leading--"), "leading");
+    }
+
+    #[test]
+    fn test_slugify_numbers() {
+        assert_eq!(slugify("issue 42 fix"), "issue-42-fix");
+    }
+
+    #[test]
+    fn test_slugify_mixed_specials() {
+        assert_eq!(slugify("Hello, World! (2024)"), "hello-world-2024");
+    }
+
+    // ─── Branch auto-assignment integration tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_issue_no_parent_no_branch_generates_slug() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Fix the Bug",
+                "body": "Details here"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = v["id"].as_str().unwrap();
+        let branch = v["branch"].as_str().unwrap();
+        // branch should be "<id>-<slugified-title>"
+        assert!(
+            branch.starts_with(id),
+            "branch '{branch}' should start with id '{id}'"
+        );
+        assert!(
+            branch.contains("fix-the-bug"),
+            "branch '{branch}' should contain slugified title"
+        );
+        assert_eq!(branch, format!("{id}-fix-the-bug"));
+    }
+
+    #[tokio::test]
+    async fn test_create_child_issue_inherits_parent_branch() {
+        let app = test_app().await;
+
+        // Create parent issue (no branch → gets slug)
+        let parent_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Parent Issue",
+                "body": "Parent body"
+            })))
+            .await
+            .unwrap();
+        let parent_body = response_body_bytes(parent_resp).await;
+        let parent: serde_json::Value = serde_json::from_slice(&parent_body).unwrap();
+        let parent_id = parent["id"].as_str().unwrap();
+        let parent_branch = parent["branch"].as_str().unwrap();
+
+        // Create child issue with parent_id → should inherit parent's branch
+        let child_resp = app
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Child Issue",
+                "body": "Child body",
+                "parent_id": parent_id
+            })))
+            .await
+            .unwrap();
+        assert_eq!(child_resp.status(), StatusCode::CREATED);
+        let child_body = response_body_bytes(child_resp).await;
+        let child: serde_json::Value = serde_json::from_slice(&child_body).unwrap();
+        let child_branch = child["branch"].as_str().unwrap();
+        assert_eq!(
+            child_branch, parent_branch,
+            "child branch '{child_branch}' should equal parent branch '{parent_branch}'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_issue_explicit_branch_stored_as_is() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "My Issue",
+                "body": "Body",
+                "branch": "my-custom-branch"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["branch"], "my-custom-branch");
+    }
+
+    #[tokio::test]
+    async fn test_edit_issue_branch_updates_branch() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "My Issue",
+                "body": "Body"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let edit_resp = app
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+                "branch": "updated-branch"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(edit_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(edit_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["branch"], "updated-branch");
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_includes_branch_in_json() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Branch Test",
+                "body": "Body",
+                "branch": "feature/xyz"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/issues/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(get_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("branch").is_some(), "GET /issues/:id response must include 'branch' field");
+        assert_eq!(v["branch"], "feature/xyz");
+    }
+
     /// Test 4: if the session produces no text content (only tool calls), no empty comment
     /// is posted.
     #[tokio::test]
@@ -3257,6 +3487,7 @@ mod tests {
             title: "No text test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::Running,
+            branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,

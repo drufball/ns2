@@ -4,7 +4,7 @@ targets:
   - crates/cli/src/main.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-25T11:26:14Z
+verified: 2026-04-25T13:34:59Z
 ---
 
 # Flow 14: Issue List and Filtering
@@ -47,12 +47,12 @@ Expected: three 4-character issue IDs printed, one per command.
 docker exec ns2-flow-14 bash -c 'cd /repo && ns2 issue list'
 ```
 
-Expected output — all three issues in a table:
+Expected output — all three issues in a table (includes `branch` column):
 ```
-id      title                 status    assignee    created_at
-<id>    Build signup page     open      swe         ...
-<id>    Test login page       open      qa          ...
-<id>    Build login page      open      swe         ...
+id      title                 status    assignee    branch    created_at
+<id>    Build signup page     open      swe         <slug>    ...
+<id>    Test login page       open      qa          <slug>    ...
+<id>    Build login page      open      swe         <slug>    ...
 ```
 
 Issues are listed newest first.

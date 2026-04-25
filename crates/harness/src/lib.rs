@@ -3,6 +3,7 @@ use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use types::{ContentBlock, ContentBlockDelta, Role, Session, SessionEvent, SessionStatus, Turn};
@@ -164,6 +165,39 @@ async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> 
         }
     }
     None
+}
+
+// ── Worktree management ───────────────────────────────────────────────────────
+
+/// Resolve the session's working directory based on its associated issue.
+///
+/// - If the session has an associated issue with a non-empty `branch`:
+///   reads `ns2.toml`, computes `<base>/<branch>`, ensures the worktree
+///   exists, and returns the worktree path.
+/// - Otherwise: returns `None` (use git root as cwd).
+pub async fn resolve_session_cwd(
+    db: &Arc<dyn db::Db>,
+    session_id: Uuid,
+) -> Option<PathBuf> {
+    resolve_session_cwd_with_root(db, session_id, workspace::git_root()).await
+}
+
+/// Inner implementation that accepts an explicit `git_root` — injectable for tests.
+pub(crate) async fn resolve_session_cwd_with_root(
+    db: &Arc<dyn db::Db>,
+    session_id: Uuid,
+    git_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let issues = db.list_issues_by_session_id(session_id).await.ok()?;
+    let branch = issues.into_iter().find_map(|i| {
+        if i.branch.is_empty() { None } else { Some(i.branch) }
+    })?;
+
+    let git_root = git_root?;
+    let config = workspace::read_ns2_config(&git_root);
+    let worktree_path = config.worktree_base.join(&branch);
+
+    workspace::ensure_worktree(&git_root, &worktree_path, &branch)
 }
 
 pub struct StubClient;
@@ -421,12 +455,28 @@ async fn run_tool_dispatch_loop(
 }
 
 pub async fn run(
-    config: HarnessConfig,
+    mut config: HarnessConfig,
     client: Arc<dyn AnthropicClient>,
     db: Arc<dyn db::Db>,
     event_tx: broadcast::Sender<SessionEvent>,
     mut msg_rx: mpsc::Receiver<String>,
 ) -> Result<()> {
+    // Resolve the session's working directory once at startup.
+    // If the session has an associated issue with a non-empty branch, create/reuse
+    // a git worktree and set cwd to the worktree path.
+    let session_cwd = resolve_session_cwd(&db, config.session.id).await;
+
+    // If we resolved a cwd, rebuild the standard tool set with that cwd so all
+    // file operations and shell commands run relative to the worktree.
+    if let Some(ref cwd) = session_cwd {
+        config.tools = vec![
+            Arc::new(tools::BashTool { cwd: Some(cwd.clone()) }),
+            Arc::new(tools::ReadTool { cwd: Some(cwd.clone()) }),
+            Arc::new(tools::WriteTool { cwd: Some(cwd.clone()) }),
+            Arc::new(tools::EditTool { cwd: Some(cwd.clone()) }),
+        ];
+    }
+
     // Load hooks from the agent definition (once, at harness start).
     // When include_project_config is true, also load project hooks from
     // .claude/settings.json and merge them (agent hooks take precedence).
@@ -580,7 +630,7 @@ mod tests {
     }
 
     // Helper: set up a mock DB that accepts any create_turn / create_content_block / update calls
-    // and returns empty lists for list_turns / list_content_blocks.
+    // and returns empty lists for list_turns / list_content_blocks / list_issues_by_session_id.
     fn permissive_mock_db() -> MockTestDb {
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
@@ -588,8 +638,322 @@ mod tests {
         mock_db.expect_update_session_status().returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
         mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        // No linked issue → no worktree is created for regular harness tests
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
         mock_db
     }
+
+    // ── Worktree tests ────────────────────────────────────────────────────────
+
+    /// `ensure_worktree` with an existing directory returns `Some(path)` without running git.
+    #[test]
+    fn ensure_worktree_existing_dir_is_reused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let worktree_path = tmp.path().join("existing-wt");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        // git_root doesn't matter because the path already exists
+        let result = workspace::ensure_worktree(tmp.path(), &worktree_path, "my-branch");
+        assert_eq!(result, Some(worktree_path));
+    }
+
+    /// `resolve_session_cwd` returns `None` when there are no linked issues.
+    #[tokio::test]
+    async fn resolve_session_cwd_no_issues_returns_none() {
+        let mut mock_db = MockTestDb::new();
+        let session_id = Uuid::new_v4();
+        mock_db
+            .expect_list_issues_by_session_id()
+            .withf(move |id| *id == session_id)
+            .returning(|_| Ok(vec![]));
+
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+        let result = resolve_session_cwd(&db, session_id).await;
+        assert!(result.is_none(), "no issues → cwd must be None");
+    }
+
+    /// `resolve_session_cwd` returns `None` when the associated issue has an empty branch.
+    #[tokio::test]
+    async fn resolve_session_cwd_empty_branch_returns_none() {
+        let mut mock_db = MockTestDb::new();
+        let session_id = Uuid::new_v4();
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(move |_| {
+                Ok(vec![types::Issue {
+                    id: "ab12".into(),
+                    title: "Test".into(),
+                    body: "body".into(),
+                    status: types::IssueStatus::Running,
+                    branch: String::new(), // empty branch
+                    assignee: None,
+                    session_id: Some(session_id),
+                    parent_id: None,
+                    blocked_on: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            });
+
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+        let result = resolve_session_cwd(&db, session_id).await;
+        assert!(result.is_none(), "empty branch → cwd must be None");
+    }
+
+    /// `resolve_session_cwd_with_root` returns `Some(worktree_path)` when the issue has
+    /// a non-empty branch and a real git repo is provided.  Verifies the happy path so
+    /// that a mutation that always returns `None` is caught.
+    #[tokio::test]
+    async fn resolve_session_cwd_with_root_non_empty_branch_returns_some() {
+        // Set up a bare origin + local clone so ensure_worktree can branch from origin/main.
+        let origin_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(origin_dir.path())
+            .status().unwrap();
+
+        let local_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["clone", &origin_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        for cmd in [
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "test"],
+        ] {
+            std::process::Command::new("git")
+                .args(&cmd)
+                .current_dir(local_dir.path())
+                .status().unwrap();
+        }
+        std::fs::write(local_dir.path().join("README.md"), "init").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(local_dir.path()).status().unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status().unwrap();
+        std::process::Command::new("git").args(["push", "origin", "main"]).current_dir(local_dir.path()).status().unwrap();
+
+        let branch = "feature/test-cwd";
+        let session_id = Uuid::new_v4();
+        let mut mock_db = MockTestDb::new();
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(move |_| {
+                Ok(vec![types::Issue {
+                    id: "cd34".into(),
+                    title: "Test".into(),
+                    body: "body".into(),
+                    status: types::IssueStatus::Running,
+                    branch: branch.into(),
+                    assignee: None,
+                    session_id: Some(session_id),
+                    parent_id: None,
+                    blocked_on: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            });
+
+        let db: Arc<dyn db::Db> = Arc::new(mock_db);
+        let result = resolve_session_cwd_with_root(&db, session_id, Some(local_dir.path().to_owned())).await;
+        assert!(result.is_some(), "non-empty branch + git root → cwd must be Some");
+        let cwd = result.unwrap();
+        assert!(cwd.is_dir(), "resolved cwd must be an existing directory");
+    }
+
+    /// Integration test: start a session with an issue that has a branch;
+    /// verify `ensure_worktree` creates the directory in a real (temp) git repo.
+    #[test]
+    fn ensure_worktree_creates_worktree_in_real_git_repo() {
+        // Create a bare "origin" repo
+        let origin_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin_dir.path())
+            .status()
+            .expect("git init --bare");
+
+        // Clone into a local working copy
+        let local_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["clone", &origin_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .status()
+            .expect("git clone");
+
+        // Need at least one commit on main so we can branch from it.
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        let readme = local_dir.path().join("README.md");
+        std::fs::write(&readme, "init").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        // Now try to create a worktree for a new branch
+        let wt_base = tempfile::TempDir::new().unwrap();
+        let branch = "feature/my-feature";
+        let worktree_path = wt_base.path().join(branch);
+
+        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+
+        assert!(
+            result.is_some(),
+            "ensure_worktree should succeed for new branch in real git repo"
+        );
+        assert!(
+            worktree_path.is_dir(),
+            "worktree directory should be created at expected path"
+        );
+    }
+
+    /// Integration test: calling `ensure_worktree` twice for the same branch/path
+    /// (worktree already exists) does not error and returns the path.
+    #[test]
+    fn ensure_worktree_reuse_existing_worktree() {
+        // Create a bare "origin" repo
+        let origin_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin_dir.path())
+            .status()
+            .expect("git init --bare");
+
+        // Clone into a local working copy
+        let local_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["clone", &origin_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .status()
+            .expect("git clone");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        let readme = local_dir.path().join("README.md");
+        std::fs::write(&readme, "init").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        let wt_base = tempfile::TempDir::new().unwrap();
+        let branch = "feat/reuse-test";
+        let worktree_path = wt_base.path().join(branch);
+
+        // First call: creates the worktree
+        let result1 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        assert!(result1.is_some(), "first ensure_worktree should succeed");
+        assert!(worktree_path.is_dir(), "worktree dir should exist after first call");
+
+        // Second call: directory already exists → reuse without running git commands
+        let result2 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        assert!(result2.is_some(), "second ensure_worktree should succeed (reuse)");
+        assert!(worktree_path.is_dir(), "worktree dir should still exist");
+    }
+
+    /// Integration test: `ensure_worktree` with an existing local branch (no `-b` needed).
+    #[test]
+    fn ensure_worktree_existing_local_branch_checkout() {
+        // Create a bare "origin" repo
+        let origin_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin_dir.path())
+            .status()
+            .expect("git init --bare");
+
+        // Clone into a local working copy
+        let local_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["clone", &origin_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .status()
+            .expect("git clone");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        let readme = local_dir.path().join("README.md");
+        std::fs::write(&readme, "init").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        // Pre-create the branch locally
+        let branch = "existing-branch";
+        std::process::Command::new("git")
+            .args(["branch", branch])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        let wt_base = tempfile::TempDir::new().unwrap();
+        let worktree_path = wt_base.path().join(branch);
+
+        // `git worktree add -b <branch> origin/main` will fail (branch exists),
+        // but the fallback `git worktree add <path> <branch>` should succeed.
+        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        assert!(
+            result.is_some(),
+            "ensure_worktree should succeed for existing local branch via fallback"
+        );
+        assert!(worktree_path.is_dir(), "worktree dir should exist");
+    }
+
+    // ── Existing tests (updated to include list_issues_by_session_id) ─────────
 
     #[tokio::test]
     async fn test_run_with_stub_client() {
@@ -638,6 +1002,7 @@ mod tests {
         mock_db.expect_update_session_status().returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
         mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -664,6 +1029,7 @@ mod tests {
         mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
         mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
         // Expect Running then Completed
         let mut seq = mockall::Sequence::new();
         mock_db
@@ -1278,6 +1644,7 @@ mod tests {
                 .collect();
             Ok(blocks)
         });
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         let client = Arc::new(TwoTurnClient::new());
         let client_ref = Arc::clone(&client);
@@ -1455,6 +1822,7 @@ mod tests {
         mock_db.expect_update_session_status().returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
         mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         // Use a tools list that has only a different tool (not "nonexistent_tool")
         let config = HarnessConfig {
@@ -1578,6 +1946,7 @@ mod tests {
                 .collect();
             Ok(blocks)
         });
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -1675,22 +2044,6 @@ mod tests {
             SessionEvent::Error { .. } => "Error",
         }).collect();
 
-        // Expected sequence (one tool call then final response):
-        // 1. TurnStarted (user)
-        // 2. ContentBlockDelta (user text)
-        // 3. ContentBlockDone (user text)
-        // 4. TurnDone (user)
-        // 5. TurnStarted (assistant first response)
-        // 6. ContentBlockDone (ToolUse)
-        // 7. TurnDone (assistant)
-        // 8. TurnStarted (tool result)
-        // 9. ContentBlockDone (ToolResult)
-        // 10. TurnDone (tool result)
-        // 11. TurnStarted (final assistant)
-        // 12. ContentBlockDelta (final text)
-        // 13. ContentBlockDone (final Text)
-        // 14. TurnDone (final assistant)
-        // 15. SessionDone
         let expected: &[&str] = &[
             "TurnStarted",
             "ContentBlockDelta",
@@ -1749,6 +2102,7 @@ mod tests {
         mock_db.expect_update_session_status().returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
         mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -1866,6 +2220,7 @@ mod tests {
                 .collect();
             Ok(blocks)
         });
+        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
 
         let client = Arc::new(CapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1989,18 +2344,12 @@ mod tests {
     }
 
     /// When an agent exists with a non-empty body, its body becomes the system prompt.
-    /// When an agent exists with an empty body, system prompt must remain None.
-    /// These tests write real agent files to .ns2/agents/ to exercise the full path.
-    /// They skip when not inside a git repo (e.g. cargo-mutants temp dir) because
-    /// agents::agents_dir() depends on workspace::git_root().
     #[tokio::test]
     async fn test_agent_with_nonempty_body_becomes_system_prompt() {
-        // Skip when not inside a git repo (cargo-mutants runs in a temp dir)
         let dir = match agents::agents_dir() {
             Some(d) => d,
             None => return,
         };
-        // Write a real agent file so agents::load_agent can find it
         std::fs::create_dir_all(&dir).unwrap();
         let agent_name = "harness_test_nonempty_body";
         let def = agents::AgentDef {
@@ -2035,10 +2384,7 @@ mod tests {
         drop(msg_tx);
 
         let result = run(config, client, db, event_tx, msg_rx).await;
-
-        // Cleanup before any assertions that might panic
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-
         result.unwrap();
 
         assert_eq!(
@@ -2048,12 +2394,8 @@ mod tests {
         );
     }
 
-    /// When an agent exists but has an empty body, the system prompt must be None.
-    /// This catches the `.filter(|s| !s.is_empty())` mutation (flipping ! would let
-    /// empty bodies through and drop non-empty ones).
     #[tokio::test]
     async fn test_agent_with_empty_body_produces_no_system_prompt() {
-        // Skip when not inside a git repo (cargo-mutants runs in a temp dir)
         let dir = match agents::agents_dir() {
             Some(d) => d,
             None => return,
@@ -2063,7 +2405,7 @@ mod tests {
         let def = agents::AgentDef {
             name: agent_name.to_string(),
             description: "test agent with no body".to_string(),
-            body: String::new(), // empty body
+            body: String::new(),
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
@@ -2092,10 +2434,7 @@ mod tests {
         drop(msg_tx);
 
         let result = run(config, client, db, event_tx, msg_rx).await;
-
-        // Cleanup before any assertions that might panic
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-
         result.unwrap();
 
         assert!(
@@ -2104,12 +2443,8 @@ mod tests {
         );
     }
 
-    /// When `include_project_config: true`, the CLAUDE.md content is appended to the
-    /// agent body in the system prompt, separated by `\n\n`.
-    /// Skips when not inside a git repo (e.g. cargo-mutants temp dir).
     #[tokio::test]
     async fn test_include_project_config_true_appends_claude_md_to_system_prompt() {
-        // Skip when not inside a git repo
         let dir = match agents::agents_dir() {
             Some(d) => d,
             None => return,
@@ -2143,8 +2478,6 @@ mod tests {
             tools: vec![],
         };
 
-        // Derive the git root from agents_dir (agents_dir = git_root/.ns2/agents)
-        // We go up two levels: .ns2/agents -> .ns2 -> git_root
         let git_root = dir.parent().and_then(|p| p.parent());
         let project_content = git_root.and_then(|r| agents::load_project_config(r));
 
@@ -2157,10 +2490,7 @@ mod tests {
         drop(msg_tx);
 
         let result = run(config, client, db, event_tx, msg_rx).await;
-
-        // Cleanup
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-
         result.unwrap();
 
         let captured = client_ref.captured();
@@ -2173,7 +2503,6 @@ mod tests {
             &system[..system.len().min(80)]
         );
 
-        // If CLAUDE.md exists (it does in this repo), it must be appended
         if let Some(project) = project_content {
             if !project.is_empty() {
                 assert!(
@@ -2189,9 +2518,6 @@ mod tests {
         }
     }
 
-    /// When `include_project_config: false` (default), the system prompt equals
-    /// only the agent body — CLAUDE.md content is NOT appended.
-    /// Skips when not inside a git repo.
     #[tokio::test]
     async fn test_include_project_config_false_leaves_system_prompt_unchanged() {
         let dir = match agents::agents_dir() {
@@ -2234,10 +2560,7 @@ mod tests {
         drop(msg_tx);
 
         let result = run(config, client, db, event_tx, msg_rx).await;
-
-        // Cleanup
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
-
         result.unwrap();
 
         let captured = client_ref.captured();
@@ -2251,12 +2574,10 @@ mod tests {
 
     // ── Hook dispatch tests (GH #33) ─────────────────────────────────────────
 
-    // Helper: build a HookCommand using a shell snippet.
     fn hook_cmd(script: &str, timeout: u64) -> agents::HookCommand {
         agents::HookCommand { command: script.to_string(), timeout }
     }
 
-    /// PreToolUse hook exits 0 → tool runs normally.
     #[tokio::test]
     async fn test_pre_tool_use_hook_exit_0_allows_tool() {
         use agents::{AgentHooks, HookEntry};
@@ -2269,13 +2590,11 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        // Verify directly via run_pre_tool_use_hooks
         let result =
             run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"})).await;
         assert!(result.is_none(), "exit 0 hook must not block the tool, got: {result:?}");
     }
 
-    /// PreToolUse hook exits 1 → tool is blocked; hook stderr is returned.
     #[tokio::test]
     async fn test_pre_tool_use_hook_exit_1_blocks_tool_returns_stderr() {
         use agents::{AgentHooks, HookEntry};
@@ -2298,7 +2617,6 @@ mod tests {
         );
     }
 
-    /// PreToolUse hook with matcher "bash" does NOT match tool "read".
     #[tokio::test]
     async fn test_pre_tool_use_hook_matcher_does_not_match_different_tool() {
         use agents::{AgentHooks, HookEntry};
@@ -2311,13 +2629,11 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        // "read" should not be matched by "bash"
         let result =
             run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({})).await;
         assert!(result.is_none(), "hook for 'bash' must not match tool 'read'");
     }
 
-    /// PostToolUse hook runs after tool; non-zero exit is ignored (no error propagated).
     #[tokio::test]
     async fn test_post_tool_use_hook_non_zero_exit_is_ignored() {
         use agents::{AgentHooks, HookEntry};
@@ -2330,12 +2646,9 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        // Should complete without any error
         run_post_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), "result").await;
-        // If we get here, the non-zero exit was ignored as expected.
     }
 
-    /// Stop hook exits 0 → session completes normally (run_stop_hooks returns None).
     #[tokio::test]
     async fn test_stop_hook_exit_0_allows_completion() {
         use agents::{AgentHooks, HookEntry};
@@ -2352,7 +2665,6 @@ mod tests {
         assert!(result.is_none(), "exit 0 stop hook must allow completion, got: {result:?}");
     }
 
-    /// Stop hook exits 1 → injects stdout as user message (run_stop_hooks returns Some).
     #[tokio::test]
     async fn test_stop_hook_exit_1_injects_stdout_as_user_message() {
         use agents::{AgentHooks, HookEntry};
@@ -2374,10 +2686,8 @@ mod tests {
         );
     }
 
-    /// Hook timeout kills command and treats as exit 1 (times out after `timeout` seconds).
     #[tokio::test]
     async fn test_hook_timeout_kills_command_and_returns_exit_1() {
-        // Use a very short timeout (1s) and a command that sleeps longer (5s)
         let cmd = hook_cmd("sleep 5", 1);
         let (exit_code, _stdout, stderr) = run_hook(&cmd, "{}").await;
         assert_eq!(exit_code, 1, "timed-out hook must return exit_code=1");
@@ -2387,13 +2697,11 @@ mod tests {
         );
     }
 
-    /// Integration: PreToolUse hook exit 0 lets the tool run; result is the tool's output.
     #[tokio::test]
     async fn test_integration_pre_tool_use_exit_0_tool_runs_normally() {
         use agents::{AgentHooks, HookEntry};
         use std::sync::Mutex;
 
-        // Track what's stored as ToolResult
         let results_store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let results_store_c = Arc::clone(&results_store);
 
@@ -2420,7 +2728,6 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        // Run the tool dispatch loop directly with hooks
         let history = vec![(
             Role::User,
             vec![ContentBlock::Text { text: "go".into() }],
@@ -2443,7 +2750,6 @@ mod tests {
         assert_eq!(results[0], "file content here", "tool should have run normally");
     }
 
-    /// Integration: PreToolUse hook exit 1 blocks tool; hook stderr becomes tool result.
     #[tokio::test]
     async fn test_integration_pre_tool_use_exit_1_blocks_tool() {
         use agents::{AgentHooks, HookEntry};
@@ -2500,7 +2806,6 @@ mod tests {
         );
     }
 
-    /// Integration: PostToolUse hook runs after tool; non-zero exit does not alter tool result.
     #[tokio::test]
     async fn test_integration_post_tool_use_hook_does_not_alter_result() {
         use agents::{AgentHooks, HookEntry};
@@ -2524,7 +2829,6 @@ mod tests {
         let hooks = AgentHooks {
             post_tool_use: vec![HookEntry {
                 matcher: Some(".*".to_string()),
-                // Non-zero exit — must not alter the tool result
                 hooks: vec![hook_cmd("exit 99", 5)],
             }],
             ..AgentHooks::default()
@@ -2557,7 +2861,6 @@ mod tests {
         );
     }
 
-    /// Integration: Stop hook exit 0 lets session complete without injecting a message.
     #[tokio::test]
     async fn test_integration_stop_hook_exit_0_lets_session_complete() {
         use agents::{AgentHooks, HookEntry};
@@ -2582,7 +2885,6 @@ mod tests {
             model: "test".into(),
             tools: vec![],
         };
-        // StubClient returns end_turn
         let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
         let mock_db = permissive_mock_db();
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
@@ -2593,7 +2895,6 @@ mod tests {
         assert!(result.is_none(), "stop hook exit 0 must return None (normal completion)");
     }
 
-    /// Integration: Stop hook exit 1 injects stdout as user message (returns Some).
     #[tokio::test]
     async fn test_integration_stop_hook_exit_1_injects_user_message() {
         use agents::{AgentHooks, HookEntry};
@@ -2635,16 +2936,11 @@ mod tests {
 
     // ── GH#33 project hook inheritance tests ─────────────────────────────────
 
-    // A process-wide lock to prevent concurrent tests from racing over .claude/settings.json.
     fn settings_json_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
-    /// When `include_project_config: true` and `.claude/settings.json` has a PostToolUse
-    /// hook, the project hook runs during a tool-dispatching session (the log file is written).
-    ///
-    /// Skips when not inside a git repo (agents_dir() returns None).
     #[tokio::test]
     async fn test_include_project_config_true_runs_project_hook() {
         let dir = match agents::agents_dir() {
@@ -2653,27 +2949,22 @@ mod tests {
         };
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Derive git root from agents_dir (.ns2/agents → .ns2 → git_root)
         let git_root = match dir.parent().and_then(|p| p.parent()) {
             Some(r) => r.to_path_buf(),
             None => return,
         };
 
-        // Write a temp sentinel file the hook will touch
         let log_file = std::env::temp_dir().join(format!(
             "ns2_proj_hook_test_{}.txt",
             uuid::Uuid::new_v4()
         ));
         let log_path = log_file.to_string_lossy().to_string();
 
-        // Acquire lock to prevent concurrent access to .claude/settings.json
         let _guard = settings_json_lock().lock().unwrap();
 
-        // Write .claude/settings.json with a PostToolUse hook
         let claude_dir = git_root.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let settings_path = claude_dir.join("settings.json");
-        // Save any existing settings.json to restore later
         let original_settings = std::fs::read_to_string(&settings_path).ok();
         std::fs::write(
             &settings_path,
@@ -2693,7 +2984,6 @@ mod tests {
             ),
         ).unwrap();
 
-        // Write the agent with include_project_config: true and no agent-level hooks
         let agent_name = "harness_test_project_hook_true";
         let def = agents::AgentDef {
             name: agent_name.to_string(),
@@ -2727,7 +3017,6 @@ mod tests {
 
         let result = run(config, client, db, event_tx, msg_rx).await;
 
-        // Cleanup agent and restore/remove settings.json (while still holding the lock)
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
         match original_settings {
             Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
@@ -2737,9 +3026,7 @@ mod tests {
 
         result.unwrap();
 
-        // The log file must exist and contain the hook output
-        let log_content = std::fs::read_to_string(&log_file)
-            .unwrap_or_default();
+        let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         let _ = std::fs::remove_file(&log_file);
         assert!(
             log_content.contains("project-hook"),
@@ -2747,10 +3034,6 @@ mod tests {
         );
     }
 
-    /// When `include_project_config: false`, the project `.claude/settings.json` PostToolUse
-    /// hook must NOT run even if the file exists.
-    ///
-    /// Skips when not inside a git repo (agents_dir() returns None).
     #[tokio::test]
     async fn test_include_project_config_false_does_not_run_project_hook() {
         let dir = match agents::agents_dir() {
@@ -2764,17 +3047,14 @@ mod tests {
             None => return,
         };
 
-        // Write a temp sentinel file the hook would touch if it ran
         let log_file = std::env::temp_dir().join(format!(
             "ns2_proj_hook_false_test_{}.txt",
             uuid::Uuid::new_v4()
         ));
         let log_path = log_file.to_string_lossy().to_string();
 
-        // Acquire lock to prevent concurrent access to .claude/settings.json
         let _guard = settings_json_lock().lock().unwrap();
 
-        // Write .claude/settings.json with a PostToolUse hook
         let claude_dir = git_root.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let settings_path = claude_dir.join("settings.json");
@@ -2797,7 +3077,6 @@ mod tests {
             ),
         ).unwrap();
 
-        // Write the agent with include_project_config: FALSE
         let agent_name = "harness_test_project_hook_false";
         let def = agents::AgentDef {
             name: agent_name.to_string(),
@@ -2831,7 +3110,6 @@ mod tests {
 
         let result = run(config, client, db, event_tx, msg_rx).await;
 
-        // Cleanup (while still holding the lock)
         let _ = std::fs::remove_file(dir.join(format!("{agent_name}.md")));
         match original_settings {
             Some(orig) => { let _ = std::fs::write(&settings_path, orig); }
@@ -2841,7 +3119,6 @@ mod tests {
 
         result.unwrap();
 
-        // The log file must NOT exist (project hook must not have run)
         let log_content = std::fs::read_to_string(&log_file).unwrap_or_default();
         let _ = std::fs::remove_file(&log_file);
         assert!(

@@ -4,7 +4,7 @@ targets:
   - crates/harness/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-04-25T11:20:03Z
+verified: 2026-04-25T13:36:28Z
 ---
 
 # Session Lifecycle Spec

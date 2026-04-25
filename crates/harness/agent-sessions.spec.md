@@ -4,7 +4,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-04-25T11:19:59Z
+verified: 2026-04-25T13:36:27Z
 ---
 
 # Agent Sessions Spec

@@ -44,6 +44,11 @@ enum Command {
         #[command(subcommand)]
         action: IssueAction,
     },
+    #[command(about = "Manage git worktrees for branches.", long_about = "Worktrees let multiple branches be checked out simultaneously into separate directories.\nEach worktree maps a branch to a directory under the configured worktree base path.\n\nThe base path is read from ns2.toml ([worktrees] path = ...) or defaults to\n~/.ns2/<repo-name>/worktrees/.\n\nSubcommands:\n  list    Print all worktrees under the base path\n  create  Create a worktree for a branch (idempotent)\n  delete  Remove a worktree and its branch")]
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,6 +179,8 @@ enum IssueAction {
         blocked_on: Vec<String>,
         #[arg(long, help = "Immediately start the issue after creating it. Requires --assignee.")]
         start: bool,
+        #[arg(long, help = "Git branch name to associate with this issue. Auto-generated from title if omitted.")]
+        branch: Option<String>,
     },
     #[command(about = "Edit an existing issue.", long_about = "Edit fields of an existing issue. Only the flags you provide are changed.")]
     Edit {
@@ -189,6 +196,8 @@ enum IssueAction {
         parent: Option<String>,
         #[arg(long = "blocked-on", num_args = 0.., help = "Replace the blocked-on list. Pass with no value to clear.")]
         blocked_on: Option<Vec<String>>,
+        #[arg(long, help = "New git branch name for this issue.")]
+        branch: Option<String>,
     },
     #[command(about = "Post a comment to an issue.")]
     Comment {
@@ -238,6 +247,24 @@ enum IssueAction {
     },
 }
 
+#[derive(Subcommand)]
+enum WorktreeAction {
+    #[command(about = "List worktrees under the configured base path.", long_about = "List all git worktrees whose path is under the ns2 worktree base directory.\n\nPrints a table with columns: branch, path.\nPrints 'No worktrees found.' if none exist.")]
+    List,
+    #[command(about = "Create a worktree for a branch.", long_about = "Create a git worktree for the given branch under the worktree base directory.\n\nIdempotent: exits 0 without error if the worktree already exists.\n\nThe branch is created tracking origin/main if it does not yet exist locally.")]
+    Create {
+        #[arg(long, help = "The branch name to create a worktree for. Required.")]
+        branch: String,
+    },
+    #[command(about = "Delete a worktree and its branch.", long_about = "Remove the worktree directory for a branch and delete the local branch.\n\nRequires the branch to be merged into main unless --force is passed.\nErrors with a clear message if no worktree exists for the given branch.")]
+    Delete {
+        #[arg(long, help = "The branch name whose worktree to delete. Required.")]
+        branch: String,
+        #[arg(long, help = "Delete even if the branch has unmerged commits.")]
+        force: bool,
+    },
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 fn load_dotenv() {
@@ -270,15 +297,28 @@ pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
     (data_dir, pid_file)
 }
 
-fn print_issue_row(issue: &Issue) {
-    println!(
-        "{:<6}  {:<30}  {:<10}  {:<12}  {}",
+fn format_issue_row(issue: &Issue) -> String {
+    format!(
+        "{:<6}  {:<30}  {:<10}  {:<12}  {:<25}  {}",
         issue.id,
-        if issue.title.len() > 30 { &issue.title[..30] } else { &issue.title },
+        if issue.title.chars().count() > 30 {
+            issue.title.chars().take(30).collect::<String>()
+        } else {
+            issue.title.clone()
+        },
         issue.status.to_string(),
         issue.assignee.as_deref().unwrap_or("-"),
+        if issue.branch.chars().count() > 25 {
+            issue.branch.chars().take(25).collect::<String>()
+        } else {
+            issue.branch.clone()
+        },
         issue.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
-    );
+    )
+}
+
+fn print_issue_row(issue: &Issue) {
+    println!("{}", format_issue_row(issue));
 }
 
 fn handle_connection_error(err: &reqwest::Error) -> ! {
@@ -495,10 +535,10 @@ async fn main() {
                         c
                     },
                     tools: vec![
-                        Arc::new(tools::ReadTool),
-                        Arc::new(tools::BashTool),
-                        Arc::new(tools::WriteTool),
-                        Arc::new(tools::EditTool),
+                        Arc::new(tools::ReadTool { cwd: None }),
+                        Arc::new(tools::BashTool { cwd: None }),
+                        Arc::new(tools::WriteTool { cwd: None }),
+                        Arc::new(tools::EditTool { cwd: None }),
                     ],
                     model: std::env::var("ANTHROPIC_MODEL")
                         .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
@@ -961,7 +1001,7 @@ async fn main() {
         Command::Issue { action } => {
             let client = reqwest::Client::new();
             match action {
-                IssueAction::New { title, body, assignee, parent, blocked_on, start } => {
+                IssueAction::New { title, body, assignee, parent, blocked_on, start, branch } => {
                     if start && assignee.is_none() {
                         eprintln!("Error: --start requires --assignee (start needs an agent to run)");
                         std::process::exit(1);
@@ -981,6 +1021,7 @@ async fn main() {
                         "assignee": assignee,
                         "parent_id": parent,
                         "blocked_on": blocked_on,
+                        "branch": branch,
                     });
                     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
                         handle_connection_error(&e);
@@ -1014,7 +1055,7 @@ async fn main() {
                         eprintln!("Started issue {}. Session: {}", started.id, started.session_id.map(|id| id.to_string()).unwrap_or_default());
                     }
                 }
-                IssueAction::Edit { id, title, body, assignee, parent, blocked_on } => {
+                IssueAction::Edit { id, title, body, assignee, parent, blocked_on, branch } => {
                     let url = format!("{}/issues/{}", cli.server, id);
                     let mut req_body = serde_json::Map::new();
                     if let Some(t) = title {
@@ -1045,6 +1086,9 @@ async fn main() {
                     }
                     if let Some(bo) = blocked_on {
                         req_body.insert("blocked_on".into(), json!(bo));
+                    }
+                    if let Some(br) = branch {
+                        req_body.insert("branch".into(), json!(br));
                     }
                     let resp = client
                         .patch(&url)
@@ -1179,7 +1223,7 @@ async fn main() {
                     if issues.is_empty() {
                         println!("No issues found.");
                     } else {
-                        println!("{:<6}  {:<30}  {:<10}  {:<12}  created_at", "id", "title", "status", "assignee");
+                        println!("{:<6}  {:<30}  {:<10}  {:<12}  {:<25}  created_at", "id", "title", "status", "assignee", "branch");
                         for issue in &issues {
                             print_issue_row(issue);
                         }
@@ -1226,6 +1270,73 @@ async fn main() {
                     if any_failed {
                         eprintln!("One or more issues failed.");
                         std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Command::Worktree { action } => {
+            let git_root = workspace::git_root().unwrap_or_else(|| {
+                eprintln!("Error: not inside a git repository");
+                std::process::exit(1);
+            });
+            let config = workspace::read_ns2_config(&git_root);
+
+            match action {
+                WorktreeAction::List => {
+                    let entries = workspace::list_worktrees(&git_root, &config.worktree_base);
+                    if entries.is_empty() {
+                        println!("No worktrees found.");
+                    } else {
+                        println!("{:<40}  path", "branch");
+                        for entry in &entries {
+                            println!(
+                                "{:<40}  {}",
+                                entry.branch,
+                                entry.path.display()
+                            );
+                        }
+                    }
+                }
+                WorktreeAction::Create { branch } => {
+                    let worktree_path = config.worktree_base.join(&branch);
+                    match workspace::ensure_worktree(&git_root, &worktree_path, &branch) {
+                        Some(path) => {
+                            eprintln!(
+                                "Created worktree for branch {} at {}",
+                                branch,
+                                path.display()
+                            );
+                        }
+                        None => {
+                            eprintln!("Error: failed to create worktree for branch {branch}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                WorktreeAction::Delete { branch, force } => {
+                    match workspace::delete_worktree(
+                        &git_root,
+                        &config.worktree_base,
+                        &branch,
+                        force,
+                    ) {
+                        Ok(_path) => {
+                            eprintln!("Deleted worktree for branch {branch}");
+                        }
+                        Err(workspace::DeleteWorktreeError::NotFound(_)) => {
+                            eprintln!("Error: no worktree found for branch {branch}");
+                            std::process::exit(1);
+                        }
+                        Err(workspace::DeleteWorktreeError::UnmergedCommits(_)) => {
+                            eprintln!(
+                                "Error: branch {branch} has unmerged commits. Use --force to delete anyway."
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(workspace::DeleteWorktreeError::GitFailed(msg)) => {
+                            eprintln!("Error: {msg}");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -1630,6 +1741,123 @@ mod tests {
     }
 
     #[test]
+    fn issue_new_parses_branch_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "new", "--title", "t", "--body", "b", "--branch", "feature/xyz",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { branch, .. },
+            } => {
+                assert_eq!(branch.as_deref(), Some("feature/xyz"));
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_branch_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"])
+            .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { branch, .. },
+            } => {
+                assert!(branch.is_none());
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_edit_parses_branch_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "edit", "--id", "ab12", "--branch", "feat/my-branch",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Edit { branch, .. },
+            } => {
+                assert_eq!(branch.as_deref(), Some("feat/my-branch"));
+            }
+            _ => panic!("expected issue edit command"),
+        }
+    }
+
+    #[test]
+    fn issue_edit_no_branch_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "edit", "--id", "ab12", "--title", "new title"])
+            .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Edit { branch, .. },
+            } => {
+                assert!(branch.is_none());
+            }
+            _ => panic!("expected issue edit command"),
+        }
+    }
+
+    #[test]
+    fn issue_list_table_header_includes_branch() {
+        let issue = Issue {
+            id: "ab12".into(),
+            title: "Test issue".into(),
+            body: "body".into(),
+            status: types::IssueStatus::Open,
+            branch: "feat/my-feature".into(),
+            assignee: Some("swe".into()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                .unwrap()
+                .into(),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                .unwrap()
+                .into(),
+        };
+        let row = format_issue_row(&issue);
+        assert!(row.contains("ab12"), "row should contain id");
+        assert!(row.contains("Test issue"), "row should contain title");
+        assert!(row.contains("open"), "row should contain status");
+        assert!(row.contains("swe"), "row should contain assignee");
+        assert!(row.contains("feat/my-feature"), "row should contain branch");
+    }
+
+    #[test]
+    fn format_issue_row_truncates_long_title_and_branch() {
+        let long_title = "A".repeat(40);
+        let long_branch = "B".repeat(30);
+        let issue = Issue {
+            id: "xy99".into(),
+            title: long_title,
+            body: "body".into(),
+            status: types::IssueStatus::Open,
+            branch: long_branch,
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                .unwrap()
+                .into(),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                .unwrap()
+                .into(),
+        };
+        let row = format_issue_row(&issue);
+        // title field is limited to 30 chars, branch field to 25 chars
+        let cols: Vec<&str> = row.splitn(7, "  ").collect();
+        assert!(cols[1].trim().len() <= 30, "title column must be ≤30 chars");
+        assert!(cols[4].trim().len() <= 25, "branch column must be ≤25 chars");
+    }
+
+    #[test]
     fn issue_new_parses_start_flag() {
         let cli = Cli::try_parse_from([
             "ns2", "issue", "new", "--title", "t", "--body", "b", "--assignee", "swe", "--start",
@@ -1657,5 +1885,63 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
+    }
+
+    #[test]
+    fn worktree_create_parses_branch_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "worktree", "create", "--branch", "feat/my-feature",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Worktree {
+                action: WorktreeAction::Create { branch },
+            } => {
+                assert_eq!(branch, "feat/my-feature");
+            }
+            _ => panic!("expected worktree create command"),
+        }
+    }
+
+    #[test]
+    fn worktree_delete_parses_branch_and_force() {
+        let cli = Cli::try_parse_from([
+            "ns2", "worktree", "delete", "--branch", "feat/my-feature", "--force",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Worktree {
+                action: WorktreeAction::Delete { branch, force },
+            } => {
+                assert_eq!(branch, "feat/my-feature");
+                assert!(force);
+            }
+            _ => panic!("expected worktree delete command"),
+        }
+    }
+
+    #[test]
+    fn worktree_delete_no_force_defaults_false() {
+        let cli = Cli::try_parse_from([
+            "ns2", "worktree", "delete", "--branch", "feat/x",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Worktree {
+                action: WorktreeAction::Delete { force, .. },
+            } => {
+                assert!(!force);
+            }
+            _ => panic!("expected worktree delete command"),
+        }
+    }
+
+    #[test]
+    fn worktree_list_parses() {
+        let cli = Cli::try_parse_from(["ns2", "worktree", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Worktree { action: WorktreeAction::List }
+        ));
     }
 }

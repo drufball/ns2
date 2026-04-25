@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-25T11:26:14Z
+verified: 2026-04-25T13:34:59Z
 ---
 
 # Flow 13: Issue Lifecycle
@@ -47,13 +47,14 @@ Expected: a 4-character issue ID printed to stdout (e.g., `a1b2`).
 docker exec ns2-flow-13 bash -c 'cd /repo && ns2 issue list --status open'
 ```
 
-Expected output — a table showing the issue:
+Expected output — a table showing the issue with a `branch` column:
 ```
-id      title                 status    assignee    created_at
-a1b2    Add a greeting        open      swe         2026-04-24 12:00:00 UTC
+id      title                 status    assignee    branch                   created_at
+a1b2    Add a greeting        open      swe         a1b2-add-a-greeting      2026-04-24 12:00:00 UTC
 ```
 
-The issue ID matches what was printed in Step 1, status is `open`, and assignee is `swe`.
+The issue ID matches what was printed in Step 1, status is `open`, assignee is `swe`, and the
+branch is the auto-generated slug `<id>-add-a-greeting`.
 
 ### Step 3: Start the issue (creates and runs a session)
 
@@ -139,6 +140,8 @@ Expected: command exits 0 with no error.
 - [ ] `ns2 issue new` prints a 4-character issue ID to stdout
 - [ ] `ns2 issue new --assignee <agent>` stores the assignee
 - [ ] New issues start in `open` status
+- [ ] `ns2 issue new` auto-generates a branch slug `<id>-<slugified-title>` when no `--branch` or `--parent` is given
+- [ ] `ns2 issue list` table includes a `branch` column
 - [ ] `ns2 issue start --id <id>` creates a session linked to the issue
 - [ ] `ns2 issue start` sets the issue status to `running`
 - [ ] The session uses the issue's assignee agent type

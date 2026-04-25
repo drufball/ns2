@@ -48,6 +48,7 @@ pub struct Issue {
     pub title: String,
     pub body: String,
     pub status: IssueStatus,
+    pub branch: String,
     pub assignee: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_id: Option<String>,
@@ -469,6 +470,7 @@ mod tests {
             title: "Fix the bug".into(),
             body: "Details here".into(),
             status: IssueStatus::Open,
+            branch: "feat/fix-the-bug".into(),
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
@@ -485,6 +487,7 @@ mod tests {
         let decoded: Issue = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.id, "ab12");
         assert_eq!(decoded.title, "Fix the bug");
+        assert_eq!(decoded.branch, "feat/fix-the-bug");
         assert_eq!(decoded.blocked_on, vec!["xy34"]);
         assert_eq!(decoded.comments.len(), 1);
         assert_eq!(decoded.comments[0].author, "user");
