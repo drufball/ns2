@@ -830,25 +830,8 @@ async fn session_last_text(
     // Verify the session exists (returns 404 if not)
     let _ = state.db.get_session(id).await?;
 
-    let turns = state.db.list_turns(id).await?;
-
-    // Walk turns from last to first, find the last assistant Text block
-    for turn in turns.iter().rev() {
-        let blocks = state.db.list_content_blocks(turn.id).await?;
-        // Walk content blocks from last to first
-        for (role, block) in blocks.into_iter().rev() {
-            if role == types::Role::Assistant {
-                if let types::ContentBlock::Text { ref text } = block {
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Ok(Json(serde_json::json!({ "text": trimmed })));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(Json(serde_json::json!({ "text": null })))
+    let text = state.db.get_last_text_for_session(id).await?;
+    Ok(Json(serde_json::json!({ "text": text })))
 }
 
 fn build_router(state: AppState) -> Router {
