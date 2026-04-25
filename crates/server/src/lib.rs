@@ -281,6 +281,21 @@ async fn get_session(
     Ok(Json(session))
 }
 
+#[derive(serde::Serialize)]
+struct LastTextResponse {
+    text: Option<String>,
+}
+
+async fn get_session_last_text(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> std::result::Result<Json<LastTextResponse>, Error> {
+    // Verify the session exists first so we return 404 for unknown IDs.
+    state.db.get_session(id).await?;
+    let text = state.db.get_last_text_for_session(id).await?;
+    Ok(Json(LastTextResponse { text }))
+}
+
 fn event_from(ev: &SessionEvent) -> Event {
     Event::default().data(serde_json::to_string(ev).unwrap_or_default())
 }
@@ -828,6 +843,7 @@ fn build_router(state: AppState) -> Router {
         .route("/sessions", get(list_sessions))
         .route("/sessions/:id", get(get_session))
         .route("/sessions/:id/events", get(session_events))
+        .route("/sessions/:id/last_text", get(get_session_last_text))
         .route("/sessions/:id/messages", post(send_message))
         .route("/sessions/:id/status", axum::routing::patch(update_session_status))
         .route("/issues", post(create_issue))
@@ -3573,5 +3589,53 @@ mod tests {
             "expected no comments when session has no text content, got: {:?}",
             fetched.comments
         );
+    }
+
+    // --- GET /sessions/:id/last_text ---
+
+    #[tokio::test]
+    async fn test_get_session_last_text_no_content_returns_null() {
+        let app = test_app().await;
+
+        // Create a session with no messages
+        let create_resp = app
+            .clone()
+            .oneshot(create_session_req(serde_json::json!({"name": "empty-session"})).await)
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        // GET /sessions/:id/last_text
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{id}/last_text"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["text"].is_null(), "text should be null when no content: {v}");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_last_text_not_found() {
+        let app = test_app().await;
+        let fake_id = uuid::Uuid::new_v4();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{fake_id}/last_text"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

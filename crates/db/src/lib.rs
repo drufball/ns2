@@ -43,6 +43,9 @@ pub trait ContentBlockDb {
         block: &ContentBlock,
     ) -> Result<()>;
     async fn list_content_blocks(&self, turn_id: Uuid) -> Result<Vec<(Role, ContentBlock)>>;
+    /// Return the text of the most recently written assistant text block for `session_id`,
+    /// or `None` if no text blocks exist yet.
+    async fn get_last_text_for_session(&self, session_id: Uuid) -> Result<Option<String>>;
 }
 
 #[async_trait]
@@ -286,6 +289,38 @@ impl ContentBlockDb for SqliteDb {
                 Ok((role, block))
             })
             .collect()
+    }
+
+    async fn get_last_text_for_session(&self, session_id: Uuid) -> Result<Option<String>> {
+        use sqlx::Row;
+        // Find the most recently inserted assistant text block across all turns for this session.
+        // We join content_blocks → turns to filter by session_id, then order by rowid DESC
+        // to get insertion order (most recent first), and filter to text blocks with role=assistant.
+        let row = sqlx::query(
+            "SELECT cb.content FROM content_blocks cb \
+             JOIN turns t ON cb.turn_id = t.id \
+             WHERE t.session_id = ? AND cb.role = 'assistant' \
+             ORDER BY cb.rowid DESC \
+             LIMIT 1",
+        )
+        .bind(session_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let content_str: String = r.get("content");
+                let block: ContentBlock = serde_json::from_str(&content_str)
+                    .map_err(|e| Error::Parse(e.to_string()))?;
+                match block {
+                    ContentBlock::Text { text } => Ok(Some(text)),
+                    // The query finds the last assistant block regardless of type;
+                    // if it's not text (e.g. tool use), return None — no text snippet available.
+                    _ => Ok(None),
+                }
+            }
+        }
     }
 }
 
@@ -895,6 +930,90 @@ mod tests {
         let issue = make_issue("xxxx");
         let result = db.update_issue(&issue).await;
         assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    // --- get_last_text_for_session tests ---
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_last_text_for_session_empty(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session = insert_session(&db).await;
+        let result = db.get_last_text_for_session(session.id).await.unwrap();
+        assert!(result.is_none(), "no text blocks yet, should return None");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_last_text_for_session_returns_text(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session = insert_session(&db).await;
+        let turn = insert_turn(&db, session.id).await;
+
+        db.create_content_block(turn.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
+            text: "hello from the agent".into(),
+        })
+        .await
+        .unwrap();
+
+        let result = db.get_last_text_for_session(session.id).await.unwrap();
+        assert_eq!(result.as_deref(), Some("hello from the agent"));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_last_text_for_session_returns_latest_text(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session = insert_session(&db).await;
+        let turn1 = insert_turn(&db, session.id).await;
+        let turn2 = insert_turn(&db, session.id).await;
+
+        db.create_content_block(turn1.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
+            text: "first text".into(),
+        })
+        .await
+        .unwrap();
+
+        db.create_content_block(turn2.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
+            text: "second text".into(),
+        })
+        .await
+        .unwrap();
+
+        let result = db.get_last_text_for_session(session.id).await.unwrap();
+        assert_eq!(result.as_deref(), Some("second text"), "should return the most recent text");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_last_text_for_session_ignores_other_sessions(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session_a = insert_session(&db).await;
+        let session_b = insert_session(&db).await;
+
+        let turn_b = insert_turn(&db, session_b.id).await;
+        db.create_content_block(turn_b.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
+            text: "session b text".into(),
+        })
+        .await
+        .unwrap();
+
+        // session_a has no text blocks
+        let result = db.get_last_text_for_session(session_a.id).await.unwrap();
+        assert!(result.is_none(), "should not return text from other sessions");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_last_text_for_session_ignores_user_messages(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session = insert_session(&db).await;
+        let turn = insert_turn(&db, session.id).await;
+
+        // Only a user message — no assistant text
+        db.create_content_block(turn.id, 0, &types::Role::User, &types::ContentBlock::Text {
+            text: "user question".into(),
+        })
+        .await
+        .unwrap();
+
+        let result = db.get_last_text_for_session(session.id).await.unwrap();
+        assert!(result.is_none(), "user messages should not count as last text");
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

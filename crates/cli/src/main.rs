@@ -510,6 +510,71 @@ pub fn session_is_terminal(status: &types::SessionStatus) -> bool {
     )
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Session wait progress rendering
+
+/// Braille spinner frames (10-frame cycle).
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Return the spinner character for the given tick index.
+pub fn spinner_char(tick: u64) -> char {
+    SPINNER_FRAMES[(tick as usize) % SPINNER_FRAMES.len()]
+}
+
+/// Truncate a string to at most `max_chars` Unicode scalar values, appending `…` if truncated.
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        s.to_string()
+    } else {
+        // Reserve 1 char for the ellipsis
+        let keep = max_chars.saturating_sub(1);
+        let truncated: String = chars[..keep].iter().collect();
+        format!("{truncated}…")
+    }
+}
+
+/// Return `(symbol, label)` for the given session status at a tick.
+/// Running sessions get an animated braille spinner; terminal sessions get a static symbol.
+pub fn session_status_symbol(status: &types::SessionStatus, tick: u64) -> (String, &'static str) {
+    match status {
+        types::SessionStatus::Running | types::SessionStatus::Created => {
+            (spinner_char(tick).to_string(), "running")
+        }
+        types::SessionStatus::Completed => ("✔".to_string(), "completed"),
+        types::SessionStatus::Failed => ("✗".to_string(), "failed"),
+        types::SessionStatus::Cancelled => ("●".to_string(), "cancelled"),
+    }
+}
+
+/// Render one progress line for a session.
+///
+/// Format: `[<id-prefix>] <name>: <snippet>  <sym> <status>`
+///
+/// - `id` is the full session UUID string; the first 8 chars are shown.
+/// - `name` is the session name (empty string renders as `-`).
+/// - `snippet` is an optional last-content text snippet (truncated to 40 chars).
+/// - `sym`/`status` come from `session_status_symbol`.
+pub fn render_session_line(
+    id: &str,
+    name: &str,
+    snippet: Option<&str>,
+    status: &types::SessionStatus,
+    tick: u64,
+) -> String {
+    let id_prefix = &id[..id.len().min(8)];
+    let display_name = if name.is_empty() { "-" } else { name };
+    let (sym, label) = session_status_symbol(status, tick);
+    let snippet_part = match snippet {
+        Some(s) if !s.trim().is_empty() => {
+            let trimmed = s.trim().replace('\n', " ");
+            format!("{}  ", truncate_str(&trimmed, 40))
+        }
+        _ => String::new(),
+    };
+    format!("[{id_prefix}] {display_name}: {snippet_part}{sym} {label}")
+}
+
 #[tokio::main]
 async fn main() {
     load_dotenv();
@@ -716,8 +781,20 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
-                let mut terminal_statuses: std::collections::HashMap<String, types::SessionStatus> =
-                    std::collections::HashMap::new();
+
+                use std::io::Write;
+                use std::collections::HashMap;
+
+                let mut terminal_statuses: HashMap<String, types::SessionStatus> = HashMap::new();
+                // Track snippet text per session id for the progress display.
+                let mut snippets: HashMap<String, String> = HashMap::new();
+                // Track session names fetched from the server.
+                let mut names: HashMap<String, String> = HashMap::new();
+                // lines_rendered tracks how many progress lines we've printed so we can
+                // cursor-up to overwrite them on the next tick.
+                let mut lines_rendered: usize = 0;
+                let mut tick: u64 = 0;
+
                 loop {
                     let mut all_done = true;
                     for id in &ids {
@@ -729,6 +806,10 @@ async fn main() {
                             handle_connection_error(&e);
                         });
                         if !resp.status().is_success() {
+                            // Clear progress lines before printing the error.
+                            if lines_rendered > 0 {
+                                eprint!("\x1b[{}A\x1b[J", lines_rendered);
+                            }
                             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                                 eprintln!("Error: session not found: {id}");
                             } else {
@@ -740,18 +821,60 @@ async fn main() {
                             eprintln!("Error parsing response: {e}");
                             std::process::exit(1);
                         });
+                        // Cache the name on first fetch.
+                        names.entry(id.clone()).or_insert_with(|| session.name.clone());
+
                         if session_is_terminal(&session.status) {
                             terminal_statuses.insert(id.clone(), session.status);
                         } else {
                             all_done = false;
+                            // Fetch snippet for running sessions.
+                            let text_url = format!("{}/sessions/{}/last_text", cli.server, id);
+                            if let Ok(text_resp) = client.get(&text_url).send().await {
+                                if text_resp.status().is_success() {
+                                    if let Ok(body) = text_resp.json::<serde_json::Value>().await {
+                                        if let Some(t) = body.get("text").and_then(|v| v.as_str()) {
+                                            snippets.insert(id.clone(), t.to_string());
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    // Render progress lines to stderr.
+                    // On subsequent ticks, move cursor up to overwrite previous lines.
+                    {
+                        let stderr = std::io::stderr();
+                        let mut out = stderr.lock();
+                        if lines_rendered > 0 {
+                            // Move up `lines_rendered` lines and clear to end of screen.
+                            write!(out, "\x1b[{}A\x1b[J", lines_rendered).ok();
+                        }
+                        let mut count = 0;
+                        for id in &ids {
+                            let status = terminal_statuses
+                                .get(id.as_str())
+                                .cloned()
+                                .unwrap_or(types::SessionStatus::Running);
+                            let name = names.get(id.as_str()).map(|s| s.as_str()).unwrap_or("");
+                            let snippet = snippets.get(id.as_str()).map(|s| s.as_str());
+                            let line = render_session_line(id, name, snippet, &status, tick);
+                            writeln!(out, "{line}").ok();
+                            count += 1;
+                        }
+                        lines_rendered = count;
+                    }
+
                     if all_done {
                         break;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tick = tick.wrapping_add(1);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 }
-                // Print one line per session: <uuid>  <status>
+
+                // Print final static lines to stdout: <uuid>  <status>
+                // (The progress lines on stderr already show the final state.)
                 let mut any_failed = false;
                 for id in &ids {
                     let status = terminal_statuses.get(id.as_str()).expect("all ids terminal");
@@ -1943,5 +2066,126 @@ mod tests {
             cli.command,
             Command::Worktree { action: WorktreeAction::List }
         ));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // spinner / session-wait progress rendering tests
+
+    #[test]
+    fn spinner_char_cycles_through_frames() {
+        // Each tick should return the expected braille character
+        assert_eq!(spinner_char(0), '⠋');
+        assert_eq!(spinner_char(1), '⠙');
+        assert_eq!(spinner_char(9), '⠏');
+        // Wraps around
+        assert_eq!(spinner_char(10), '⠋');
+        assert_eq!(spinner_char(20), '⠋');
+    }
+
+    #[test]
+    fn truncate_str_short_string_unchanged() {
+        let s = "hello";
+        assert_eq!(truncate_str(s, 10), "hello");
+    }
+
+    #[test]
+    fn truncate_str_exact_length_unchanged() {
+        let s = "hello";
+        assert_eq!(truncate_str(s, 5), "hello");
+    }
+
+    #[test]
+    fn truncate_str_long_string_truncated_with_ellipsis() {
+        let s = "hello world";
+        // max 8 → 7 chars + ellipsis
+        let out = truncate_str(s, 8);
+        assert_eq!(out, "hello w…");
+        assert_eq!(out.chars().count(), 8);
+    }
+
+    #[test]
+    fn truncate_str_unicode_chars() {
+        let s = "⠋⠙⠹⠸⠼⠴"; // 6 braille chars
+        let out = truncate_str(s, 4);
+        // Should be 3 chars + ellipsis = 4 chars total
+        assert_eq!(out.chars().count(), 4);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn session_status_symbol_running_returns_spinner() {
+        let (sym, label) = session_status_symbol(&types::SessionStatus::Running, 0);
+        assert_eq!(sym, "⠋");
+        assert_eq!(label, "running");
+
+        let (sym2, _) = session_status_symbol(&types::SessionStatus::Running, 3);
+        assert_eq!(sym2, "⠸");
+    }
+
+    #[test]
+    fn session_status_symbol_completed() {
+        let (sym, label) = session_status_symbol(&types::SessionStatus::Completed, 0);
+        assert_eq!(sym, "✔");
+        assert_eq!(label, "completed");
+    }
+
+    #[test]
+    fn session_status_symbol_failed() {
+        let (sym, label) = session_status_symbol(&types::SessionStatus::Failed, 0);
+        assert_eq!(sym, "✗");
+        assert_eq!(label, "failed");
+    }
+
+    #[test]
+    fn session_status_symbol_cancelled() {
+        let (sym, label) = session_status_symbol(&types::SessionStatus::Cancelled, 0);
+        assert_eq!(sym, "●");
+        assert_eq!(label, "cancelled");
+    }
+
+    #[test]
+    fn render_session_line_running_with_snippet() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let line = render_session_line(id, "my-task", Some("reading files…"), &types::SessionStatus::Running, 0);
+        // [first-8-of-uuid] name: snippet  sym status
+        assert!(line.starts_with("[550e8400]"), "should have id prefix: {line}");
+        assert!(line.contains("my-task"), "should contain name: {line}");
+        assert!(line.contains("reading files"), "should contain snippet: {line}");
+        assert!(line.contains("⠋"), "should contain spinner: {line}");
+        assert!(line.contains("running"), "should contain status: {line}");
+    }
+
+    #[test]
+    fn render_session_line_completed() {
+        let id = "660f9511-f3ac-52e5-b827-557766551111";
+        let line = render_session_line(id, "done-task", None, &types::SessionStatus::Completed, 5);
+        assert!(line.starts_with("[660f9511]"), "should have id prefix: {line}");
+        assert!(line.contains("done-task"), "should contain name: {line}");
+        assert!(line.contains("✔"), "should contain checkmark: {line}");
+        assert!(line.contains("completed"), "should contain status: {line}");
+    }
+
+    #[test]
+    fn render_session_line_no_name_shows_dash() {
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let line = render_session_line(id, "", None, &types::SessionStatus::Running, 1);
+        assert!(line.contains("-:"), "empty name should show dash: {line}");
+    }
+
+    #[test]
+    fn render_session_line_long_snippet_truncated() {
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let long_snippet = "a".repeat(60);
+        let line = render_session_line(id, "task", Some(&long_snippet), &types::SessionStatus::Running, 0);
+        // Snippet is truncated to 40 chars (including ellipsis)
+        assert!(line.contains('…'), "long snippet should be truncated: {line}");
+    }
+
+    #[test]
+    fn render_session_line_failed() {
+        let id = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let line = render_session_line(id, "bad-task", None, &types::SessionStatus::Failed, 0);
+        assert!(line.contains("✗"), "failed should show ✗: {line}");
+        assert!(line.contains("failed"), "should contain status: {line}");
     }
 }
