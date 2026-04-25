@@ -55,6 +55,7 @@ pub trait IssueDb {
         assignee: Option<String>,
         parent_id: Option<String>,
     ) -> Result<Vec<Issue>>;
+    async fn list_issues_by_session_id(&self, session_id: Uuid) -> Result<Vec<Issue>>;
     async fn update_issue(&self, issue: &Issue) -> Result<()>;
 }
 
@@ -388,6 +389,16 @@ impl IssueDb for SqliteDb {
             .filter(|i| assignee.as_ref().is_none_or(|a| i.assignee.as_deref() == Some(a.as_str())))
             .filter(|i| parent_id.as_ref().is_none_or(|p| i.parent_id.as_deref() == Some(p.as_str())))
             .collect())
+    }
+
+    async fn list_issues_by_session_id(&self, session_id: Uuid) -> Result<Vec<Issue>> {
+        let rows = sqlx::query(
+            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE session_id = ? ORDER BY created_at DESC, id ASC",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(parse_issue_row).collect()
     }
 
     async fn update_issue(&self, issue: &Issue) -> Result<()> {
@@ -891,5 +902,57 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let fetched = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(fetched.session_id, Some(session_id));
+    }
+
+    // --- list_issues_by_session_id tests ---
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_by_session_id_finds_linked_issue(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session_id = Uuid::new_v4();
+
+        let mut issue = make_issue("ab12");
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+
+        // Another issue with a different session_id — should NOT be returned
+        let other_session_id = Uuid::new_v4();
+        let mut other = make_issue("cd34");
+        other.session_id = Some(other_session_id);
+        db.create_issue(&other).await.unwrap();
+
+        let found = db.list_issues_by_session_id(session_id).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "ab12");
+        assert_eq!(found[0].session_id, Some(session_id));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_by_session_id_returns_empty_when_none(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session_id = Uuid::new_v4();
+
+        // Issue with no session_id
+        let issue = make_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+
+        let found = db.list_issues_by_session_id(session_id).await.unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_issues_by_session_id_returns_multiple(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let session_id = Uuid::new_v4();
+
+        let mut i1 = make_issue("ab12");
+        i1.session_id = Some(session_id);
+        let mut i2 = make_issue("cd34");
+        i2.session_id = Some(session_id);
+        db.create_issue(&i1).await.unwrap();
+        db.create_issue(&i2).await.unwrap();
+
+        let found = db.list_issues_by_session_id(session_id).await.unwrap();
+        assert_eq!(found.len(), 2);
     }
 }

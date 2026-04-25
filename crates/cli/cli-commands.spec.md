@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-24T15:24:08Z
+verified: 2026-04-25T10:02:12Z
 ---
 
 # CLI Commands Spec
@@ -485,6 +485,7 @@ Commands:
   comment   Post a comment to an issue.
   start     Create an agent session for this issue and start it.
   complete  Mark an issue as completed.
+  reopen    Move a failed or completed issue back to open.
   list      List issues.
   wait      Block until all specified issues reach a terminal state.
   help      Print this message or the help of the given subcommand(s)
@@ -516,6 +517,9 @@ Options:
 
       --blocked-on <BLOCKED_ON>...
           Issue IDs that must be completed before this one. Repeat for multiple.
+
+      --start
+          Immediately start the issue after creating it. Requires --assignee.
 
   -h, --help
           Print help (see a summary with '-h')
@@ -643,6 +647,36 @@ Usage: ns2 issue wait [OPTIONS]
 Options:
       --id <IDS>...
           Issue IDs to wait on. Repeat for multiple.
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+### `ns2 issue reopen --help`
+
+```
+Moves a failed or completed issue back to open so work can resume on the same thread.
+Preserves all existing comments.
+
+Behavior differs by prior state:
+  failed    → clears session_id so a fresh session is created on next start
+  completed → keeps session_id so the existing session history is resumed on next start
+
+Only failed or completed issues can be reopened. Attempting to reopen an issue in any
+other state is an error.
+
+Usage: ns2 issue reopen [OPTIONS] --id <ID>
+
+Options:
+      --id <ID>
+          The issue ID. Required.
+
+      --comment <COMMENT>
+          Append a comment to the issue thread before transitioning back to open.
+          Author is 'user'. Gives context to the agent when it resumes.
+
+      --start
+          Immediately start the issue after reopening it.
 
   -h, --help
           Print help (see a summary with '-h')

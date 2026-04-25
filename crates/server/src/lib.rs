@@ -168,18 +168,45 @@ fn spawn_harness_sync(
         let mut rx = tx.subscribe();
         let db_watch = Arc::clone(&state.db);
         tokio::spawn(async move {
+            let mut current_turn_text = String::new();
+            let mut last_turn_text = String::new();
+
             while let Ok(event) = rx.recv().await {
                 match event {
+                    SessionEvent::ContentBlockDelta {
+                        delta: types::ContentBlockDelta::TextDelta { text },
+                        ..
+                    } => {
+                        current_turn_text.push_str(&text);
+                    }
+                    SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
+                        last_turn_text = std::mem::take(&mut current_turn_text);
+                    }
                     SessionEvent::SessionDone { .. } => {
                         if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
+                            // Post agent's final turn as comment before marking completed
+                            if !last_turn_text.is_empty() {
+                                let author = issue.assignee.clone()
+                                    .unwrap_or_else(|| "agent".to_string());
+                                issue.comments.push(IssueComment {
+                                    author,
+                                    created_at: Utc::now(),
+                                    body: last_turn_text.clone(),
+                                });
+                            }
                             issue.status = IssueStatus::Completed;
                             issue.updated_at = Utc::now();
                             let _ = db_watch.update_issue(&issue).await;
                         }
                         break;
                     }
-                    SessionEvent::Error { .. } => {
+                    SessionEvent::Error { message } => {
                         if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
+                            issue.comments.push(IssueComment {
+                                author: "system".to_string(),
+                                created_at: Utc::now(),
+                                body: message.clone(),
+                            });
                             issue.status = IssueStatus::Failed;
                             issue.updated_at = Utc::now();
                             let _ = db_watch.update_issue(&issue).await;
@@ -221,10 +248,12 @@ fn spawn_harness_sync(
             smap.remove(&session_id);
         }
 
-        // Ensure the watcher task is cleaned up when the harness exits.
-        if let Some(watcher) = issue_watcher {
-            watcher.abort();
-        }
+        // Note: we do NOT abort the watcher here because it may still be processing
+        // the final SessionDone or Error event from the broadcast channel. The watcher
+        // exits naturally once it handles a terminal event (its while-loop breaks on
+        // SessionDone and Error), or when the broadcast channel closes (all tx senders
+        // are dropped after this task ends), causing rx.recv() to return Err.
+        drop(issue_watcher);
     });
 
     msg_tx_ret
@@ -366,11 +395,14 @@ async fn send_message(
         other => Error::Db(other),
     })?;
 
-    // For `created` sessions, spawn the harness now and send the initial message.
-    // Guard against two concurrent requests both reaching here simultaneously using the
-    // `spawning` set as an atomic "already in flight" guard.
+    // For `created`, `running`, and `completed` sessions, spawn a harness (if not already
+    // running) and deliver the message. `completed` sessions resume from full DB history
+    // so no in-memory state is required.
+    //
+    // Guard against two concurrent requests both reaching the spawn path simultaneously
+    // using the `spawning` set as an atomic "already in flight" guard.
     match session.status {
-        SessionStatus::Created | SessionStatus::Running => {
+        SessionStatus::Created | SessionStatus::Running | SessionStatus::Completed => {
             // Acquire both locks together to make the check-then-act atomic.
             let mut spawning = state.spawning.lock().await;
             let senders = state.msg_senders.lock().await;
@@ -412,8 +444,14 @@ async fn send_message(
             msg_tx.send(req.message).await.ok();
             Ok(StatusCode::OK)
         }
-        // `completed` or `failed` with no sender means the harness already exited.
-        _ => Err(Error::NotFound),
+        // `failed` and `cancelled` are terminal states that cannot accept new messages.
+        // The caller must explicitly reopen the session (e.g. via `issue reopen`) first.
+        SessionStatus::Failed => Err(Error::BadRequest(
+            "session is in failed state and cannot accept messages; reopen it first".into(),
+        )),
+        SessionStatus::Cancelled => Err(Error::BadRequest(
+            "session is in cancelled state and cannot accept messages; reopen it first".into(),
+        )),
     }
 }
 
@@ -429,6 +467,60 @@ async fn update_session_status(
     state.db.update_session_status(id, new_status).await?;
     let session = state.db.get_session(id).await?;
     Ok(Json(session))
+}
+
+/// Orphan sweep: run at startup before accepting any connections.
+///
+/// Finds all sessions stuck in `running` state (no live harness after restart),
+/// marks them `failed`, and for any linked issue does the same while appending a
+/// system comment so the issue history is self-explanatory.
+///
+/// Errors are logged and swallowed — a sweep failure must not crash the server.
+pub(crate) async fn orphan_sweep(db: &Arc<dyn db::Db>) {
+    let orphans = match db.list_sessions(Some(SessionStatus::Running)).await {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            eprintln!("[orphan_sweep] failed to list running sessions: {e}");
+            return;
+        }
+    };
+
+    for session in orphans {
+        // 1. Mark the session failed.
+        if let Err(e) = db.update_session_status(session.id, SessionStatus::Failed).await {
+            eprintln!("[orphan_sweep] failed to update session {} to failed: {e}", session.id);
+            // Continue — try the rest.
+        }
+
+        // 2. Find any issue linked to this session and recover it too.
+        let issues = match db.list_issues_by_session_id(session.id).await {
+            Ok(issues) => issues,
+            Err(e) => {
+                eprintln!(
+                    "[orphan_sweep] failed to list issues for session {}: {e}",
+                    session.id
+                );
+                continue;
+            }
+        };
+
+        for mut issue in issues {
+            issue.comments.push(IssueComment {
+                author: "system".into(),
+                body: "session lost on server restart".into(),
+                created_at: Utc::now(),
+            });
+            issue.status = types::IssueStatus::Failed;
+            issue.updated_at = Utc::now();
+
+            if let Err(e) = db.update_issue(&issue).await {
+                eprintln!(
+                    "[orphan_sweep] failed to update issue {} to failed: {e}",
+                    issue.id
+                );
+            }
+        }
+    }
 }
 
 fn generate_issue_id() -> String {
@@ -637,6 +729,52 @@ async fn complete_issue(
     Ok(Json(issue))
 }
 
+async fn reopen_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<ReopenIssueRequest>>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let mut issue = state.db.get_issue(id.clone()).await?;
+
+    // Only `failed` and `completed` can be reopened
+    let keep_session_id = match issue.status {
+        IssueStatus::Failed => false,   // clear session_id → fresh session on next start
+        IssueStatus::Completed => true, // keep session_id → resume history on next start
+        _ => {
+            return Err(Error::BadRequest(format!(
+                "cannot reopen issue {id}: only failed or completed issues can be reopened (current status: {})",
+                issue.status
+            )));
+        }
+    };
+
+    // Optionally append a user comment before the status transition
+    if let Some(Json(req)) = body {
+        if let Some(comment_text) = req.comment {
+            if !comment_text.is_empty() {
+                issue.comments.push(IssueComment {
+                    author: "user".into(),
+                    created_at: Utc::now(),
+                    body: comment_text,
+                });
+            }
+        }
+    }
+
+    issue.status = IssueStatus::Open;
+    if !keep_session_id {
+        issue.session_id = None;
+    }
+    issue.updated_at = Utc::now();
+    state.db.update_issue(&issue).await?;
+    Ok(Json(issue))
+}
+
+#[derive(Deserialize, Default)]
+struct ReopenIssueRequest {
+    comment: Option<String>,
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -653,6 +791,7 @@ fn build_router(state: AppState) -> Router {
         .route("/issues/:id/comments", post(add_comment))
         .route("/issues/:id/start", post(start_issue))
         .route("/issues/:id/complete", post(complete_issue))
+        .route("/issues/:id/reopen", post(reopen_issue))
         .with_state(state)
 }
 
@@ -674,6 +813,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         tools: config.tools,
         model: config.model,
     };
+
+    // Recover orphaned sessions before accepting any connections.
+    orphan_sweep(&state.db).await;
 
     let app = build_router(state);
 
@@ -1581,8 +1723,8 @@ mod tests {
         assert!(raw.contains("turn-2"), "should contain last turn's content");
     }
 
-    /// A Completed session must still accept new messages via POST /sessions/:id/messages.
-    /// This verifies that the broadcast sender remains alive in the map after completion.
+    /// A Completed session (with active harness still waiting for messages) accepts follow-up
+    /// messages and returns 200. This is the in-process multi-turn case.
     #[tokio::test]
     async fn test_completed_session_sender_still_alive() {
         let (app, state) = test_app_with_state().await;
@@ -1604,26 +1746,22 @@ mod tests {
         let id = created["id"].as_str().unwrap().to_owned();
         let session_id: Uuid = id.parse().unwrap();
 
-        // Wait for the harness to complete (StubClient → fast response)
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Manually insert a live sender into the sessions map to simulate a completed session
-        // that still has a live harness channel (multi-turn scenario).
-        // The current harness implementation removes the sender on exit, so we verify the route
-        // accepts the message while the sender exists.
-        {
-            let senders = state.msg_senders.lock().await;
-            // After harness finishes, sender is removed. To test the "sender alive" path,
-            // we check that while the sender IS in the map, the route works.
-            // The test for this is already covered by test_send_message_to_running_session_returns_200.
-            // Here we test the specific claim: POST /sessions/:id/messages on a session
-            // whose harness sender is still in the map returns 200.
-            let _ = session_id; // referenced in assertion below
-            let _ = senders;
+        // Wait for the session to reach Completed status in the DB
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let session = state.db.get_session(session_id).await.unwrap();
+            if session.status == SessionStatus::Completed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("session did not reach Completed within 3s; status={}", session.status);
+            }
         }
 
-        // Instead: verify the session exists and that sending returns either 200 (sender alive)
-        // or 404 (harness already exited). The important invariant is that it doesn't 500.
+        // The harness is still alive (waiting for next message in its loop), so the
+        // msg sender is still in the map — this is the normal in-process case.
+        // POST /sessions/:id/messages must return 200 via the fast path (sender in map).
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1631,17 +1769,165 @@ mod tests {
                     .uri(format!("/sessions/{id}/messages"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({"message": "new msg"}))
+                        serde_json::to_vec(&serde_json::json!({"message": "follow-up msg"}))
                             .unwrap(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "completed session must accept follow-up messages and return 200"
+        );
+    }
+
+    /// POST /sessions/:id/messages on a `Completed` session with no active sender
+    /// must return 200 OK and spawn a fresh harness.
+    #[tokio::test]
+    async fn test_send_message_to_completed_session_returns_200() {
+        let (app, state) = test_app_with_state().await;
+
+        // Directly insert a completed session into the DB (no harness ever spawned)
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "completed-no-harness".into(),
+            status: SessionStatus::Completed,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Confirm no sender in the map
+        {
+            let senders = state.msg_senders.lock().await;
+            assert!(!senders.contains_key(&session.id));
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/messages", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "resume me"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "completed session with no active sender must return 200 OK (fresh harness spawned)"
+        );
+    }
+
+    /// POST /sessions/:id/messages on a `Failed` session must return a non-2xx status
+    /// with an error body (sessions in Failed state cannot accept messages).
+    #[tokio::test]
+    async fn test_send_message_to_failed_session_returns_bad_request() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "failed-session".into(),
+            status: SessionStatus::Failed,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Failed)
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/messages", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "should fail"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         let status = resp.status();
         assert!(
-            status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-            "expected 200 or 404, got {status}"
+            !status.is_success(),
+            "failed session must not accept messages; expected non-2xx, got {status}"
+        );
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "response body must contain an 'error' field, got: {v}"
+        );
+    }
+
+    /// POST /sessions/:id/messages on a `Cancelled` session must return a non-2xx status
+    /// with an error body (sessions in Cancelled state cannot accept messages).
+    #[tokio::test]
+    async fn test_send_message_to_cancelled_session_returns_bad_request() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "cancelled-session".into(),
+            status: SessionStatus::Cancelled,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Cancelled)
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/messages", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "should fail"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        assert!(
+            !status.is_success(),
+            "cancelled session must not accept messages; expected non-2xx, got {status}"
+        );
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "response body must contain an 'error' field, got: {v}"
         );
     }
 
@@ -2240,5 +2526,817 @@ mod tests {
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["title"], "Blocked issue");
+    }
+
+    // ─── Orphan sweep tests ───────────────────────────────────────────────────
+
+    /// Helper: build an AppState with a fresh in-memory DB (no router).
+    async fn test_state() -> AppState {
+        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
+        AppState {
+            db,
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            client,
+            tools: vec![],
+            model: "claude-opus-4-5".into(),
+        }
+    }
+
+    /// A `running` session is swept to `failed` by `orphan_sweep`.
+    #[tokio::test]
+    async fn test_orphan_sweep_marks_running_session_failed() {
+        let state = test_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "orphan".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        orphan_sweep(&state.db).await;
+
+        let fetched = state.db.get_session(session.id).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            SessionStatus::Failed,
+            "orphan sweep must mark a running session as failed"
+        );
+    }
+
+    /// A `running` session linked to a `running` issue: both swept to `failed`,
+    /// and a system comment is appended to the issue.
+    #[tokio::test]
+    async fn test_orphan_sweep_marks_linked_issue_failed_with_comment() {
+        let state = test_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "orphan-with-issue".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "ab12".into(),
+            title: "Test issue".into(),
+            body: "body".into(),
+            status: types::IssueStatus::Running,
+            assignee: None,
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        orphan_sweep(&state.db).await;
+
+        // Issue must be failed
+        let fetched_issue = state.db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(
+            fetched_issue.status,
+            types::IssueStatus::Failed,
+            "orphan sweep must mark the linked issue as failed"
+        );
+
+        // Issue must have the system comment
+        assert_eq!(
+            fetched_issue.comments.len(),
+            1,
+            "orphan sweep must append exactly one comment"
+        );
+        let comment = &fetched_issue.comments[0];
+        assert_eq!(comment.author, "system");
+        assert!(
+            comment.body.contains("session lost on server restart"),
+            "comment body must contain 'session lost on server restart', got: '{}'",
+            comment.body
+        );
+    }
+
+    /// `completed` and `cancelled` sessions are NOT swept.
+    #[tokio::test]
+    async fn test_orphan_sweep_ignores_non_running_sessions() {
+        let state = test_state().await;
+
+        let statuses = [
+            SessionStatus::Completed,
+            SessionStatus::Cancelled,
+            SessionStatus::Created,
+            SessionStatus::Failed,
+        ];
+
+        let mut session_ids = Vec::new();
+        for (i, status) in statuses.iter().enumerate() {
+            let session = Session {
+                id: Uuid::new_v4(),
+                name: format!("sess-{i}"),
+                status: status.clone(),
+                agent: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            session_ids.push((session.id, status.clone()));
+            state.db.create_session(&session).await.unwrap();
+        }
+
+        orphan_sweep(&state.db).await;
+
+        // Each session must retain its original status — the sweep touches only `running`.
+        for (id, original_status) in &session_ids {
+            let fetched = state.db.get_session(*id).await.unwrap();
+            assert_eq!(
+                fetched.status,
+                *original_status,
+                "session with original status '{}' must not have been changed by orphan sweep",
+                original_status
+            );
+        }
+    }
+
+    /// A `running` session with NO linked issue is swept to `failed` without error.
+    #[tokio::test]
+    async fn test_orphan_sweep_no_linked_issue_does_not_error() {
+        let state = test_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "orphan-no-issue".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Must not panic or return an error
+        orphan_sweep(&state.db).await;
+
+        let fetched = state.db.get_session(session.id).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            SessionStatus::Failed,
+            "session with no linked issue must still be marked failed"
+        );
+    }
+
+    // ─── POST /issues/:id/reopen tests ───────────────────────────────────────
+
+    /// Helper: create a failed issue directly in the DB.
+    async fn create_issue_with_status(state: &AppState, status: IssueStatus) -> String {
+        let now = chrono::Utc::now();
+        let issue = types::Issue {
+            id: generate_issue_id(),
+            title: "Test issue".into(),
+            body: "body".into(),
+            status,
+            assignee: None,
+            session_id: Some(Uuid::new_v4()),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![IssueComment {
+                author: "system".into(),
+                body: "session lost on server restart".into(),
+                created_at: now,
+            }],
+            created_at: now,
+            updated_at: now,
+        };
+        state.db.create_issue(&issue).await.unwrap();
+        issue.id
+    }
+
+    /// POST /issues/:id/reopen on a failed issue → 200, status becomes open, session_id is null,
+    /// comments are preserved.
+    #[tokio::test]
+    async fn test_reopen_failed_issue_returns_200_and_transitions_to_open() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Failed).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open", "status must become open");
+        assert!(v["session_id"].is_null(), "session_id must be cleared to null");
+        // Comments must be preserved
+        let comments = v["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1, "existing comment must be preserved");
+        assert_eq!(comments[0]["author"], "system");
+        assert_eq!(comments[0]["body"], "session lost on server restart");
+    }
+
+    /// POST /issues/:id/reopen on an open issue → 400 with error body.
+    #[tokio::test]
+    async fn test_reopen_open_issue_returns_400() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Open).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string(), "response must contain 'error' field");
+        let err_msg = v["error"].as_str().unwrap();
+        assert!(
+            err_msg.contains(&id),
+            "error message must contain the issue id, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("cannot reopen"),
+            "error message must mention 'cannot reopen', got: {err_msg}"
+        );
+    }
+
+    /// POST /issues/:id/reopen on a running issue → 400 with error body.
+    #[tokio::test]
+    async fn test_reopen_running_issue_returns_400() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Running).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string());
+        let err_msg = v["error"].as_str().unwrap();
+        assert!(
+            err_msg.contains("cannot reopen"),
+            "error must mention 'cannot reopen', got: {err_msg}"
+        );
+    }
+
+    // --- New reopen behavior tests ---
+
+    /// POST /issues/:id/reopen on a completed issue → 200, status becomes open,
+    /// session_id is KEPT (so next start resumes the existing session history),
+    /// comments are preserved.
+    #[tokio::test]
+    async fn test_reopen_completed_issue_keeps_session_id() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Completed).await;
+
+        // Fetch the original session_id before reopening
+        let original = state.db.get_issue(id.clone()).await.unwrap();
+        let original_session_id = original.session_id.expect("should have a session_id");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open", "status must become open");
+        // session_id must be preserved for completed issues
+        assert_eq!(
+            v["session_id"].as_str().unwrap(),
+            original_session_id.to_string(),
+            "session_id must be kept when reopening a completed issue"
+        );
+        // Comments preserved
+        let comments = v["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1, "existing comment must be preserved");
+    }
+
+    /// POST /issues/:id/reopen on a failed issue → session_id is cleared.
+    #[tokio::test]
+    async fn test_reopen_failed_issue_clears_session_id() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Failed).await;
+
+        // Verify the issue has a session_id before reopening
+        let original = state.db.get_issue(id.clone()).await.unwrap();
+        assert!(original.session_id.is_some(), "test setup: issue should have a session_id");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open", "status must become open");
+        assert!(v["session_id"].is_null(), "session_id must be cleared for failed issues");
+    }
+
+    /// POST /issues/:id/reopen with a comment in body → comment is prepended before
+    /// status transition (comment appears in the response).
+    #[tokio::test]
+    async fn test_reopen_with_comment_appends_comment_before_status_change() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Failed).await;
+
+        let resp = app
+            .oneshot(issue_req(
+                "POST",
+                &format!("/issues/{id}/reopen"),
+                serde_json::json!({ "comment": "the tests were failing because of X" }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open");
+
+        let comments = v["comments"].as_array().unwrap();
+        // Original comment + new one
+        assert_eq!(comments.len(), 2, "should have original comment plus new one");
+
+        // The new comment must be the last one and have author="user"
+        let new_comment = &comments[comments.len() - 1];
+        assert_eq!(new_comment["author"], "user");
+        assert_eq!(new_comment["body"], "the tests were failing because of X");
+    }
+
+    /// POST /issues/:id/reopen without a comment body → no extra comment added.
+    #[tokio::test]
+    async fn test_reopen_without_comment_adds_no_comment() {
+        let (app, state) = test_app_with_state().await;
+        let id = create_issue_with_status(&state, IssueStatus::Failed).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{id}/reopen"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Only the original system comment from create_issue_with_status
+        let comments = v["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1, "no new comment should be added when no comment provided");
+    }
+
+    /// POST /issues/zzzz/reopen → 404.
+    #[tokio::test]
+    async fn test_reopen_nonexistent_issue_returns_404() {
+        let app = test_app().await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/issues/zzzz/reopen")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── issue_watcher: final turn text posted as comment ─────────────────────
+
+    /// Test 1: start_issue → session runs → SessionDone; issue must have at least one comment
+    /// with author == assignee containing the stub response text ("stub response").
+    #[tokio::test]
+    async fn test_issue_watcher_posts_final_turn_as_comment_on_session_done() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an issue with an assignee
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Watcher comment test",
+                "body": "Please respond",
+                "assignee": "swe-agent"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Start the issue — spawns harness with TestClient that returns "stub response"
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Poll until the issue reaches Completed
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+            if issue.status == IssueStatus::Completed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("issue did not auto-complete within 5 seconds; status={}", issue.status);
+            }
+        }
+
+        let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+        assert_eq!(issue.status, IssueStatus::Completed);
+
+        // There must be at least one comment with author == assignee
+        let agent_comments: Vec<_> = issue.comments.iter()
+            .filter(|c| c.author == "swe-agent")
+            .collect();
+        assert!(
+            !agent_comments.is_empty(),
+            "expected at least one comment from 'swe-agent', got comments: {:?}",
+            issue.comments
+        );
+
+        // The comment body must contain the stub response text
+        let has_stub_text = agent_comments.iter().any(|c| c.body.contains("stub response"));
+        assert!(
+            has_stub_text,
+            "expected a comment containing 'stub response', got: {:?}",
+            agent_comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+        );
+    }
+
+    /// Test 2: on Error event, issue must have a comment with author == "system" containing
+    /// the error message, and status must be Failed.
+    #[tokio::test]
+    async fn test_issue_watcher_posts_error_as_system_comment_on_error() {
+        use async_trait::async_trait;
+
+        // A client that always returns an error
+        struct ErrorClient;
+
+        #[async_trait]
+        impl anthropic::AnthropicClient for ErrorClient {
+            async fn complete(
+                &self,
+                _request: anthropic::MessageRequest,
+            ) -> anthropic::Result<anthropic::MessageResponse> {
+                Err(anthropic::Error::Api {
+                    status: 500,
+                    message: "simulated api failure".into(),
+                })
+            }
+        }
+
+        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
+        let state = AppState {
+            db,
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            client,
+            tools: vec![],
+            model: "claude-opus-4-5".into(),
+        };
+        let app = build_router(state.clone());
+
+        // Create an issue with an assignee
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Error test issue",
+                "body": "trigger an error",
+                "assignee": "swe-agent"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Start the issue — the ErrorClient will cause a harness error
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Poll until the issue reaches Failed
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+            if issue.status == IssueStatus::Failed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("issue did not reach Failed within 5 seconds; status={}", issue.status);
+            }
+        }
+
+        let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+        assert_eq!(issue.status, IssueStatus::Failed);
+
+        // Must have a system comment containing the error message
+        let system_comments: Vec<_> = issue.comments.iter()
+            .filter(|c| c.author == "system")
+            .collect();
+        assert!(
+            !system_comments.is_empty(),
+            "expected at least one 'system' comment, got: {:?}",
+            issue.comments
+        );
+
+        // Comment body must contain the error text
+        let has_error_text = system_comments.iter()
+            .any(|c| c.body.contains("simulated api failure"));
+        assert!(
+            has_error_text,
+            "expected system comment containing error message, got: {:?}",
+            system_comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+        );
+    }
+
+    /// Test 3: when a session produces multiple turns (simulate two TurnDone events before
+    /// SessionDone), only the text from the *last* turn is posted as a comment.
+    /// We verify this by manually driving events through a broadcast channel.
+    #[tokio::test]
+    async fn test_issue_watcher_only_posts_last_turn_text() {
+        // Build state so we can call spawn_harness_sync and inject events directly.
+        let state = test_state().await;
+
+        // Create an issue
+        let now = chrono::Utc::now();
+        let issue = types::Issue {
+            id: "tt01".to_string(),
+            title: "Multi-turn test".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            assignee: Some("bot".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Create a broadcast channel and subscribe the watcher manually,
+        // mirroring what spawn_harness_sync does for the issue_watcher.
+        let (tx, _rx) = tokio::sync::broadcast::channel::<SessionEvent>(256);
+        let mut rx = tx.subscribe();
+        let db_watch = Arc::clone(&state.db);
+        let issue_id = "tt01".to_string();
+
+        // Spawn the watcher logic directly (copied from the production code path)
+        tokio::spawn(async move {
+            let mut current_turn_text = String::new();
+            let mut last_turn_text = String::new();
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    SessionEvent::ContentBlockDelta {
+                        delta: types::ContentBlockDelta::TextDelta { text },
+                        ..
+                    } => {
+                        current_turn_text.push_str(&text);
+                    }
+                    SessionEvent::TurnDone { .. } => {
+                        if !current_turn_text.is_empty() {
+                            last_turn_text = std::mem::take(&mut current_turn_text);
+                        }
+                    }
+                    SessionEvent::SessionDone { .. } => {
+                        if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
+                            if !last_turn_text.is_empty() {
+                                let author = issue.assignee.clone()
+                                    .unwrap_or_else(|| "agent".to_string());
+                                issue.comments.push(IssueComment {
+                                    author,
+                                    created_at: Utc::now(),
+                                    body: last_turn_text.clone(),
+                                });
+                            }
+                            issue.status = IssueStatus::Completed;
+                            issue.updated_at = Utc::now();
+                            let _ = db_watch.update_issue(&issue).await;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let session_id = Uuid::new_v4();
+        let turn_id1 = Uuid::new_v4();
+        let turn_id2 = Uuid::new_v4();
+
+        // Turn 1: text "first turn text"
+        tx.send(SessionEvent::ContentBlockDelta {
+            turn_id: turn_id1,
+            index: 0,
+            delta: types::ContentBlockDelta::TextDelta { text: "first turn text".into() },
+        }).unwrap();
+        tx.send(SessionEvent::TurnDone { turn_id: turn_id1 }).unwrap();
+
+        // Turn 2: text "second turn text"
+        tx.send(SessionEvent::ContentBlockDelta {
+            turn_id: turn_id2,
+            index: 0,
+            delta: types::ContentBlockDelta::TextDelta { text: "second turn text".into() },
+        }).unwrap();
+        tx.send(SessionEvent::TurnDone { turn_id: turn_id2 }).unwrap();
+
+        // Session done
+        tx.send(SessionEvent::SessionDone { session_id }).unwrap();
+
+        // Wait for the watcher to process and write to DB
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("tt01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("issue did not complete within 3s");
+            }
+        }
+
+        let fetched = state.db.get_issue("tt01".to_string()).await.unwrap();
+
+        // Exactly one comment, containing only the last turn text
+        assert_eq!(fetched.comments.len(), 1, "expected exactly 1 comment");
+        let comment = &fetched.comments[0];
+        assert_eq!(comment.author, "bot");
+        assert_eq!(
+            comment.body, "second turn text",
+            "comment must contain only the last turn text; got: '{}'",
+            comment.body
+        );
+        assert!(
+            !comment.body.contains("first turn text"),
+            "comment must NOT contain first turn text"
+        );
+    }
+
+    /// Test 4: if the session produces no text content (only tool calls), no empty comment
+    /// is posted.
+    #[tokio::test]
+    async fn test_issue_watcher_no_comment_when_no_text_content() {
+        let state = test_state().await;
+
+        let now = chrono::Utc::now();
+        let issue = types::Issue {
+            id: "nt01".to_string(),
+            title: "No text test".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            assignee: Some("bot".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let (tx, _rx) = tokio::sync::broadcast::channel::<SessionEvent>(256);
+        let mut rx = tx.subscribe();
+        let db_watch = Arc::clone(&state.db);
+        let issue_id = "nt01".to_string();
+
+        // Spawn the same watcher logic
+        tokio::spawn(async move {
+            let mut current_turn_text = String::new();
+            let mut last_turn_text = String::new();
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    SessionEvent::ContentBlockDelta {
+                        delta: types::ContentBlockDelta::TextDelta { text },
+                        ..
+                    } => {
+                        current_turn_text.push_str(&text);
+                    }
+                    SessionEvent::TurnDone { .. } => {
+                        if !current_turn_text.is_empty() {
+                            last_turn_text = std::mem::take(&mut current_turn_text);
+                        }
+                    }
+                    SessionEvent::SessionDone { .. } => {
+                        if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
+                            if !last_turn_text.is_empty() {
+                                let author = issue.assignee.clone()
+                                    .unwrap_or_else(|| "agent".to_string());
+                                issue.comments.push(IssueComment {
+                                    author,
+                                    created_at: Utc::now(),
+                                    body: last_turn_text.clone(),
+                                });
+                            }
+                            issue.status = IssueStatus::Completed;
+                            issue.updated_at = Utc::now();
+                            let _ = db_watch.update_issue(&issue).await;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let session_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+
+        // A turn with only a tool-use block (no ContentBlockDelta TextDelta events)
+        // TurnDone without any text accumulated
+        tx.send(SessionEvent::TurnDone { turn_id }).unwrap();
+
+        // Session done with no text content
+        tx.send(SessionEvent::SessionDone { session_id }).unwrap();
+
+        // Wait for watcher to write Completed
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("issue did not complete within 3s");
+            }
+        }
+
+        let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
+        assert_eq!(fetched.status, IssueStatus::Completed);
+        assert!(
+            fetched.comments.is_empty(),
+            "expected no comments when session has no text content, got: {:?}",
+            fetched.comments
+        );
     }
 }
