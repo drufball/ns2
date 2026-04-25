@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/main.rs
   - crates/server/src/**/*.rs
-verified: 2026-04-25T20:27:56Z
+verified: 2026-04-25T21:22:22Z
 ---
 
 # Flow 26: Worktree Management Commands

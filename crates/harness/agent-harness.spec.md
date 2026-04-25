@@ -4,7 +4,7 @@ targets:
   - crates/harness/Cargo.toml
   - crates/anthropic/src/**/*.rs
   - crates/tools/src/**/*.rs
-verified: 2026-04-25T20:27:55Z
+verified: 2026-04-25T21:22:22Z
 ---
 
 # Agent Harness Spec

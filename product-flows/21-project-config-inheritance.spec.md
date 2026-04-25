@@ -2,7 +2,7 @@
 targets:
   - crates/agents/src/**/*.rs
   - crates/harness/src/**/*.rs
-verified: 2026-04-25T20:27:55Z
+verified: 2026-04-25T21:22:22Z
 ---
 
 # Flow 21: Project Config Inheritance (CLAUDE.md Loading)
