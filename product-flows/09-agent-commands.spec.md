@@ -3,7 +3,7 @@ targets:
   - crates/agents/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-25T13:38:10Z
+verified: 2026-04-25T20:27:55Z
 ---
 
 # Flow 09: Agent Commands

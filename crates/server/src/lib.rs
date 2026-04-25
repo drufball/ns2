@@ -821,6 +821,19 @@ struct ReopenIssueRequest {
     comment: Option<String>,
 }
 
+/// GET /sessions/:id/last_text — return the last assistant text content block for a session.
+/// Returns JSON: {"text": "<content>"} or {"text": null} if no text content found.
+async fn session_last_text(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> std::result::Result<Json<serde_json::Value>, Error> {
+    // Verify the session exists (returns 404 if not)
+    let _ = state.db.get_session(id).await?;
+
+    let text = state.db.get_last_text_for_session(id).await?;
+    Ok(Json(serde_json::json!({ "text": text })))
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -830,6 +843,7 @@ fn build_router(state: AppState) -> Router {
         .route("/sessions/:id/events", get(session_events))
         .route("/sessions/:id/messages", post(send_message))
         .route("/sessions/:id/status", axum::routing::patch(update_session_status))
+        .route("/sessions/:id/last_text", get(session_last_text))
         .route("/issues", post(create_issue))
         .route("/issues", get(list_issues))
         .route("/issues/:id", get(get_issue))
@@ -3292,6 +3306,197 @@ mod tests {
             !comment.body.contains("first turn text"),
             "comment must NOT contain first turn text"
         );
+    }
+
+    // ─── GET /sessions/:id/last_text tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_session_last_text_no_turns_returns_null() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "last-text-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/last_text", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["text"].is_null(), "no turns should return null text");
+    }
+
+    #[tokio::test]
+    async fn test_session_last_text_returns_last_assistant_text() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "last-text-test-2".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create two turns
+        let turn1 = types::Turn {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            token_count: Some(10),
+            created_at: chrono::Utc::now(),
+        };
+        state.db.create_turn(&turn1).await.unwrap();
+        state
+            .db
+            .create_content_block(
+                turn1.id,
+                0,
+                &types::Role::Assistant,
+                &types::ContentBlock::Text { text: "first turn text".into() },
+            )
+            .await
+            .unwrap();
+
+        let turn2 = types::Turn {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            token_count: Some(10),
+            created_at: chrono::Utc::now(),
+        };
+        state.db.create_turn(&turn2).await.unwrap();
+        state
+            .db
+            .create_content_block(
+                turn2.id,
+                0,
+                &types::Role::Assistant,
+                &types::ContentBlock::Text { text: "second turn text".into() },
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/last_text", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["text"].as_str().unwrap(),
+            "second turn text",
+            "should return the last assistant text block"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_last_text_skips_tool_use_blocks() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "last-text-tool".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let turn = types::Turn {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            token_count: Some(10),
+            created_at: chrono::Utc::now(),
+        };
+        state.db.create_turn(&turn).await.unwrap();
+
+        // First: text block
+        state
+            .db
+            .create_content_block(
+                turn.id,
+                0,
+                &types::Role::Assistant,
+                &types::ContentBlock::Text { text: "some text before tools".into() },
+            )
+            .await
+            .unwrap();
+
+        // Then: tool use block (should be skipped when looking for text)
+        state
+            .db
+            .create_content_block(
+                turn.id,
+                1,
+                &types::Role::Assistant,
+                &types::ContentBlock::ToolUse {
+                    id: "tool-1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                },
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{}/last_text", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["text"].as_str().unwrap(),
+            "some text before tools",
+            "should return text block even when followed by tool use"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_last_text_not_found_returns_404() {
+        let app = test_app().await;
+        let fake_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{fake_id}/last_text"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     // ─── Slug function tests ─────────────────────────────────────────────────

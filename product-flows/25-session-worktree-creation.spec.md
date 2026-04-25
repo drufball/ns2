@@ -5,7 +5,7 @@ targets:
   - crates/harness/src/**/*.rs
   - crates/cli/src/main.rs
   - ns2.toml
-verified: 2026-04-25T18:57:12Z
+verified: 2026-04-25T20:27:56Z
 ---
 
 # Flow 25: Session Worktree Creation

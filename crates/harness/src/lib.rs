@@ -590,6 +590,7 @@ mod tests {
                 block: &types::ContentBlock,
             ) -> db::Result<()>;
             async fn list_content_blocks(&self, turn_id: Uuid) -> db::Result<Vec<(types::Role, types::ContentBlock)>>;
+            async fn get_last_text_for_session(&self, session_id: Uuid) -> db::Result<Option<String>>;
         }
 
         #[async_trait]
