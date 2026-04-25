@@ -3,7 +3,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/cli/src/main.rs
 severity: warning
-verified: 2026-04-25T11:26:14Z
+verified: 2026-04-25T18:44:20Z
 ---
 
 # Flow 01: Server Lifecycle

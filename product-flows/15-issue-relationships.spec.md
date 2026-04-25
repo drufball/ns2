@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-25T11:26:14Z
+verified: 2026-04-25T18:44:20Z
 ---
 
 # Flow 15: Issue Relationships
@@ -47,6 +47,23 @@ docker exec ns2-flow-15 bash -c 'cd /repo && ns2 issue new --title "Logout endpo
 ```
 
 Expected: two 4-character issue IDs.
+
+### Step 2b: Verify child issues inherit the parent's branch
+
+```bash
+docker exec ns2-flow-15 bash -c '
+  PARENT=$(cat /tmp/parent.txt)
+  CHILD1=$(cat /tmp/child1.txt)
+  CHILD2=$(cat /tmp/child2.txt)
+  PB=$(curl -sf "http://localhost:9876/issues/$PARENT" | python3 -c "import sys,json; print(json.load(sys.stdin)[\"branch\"])")
+  CB1=$(curl -sf "http://localhost:9876/issues/$CHILD1" | python3 -c "import sys,json; print(json.load(sys.stdin)[\"branch\"])")
+  CB2=$(curl -sf "http://localhost:9876/issues/$CHILD2" | python3 -c "import sys,json; print(json.load(sys.stdin)[\"branch\"])")
+  echo "parent=$PB child1=$CB1 child2=$CB2"
+  if [ "$PB" = "$CB1" ] && [ "$PB" = "$CB2" ]; then echo "OK"; else echo "FAIL: branches differ"; exit 1; fi
+'
+```
+
+Expected: all three branch values are identical and `OK` is printed.
 
 ### Step 3: Filter by parent
 
@@ -148,6 +165,7 @@ Expected: `No issues found.`
 ## Acceptance Criteria
 
 - [ ] `ns2 issue new --parent <id>` creates an issue with a parent link
+- [ ] `ns2 issue new --parent <id>` inherits the parent's branch value (branch is not auto-generated)
 - [ ] `ns2 issue new --blocked-on <id1> --blocked-on <id2>` creates an issue blocked by multiple issues
 - [ ] `ns2 issue list --parent <id>` filters to show only children of that parent
 - [ ] `ns2 issue list --blocked-on <id>` filters to show only issues blocked by that issue

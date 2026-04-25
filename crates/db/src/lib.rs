@@ -321,6 +321,7 @@ fn parse_issue_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue> {
         title: row.get("title"),
         body: row.get("body"),
         status,
+        branch: row.get("branch"),
         assignee: row.get("assignee"),
         session_id,
         parent_id: row.get("parent_id"),
@@ -339,12 +340,13 @@ impl IssueDb for SqliteDb {
         let comments =
             serde_json::to_string(&issue.comments).map_err(|e| Error::Parse(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO issues (id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO issues (id, title, body, status, branch, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&issue.id)
         .bind(&issue.title)
         .bind(&issue.body)
         .bind(issue.status.to_string())
+        .bind(&issue.branch)
         .bind(&issue.assignee)
         .bind(issue.session_id.as_ref().map(|id| id.to_string()))
         .bind(&issue.parent_id)
@@ -359,7 +361,7 @@ impl IssueDb for SqliteDb {
 
     async fn get_issue(&self, id: String) -> Result<Issue> {
         let row = sqlx::query(
-            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE id = ?",
+            "SELECT id, title, body, status, branch, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE id = ?",
         )
         .bind(&id)
         .fetch_optional(&self.pool)
@@ -375,7 +377,7 @@ impl IssueDb for SqliteDb {
         parent_id: Option<String>,
     ) -> Result<Vec<Issue>> {
         let rows = sqlx::query(
-            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues ORDER BY created_at DESC, id ASC",
+            "SELECT id, title, body, status, branch, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues ORDER BY created_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -393,7 +395,7 @@ impl IssueDb for SqliteDb {
 
     async fn list_issues_by_session_id(&self, session_id: Uuid) -> Result<Vec<Issue>> {
         let rows = sqlx::query(
-            "SELECT id, title, body, status, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE session_id = ? ORDER BY created_at DESC, id ASC",
+            "SELECT id, title, body, status, branch, assignee, session_id, parent_id, blocked_on, comments, created_at, updated_at FROM issues WHERE session_id = ? ORDER BY created_at DESC, id ASC",
         )
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
@@ -407,11 +409,12 @@ impl IssueDb for SqliteDb {
         let comments =
             serde_json::to_string(&issue.comments).map_err(|e| Error::Parse(e.to_string()))?;
         let affected = sqlx::query(
-            "UPDATE issues SET title = ?, body = ?, status = ?, assignee = ?, session_id = ?, parent_id = ?, blocked_on = ?, comments = ?, updated_at = ? WHERE id = ?",
+            "UPDATE issues SET title = ?, body = ?, status = ?, branch = ?, assignee = ?, session_id = ?, parent_id = ?, blocked_on = ?, comments = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&issue.title)
         .bind(&issue.body)
         .bind(issue.status.to_string())
+        .bind(&issue.branch)
         .bind(&issue.assignee)
         .bind(issue.session_id.as_ref().map(|id| id.to_string()))
         .bind(&issue.parent_id)
@@ -763,6 +766,7 @@ mod tests {
             title: "Test issue".into(),
             body: "Details".into(),
             status: types::IssueStatus::Open,
+            branch: String::new(),
             assignee: None,
             session_id: None,
             parent_id: None,
@@ -954,5 +958,31 @@ mod tests {
 
         let found = db.list_issues_by_session_id(session_id).await.unwrap();
         assert_eq!(found.len(), 2);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_issue_branch_round_trip(pool: SqlitePool) {
+        let db = SqliteDb::from_pool(pool);
+        let mut issue = make_issue("br01");
+        issue.branch = "feat/worktree-support".into();
+        db.create_issue(&issue).await.unwrap();
+
+        // get_issue preserves branch
+        let fetched = db.get_issue("br01".into()).await.unwrap();
+        assert_eq!(fetched.branch, "feat/worktree-support");
+
+        // list_issues preserves branch
+        let listed = db.list_issues(None, None, None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].branch, "feat/worktree-support");
+
+        // update_issue persists a changed branch
+        let mut updated = fetched;
+        updated.branch = "fix/updated-branch".into();
+        updated.updated_at = Utc::now();
+        db.update_issue(&updated).await.unwrap();
+
+        let after_update = db.get_issue("br01".into()).await.unwrap();
+        assert_eq!(after_update.branch, "fix/updated-branch");
     }
 }

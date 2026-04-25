@@ -876,12 +876,14 @@ dependencies = [
  "mockall",
  "regex",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tools",
  "tracing",
  "types",
  "uuid",
+ "workspace",
 ]
 
 [[package]]
@@ -3473,7 +3475,11 @@ dependencies = [
 name = "workspace"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
