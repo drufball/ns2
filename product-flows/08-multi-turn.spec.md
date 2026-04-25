@@ -4,7 +4,7 @@ targets:
   - crates/server/src/**/*.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-25T18:57:12Z
+verified: 2026-04-25T20:27:55Z
 ---
 
 # Flow 08: Multi-Turn Conversation

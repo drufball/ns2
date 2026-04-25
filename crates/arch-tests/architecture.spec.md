@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-25T13:36:27Z
+verified: 2026-04-25T20:27:55Z
 ---
 
 # Architecture Spec
