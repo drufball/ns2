@@ -2668,6 +2668,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stop_hook_exit_127_fails_open() {
+        // Exit code 127 = command not found. This is a configuration/environment
+        // error, not a deliberate block. The hook must fail open (allow completion)
+        // rather than injecting a blocking message that traps the agent in a loop.
+        use agents::{AgentHooks, HookEntry};
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("exit 127", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        assert!(
+            result.is_none(),
+            "exit 127 (command not found) must fail open and allow completion, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_hook_timeout_kills_command_and_returns_exit_1() {
         let cmd = hook_cmd("sleep 5", 1);
         let (exit_code, _stdout, stderr) = run_hook(&cmd, "{}").await;
