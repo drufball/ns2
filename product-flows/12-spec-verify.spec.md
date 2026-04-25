@@ -10,6 +10,7 @@ verified: 2026-04-25T21:22:22Z
 
 Mark a spec as verified at the current time using `ns2 spec verify`. Updates the `verified`
 frontmatter field to the current UTC timestamp while preserving the rest of the file.
+Multiple paths can be passed in a single invocation to verify several specs at once.
 
 These commands operate purely on the filesystem — no server required.
 
@@ -91,6 +92,37 @@ docker exec ns2-flow-12 bash -c 'cat /repo/crates/agents/agents.spec.md'
 
 Expected: file has the `verified` timestamp in frontmatter, and the body `# My Spec\n\nThis describes something important.` is preserved verbatim.
 
+### Verify multiple specs in one invocation
+
+```bash
+docker exec ns2-flow-12 bash -c 'cd /repo && ns2 spec new crates/tools/tools.spec.md --target "crates/tools/src/**/*.rs"'
+docker exec ns2-flow-12 bash -c 'cd /repo && ns2 spec new crates/db/db.spec.md --target "crates/db/src/**/*.rs"'
+docker exec ns2-flow-12 bash -c 'cd /repo && ns2 spec verify crates/tools/tools.spec.md crates/db/db.spec.md'
+```
+
+Expected output on stdout (one line per spec, order matching the arguments):
+```
+Verified crates/tools/tools.spec.md
+Verified crates/db/db.spec.md
+```
+
+Both files must now contain a `verified:` timestamp in their frontmatter:
+
+```bash
+docker exec ns2-flow-12 bash -c 'grep verified /repo/crates/tools/tools.spec.md /repo/crates/db/db.spec.md'
+```
+
+Expected: each file shows a `verified: <ISO8601>` line.
+
+### Multi-path verify: one path invalid, rest succeed, exit non-zero
+
+```bash
+docker exec ns2-flow-12 bash -c 'cd /repo && ns2 spec new crates/server/server.spec.md --target "crates/server/src/**/*.rs"'
+docker exec ns2-flow-12 bash -c 'cd /repo && ns2 spec verify crates/server/server.spec.md crates/nonexistent/missing.spec.md crates/tools/tools.spec.md; echo "Exit code: $?"'
+```
+
+Expected: `Verified crates/server/server.spec.md` and `Verified crates/tools/tools.spec.md` are printed for the valid paths. An error message on stderr references `crates/nonexistent/missing.spec.md`. Exit code is `1` (at least one path failed).
+
 ## Error Cases
 
 ### `spec verify` on a non-existent path
@@ -116,6 +148,13 @@ Expected: error message on stderr (invalid frontmatter or missing `targets`) and
 - [ ] `ns2 spec verify` prints `Verified <path>` on stdout and exits 0
 - [ ] Running `verify` twice updates the timestamp to the later time
 - [ ] `targets` list and body content are preserved unchanged after verify
+- [ ] `ns2 spec verify <path1> <path2> ...` accepts multiple paths and verifies all of them
+- [ ] Each verified path produces a `Verified <path>` line on stdout in argument order
+- [ ] When multiple paths are given and some are invalid, the valid ones are still verified and their success lines printed; exit code is 1 (partial failure)
 - [ ] `ns2 spec verify` on a non-existent file exits non-zero with an error message
 - [ ] `ns2 spec verify` on a file without valid frontmatter exits non-zero
 - [ ] No server required
+
+## Cleanup
+
+Do not run any cleanup commands. The smoke-test skill tears down containers after all flows complete and may inspect state first.
