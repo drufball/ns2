@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-25T10:03:20Z
+verified: 2026-04-25T11:26:14Z
 ---
 
 # Flow 20: Auto-Complete Posts Final Turn as Comment
