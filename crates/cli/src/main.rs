@@ -156,10 +156,13 @@ enum SpecAction {
         #[arg(long, help = "Treat `warning`-severity specs as errors. Use in CI when you want a strict check.")]
         error_on_warnings: bool,
     },
-    #[command(about = "Mark a spec as verified at the current time.", long_about = "Mark a spec as verified at the current time.\n\nWrites the current UTC timestamp into the `verified` frontmatter field. Run this after reviewing or updating a spec's targets to confirm the spec is in sync with the code. The body and targets are preserved.")]
+    #[command(about = "Mark one or more specs as verified at the current time.", long_about = "Mark one or more specs as verified at the current time.\n\nWrites the current UTC timestamp into the `verified` frontmatter field of each spec. Run this after reviewing or updating a spec's targets to confirm the spec is in sync with the code. The body and targets are preserved.\n\nPass multiple paths to verify them all in one invocation. If any path fails, the others are still processed and the command exits 1.")]
     Verify {
-        #[arg(help = "The spec file to verify. Required — you must verify specs one at a time.")]
-        path: String,
+        #[arg(
+            required = true,
+            help = "One or more spec files to verify. Pass multiple paths to verify them all in one invocation."
+        )]
+        paths: Vec<String>,
     },
 }
 
@@ -510,6 +513,56 @@ pub fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
         issue_is_terminal(&node.issue.status) && node.children.iter().all(node_terminal)
     }
     roots.iter().all(node_terminal)
+}
+
+/// The result of verifying a batch of spec paths.
+pub struct VerifyResult {
+    /// Lines to print to stdout (one per successfully verified path).
+    pub stdout_lines: Vec<String>,
+    /// Lines to print to stderr (one per failure).
+    pub stderr_lines: Vec<String>,
+    /// Whether any path failed.
+    pub any_failed: bool,
+}
+
+/// Core logic for `ns2 spec verify <paths...>`.
+///
+/// For each path: resolve it relative to `git_root`, attempt to load + write the spec,
+/// record success/failure.  Does NOT call `process::exit` — returns a [`VerifyResult`]
+/// so callers (main and tests) can assert on the outcome.
+pub fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) -> VerifyResult {
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let mut any_failed = false;
+
+    for path in paths {
+        let resolved = if PathBuf::from(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            git_root.join(path)
+        };
+
+        let mut def = match specs::load_spec(&resolved) {
+            Some(d) => d,
+            None => {
+                stderr_lines.push(format!("Error: could not load spec at {path}"));
+                any_failed = true;
+                continue;
+            }
+        };
+
+        def.verified = Some(chrono::Utc::now());
+
+        if let Err(e) = specs::write_spec(&resolved, &def) {
+            stderr_lines.push(format!("Error writing spec file {path}: {e}"));
+            any_failed = true;
+            continue;
+        }
+
+        stdout_lines.push(format!("Verified {path}"));
+    }
+
+    VerifyResult { stdout_lines, stderr_lines, any_failed }
 }
 
 pub fn session_is_terminal(status: &types::SessionStatus) -> bool {
@@ -1196,26 +1249,21 @@ async fn main() {
                     }
                 }
             }
-            SpecAction::Verify { path } => {
+            SpecAction::Verify { paths } => {
                 let git_root = workspace::git_root().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
                 });
-                let resolved = if PathBuf::from(&path).is_absolute() {
-                    PathBuf::from(&path)
-                } else {
-                    git_root.join(&path)
-                };
-                let mut def = specs::load_spec(&resolved).unwrap_or_else(|| {
-                    eprintln!("Error: could not load spec at {path}");
-                    std::process::exit(1);
-                });
-                def.verified = Some(chrono::Utc::now());
-                if let Err(e) = specs::write_spec(&resolved, &def) {
-                    eprintln!("Error writing spec file: {e}");
+                let result = verify_spec_paths(&git_root, &paths);
+                for line in &result.stdout_lines {
+                    println!("{line}");
+                }
+                for line in &result.stderr_lines {
+                    eprintln!("{line}");
+                }
+                if result.any_failed {
                     std::process::exit(1);
                 }
-                println!("Verified {path}");
             }
         },
         Command::Issue { action } => {
@@ -2369,6 +2417,20 @@ mod tests {
         }
     }
 
+    // --- spec verify CLI parse and behavior tests ---
+
+    #[test]
+    fn spec_verify_single_path_parses() {
+        let cli =
+            Cli::try_parse_from(["ns2", "spec", "verify", "crates/foo/foo.spec.md"]).unwrap();
+        match cli.command {
+            Command::Spec { action: SpecAction::Verify { paths } } => {
+                assert_eq!(paths, vec!["crates/foo/foo.spec.md"]);
+            }
+            _ => panic!("expected spec verify command"),
+        }
+    }
+
     #[test]
     fn render_tree_line_root_no_snippet() {
         let node = IssueTreeNode {
@@ -2816,5 +2878,126 @@ mod tests {
             !line.contains('\n'),
             "render_session_line must not embed literal newline in output"
         );
+    }
+
+    #[test]
+    fn spec_verify_multiple_paths_parse() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "spec",
+            "verify",
+            "crates/foo/foo.spec.md",
+            "crates/bar/bar.spec.md",
+            "crates/baz/baz.spec.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Spec { action: SpecAction::Verify { paths } } => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        "crates/foo/foo.spec.md",
+                        "crates/bar/bar.spec.md",
+                        "crates/baz/baz.spec.md",
+                    ]
+                );
+            }
+            _ => panic!("expected spec verify command"),
+        }
+    }
+
+    #[test]
+    fn spec_verify_no_paths_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "spec", "verify"]);
+        assert!(result.is_err(), "verify with no paths should fail to parse");
+    }
+
+    // Helper: write a minimal valid spec file into a temp directory and return its path.
+    fn write_temp_spec(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            "---\ntargets:\n  - crates/foo/src/**/*.rs\n---\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn verify_spec_paths_single_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_root = tmp.path();
+        write_temp_spec(git_root, "a.spec.md");
+
+        let result = verify_spec_paths(git_root, &["a.spec.md".to_string()]);
+
+        assert!(!result.any_failed, "should not fail for a valid spec");
+        assert_eq!(result.stdout_lines, vec!["Verified a.spec.md"]);
+        assert!(result.stderr_lines.is_empty(), "no stderr on success");
+
+        // Confirm the file was actually updated with a verified timestamp.
+        let updated = specs::load_spec(&git_root.join("a.spec.md")).unwrap();
+        assert!(updated.verified.is_some(), "verified timestamp should be written");
+    }
+
+    #[test]
+    fn verify_spec_paths_multiple_all_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_root = tmp.path();
+        write_temp_spec(git_root, "a.spec.md");
+        write_temp_spec(git_root, "b.spec.md");
+        write_temp_spec(git_root, "c.spec.md");
+
+        let paths: Vec<String> =
+            ["a.spec.md", "b.spec.md", "c.spec.md"].iter().map(|s| s.to_string()).collect();
+        let result = verify_spec_paths(git_root, &paths);
+
+        assert!(!result.any_failed);
+        assert_eq!(result.stdout_lines.len(), 3);
+        assert!(result.stdout_lines.contains(&"Verified a.spec.md".to_string()));
+        assert!(result.stdout_lines.contains(&"Verified b.spec.md".to_string()));
+        assert!(result.stdout_lines.contains(&"Verified c.spec.md".to_string()));
+        assert!(result.stderr_lines.is_empty());
+
+        // All files have a verified timestamp.
+        for name in &["a.spec.md", "b.spec.md", "c.spec.md"] {
+            let def = specs::load_spec(&git_root.join(name)).unwrap();
+            assert!(def.verified.is_some(), "{name} should have verified timestamp");
+        }
+    }
+
+    #[test]
+    fn verify_spec_paths_one_nonexistent_others_succeed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_root = tmp.path();
+        write_temp_spec(git_root, "good1.spec.md");
+        write_temp_spec(git_root, "good2.spec.md");
+        // "missing.spec.md" is intentionally not created.
+
+        let paths: Vec<String> = ["good1.spec.md", "missing.spec.md", "good2.spec.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = verify_spec_paths(git_root, &paths);
+
+        assert!(result.any_failed, "should fail when a path is missing");
+
+        // The two valid specs still produce success lines.
+        assert!(result.stdout_lines.contains(&"Verified good1.spec.md".to_string()));
+        assert!(result.stdout_lines.contains(&"Verified good2.spec.md".to_string()));
+
+        // The missing spec produces a stderr line.
+        assert_eq!(result.stderr_lines.len(), 1);
+        assert!(
+            result.stderr_lines[0].contains("missing.spec.md"),
+            "stderr should mention the missing path, got: {}",
+            result.stderr_lines[0]
+        );
+
+        // The two good specs were actually written.
+        for name in &["good1.spec.md", "good2.spec.md"] {
+            let def = specs::load_spec(&git_root.join(name)).unwrap();
+            assert!(def.verified.is_some(), "{name} should have verified timestamp");
+        }
     }
 }

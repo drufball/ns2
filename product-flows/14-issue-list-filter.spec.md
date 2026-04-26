@@ -4,7 +4,7 @@ targets:
   - crates/cli/src/main.rs
   - crates/db/src/**/*.rs
 severity: warning
-verified: 2026-04-25T21:22:22Z
+verified: 2026-04-26T16:18:47Z
 ---
 
 # Flow 14: Issue List and Filtering
