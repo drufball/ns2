@@ -3,7 +3,7 @@ use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use types::{ContentBlock, ContentBlockDelta, Role, Session, SessionEvent, SessionStatus, Turn};
@@ -18,6 +18,60 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// ── System prompt construction ────────────────────────────────────────────────
+
+/// Build the preamble block that is prepended to every agent system prompt when
+/// the git root is known. Returns `None` when the root cannot be determined so
+/// callers can omit the preamble without failing.
+pub(crate) fn build_preamble(root: &Path) -> String {
+    let repo_name = root.file_name().unwrap_or_default().to_string_lossy();
+    format!(
+        "You are running in the ns2 agent harness.\nWorking directory / git root: {}\nRepository: {}\n",
+        root.display(),
+        repo_name,
+    )
+}
+
+/// Assemble the final system prompt from an optional git root, an optional
+/// agent definition directory, the session agent name, and the effective root
+/// used for project config loading.
+///
+/// Returns `None` when there is nothing useful to send (no preamble, no agent body).
+pub(crate) fn build_system_prompt(
+    effective_root: Option<&Path>,
+    agents_dir: Option<&Path>,
+    agent_name: Option<&str>,
+) -> Option<String> {
+    // Build preamble if we know where we are.
+    let preamble: Option<String> = effective_root.map(build_preamble);
+
+    // Load agent body (+ optional project config).
+    let agent_body_and_project: Option<String> = agent_name.and_then(|name| {
+        let dir = agents_dir?;
+        agents::load_agent(dir, name)
+    }).and_then(|def| {
+        let agent_body = def.body;
+        if def.include_project_config {
+            let project = effective_root
+                .and_then(agents::load_project_config)
+                .unwrap_or_default();
+            if project.is_empty() {
+                if agent_body.is_empty() { None } else { Some(agent_body) }
+            } else {
+                Some(format!("{agent_body}\n\n{project}"))
+            }
+        } else {
+            if agent_body.is_empty() { None } else { Some(agent_body) }
+        }
+    });
+
+    match (preamble, agent_body_and_project) {
+        (Some(pre), Some(body)) => Some(format!("{pre}{body}")),
+        (_,         None)       => None,   // no agent body → no system prompt, even with a preamble
+        (None,      body)       => body,
+    }
+}
 
 // ── Hook execution ────────────────────────────────────────────────────────────
 
@@ -474,25 +528,16 @@ pub async fn run(
     };
     let agents_dir = effective_root.as_ref().map(|r| r.join(".ns2").join("agents"));
 
+    // Build a preamble that tells the agent where it is running.
+    // If the git root cannot be determined, the preamble is omitted (no failure).
     // Pre-compute the system prompt once (it does not change across turns).
-    let system: Option<String> = config.session.agent.as_deref().and_then(|name| {
-        let dir = agents_dir.as_ref()?;
-        agents::load_agent(dir, name)
-    }).and_then(|def| {
-        let agent_body = def.body;
-        if def.include_project_config {
-            let project = effective_root.as_deref()
-                .and_then(agents::load_project_config)
-                .unwrap_or_default();
-            if project.is_empty() {
-                if agent_body.is_empty() { None } else { Some(agent_body) }
-            } else {
-                Some(format!("{agent_body}\n\n{project}"))
-            }
-        } else {
-            if agent_body.is_empty() { None } else { Some(agent_body) }
-        }
-    });
+    // The preamble (if available) is always prepended before the agent body so
+    // every agent session knows its working directory and repository name.
+    let system: Option<String> = build_system_prompt(
+        effective_root.as_deref(),
+        agents_dir.as_deref(),
+        config.session.agent.as_deref(),
+    );
 
     // Load hooks from the agent definition (once, at harness start).
     // When include_project_config is true, also load project hooks from
@@ -2381,10 +2426,11 @@ mod tests {
         std::fs::create_dir_all(&agents_dir).unwrap();
 
         let agent_name = "harness_test_nonempty_body";
+        let agent_body = "You are a test harness agent with a non-empty body.";
         let def = agents::AgentDef {
             name: agent_name.to_string(),
             description: "test agent".to_string(),
-            body: "You are a test harness agent with a non-empty body.".to_string(),
+            body: agent_body.to_string(),
             include_project_config: false,
             hooks: agents::AgentHooks::default(),
         };
@@ -2415,10 +2461,16 @@ mod tests {
 
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
-        assert_eq!(
-            client_ref.captured().as_deref(),
-            Some("You are a test harness agent with a non-empty body."),
-            "non-empty agent body must become the system prompt"
+        let system = client_ref.captured().expect("system prompt must be Some");
+        // The preamble is now always prepended; verify the agent body is still present.
+        assert!(
+            system.contains(agent_body),
+            "system prompt must contain the agent body, got: {system}"
+        );
+        // Preamble must be at the start.
+        assert!(
+            system.starts_with("You are running in the ns2 agent harness."),
+            "system prompt must start with the preamble, got: {system}"
         );
     }
 
@@ -2515,8 +2567,15 @@ mod tests {
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         let system = client_ref.captured().expect("system prompt must be Some");
-        let expected = format!("{agent_body}\n\n{project_content}");
-        assert_eq!(system, expected, "system prompt must be agent_body + \\n\\n + CLAUDE.md");
+        let repo_name = tmp.path().file_name().unwrap().to_string_lossy();
+        let expected_preamble = format!(
+            "You are running in the ns2 agent harness.\nWorking directory / git root: {}\nRepository: {}\n",
+            tmp.path().display(),
+            repo_name,
+        );
+        let expected_body = format!("{agent_body}\n\n{project_content}");
+        let expected = format!("{expected_preamble}{expected_body}");
+        assert_eq!(system, expected, "system prompt must be preamble + agent_body + \\n\\n + CLAUDE.md");
     }
 
     #[tokio::test]
@@ -2564,11 +2623,115 @@ mod tests {
 
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
-        assert_eq!(
-            client_ref.captured().as_deref(),
-            Some(agent_body),
-            "system prompt must equal exactly the agent body when include_project_config=false"
+        let system = client_ref.captured().expect("system prompt must be Some");
+        let repo_name = tmp.path().file_name().unwrap().to_string_lossy();
+        let expected_preamble = format!(
+            "You are running in the ns2 agent harness.\nWorking directory / git root: {}\nRepository: {}\n",
+            tmp.path().display(),
+            repo_name,
         );
+        let expected = format!("{expected_preamble}{agent_body}");
+        assert_eq!(
+            system, expected,
+            "system prompt must be preamble + agent_body; CLAUDE.md must be excluded when include_project_config=false"
+        );
+    }
+
+    // ── GH #11: git-root preamble injection ──────────────────────────────────
+
+    /// When `HarnessConfig::git_root` is Some, the system prompt must start with a
+    /// preamble block that includes the working directory and repo name.
+    #[tokio::test]
+    async fn test_system_prompt_starts_with_preamble_when_git_root_available() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let agent_name = "harness_test_preamble_present";
+        let agent_body = "You are a coding agent.";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "preamble test agent".to_string(),
+            body: agent_body.to_string(),
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&agents_dir, &def).unwrap();
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some(agent_name.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mock_db = permissive_mock_db();
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: Some(tmp.path().to_path_buf()),
+        };
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let system = client_ref.captured().expect("system prompt must be Some");
+        let repo_name = tmp.path().file_name().unwrap().to_string_lossy();
+        let expected_preamble = format!(
+            "You are running in the ns2 agent harness.\nWorking directory / git root: {}\nRepository: {}\n",
+            tmp.path().display(),
+            repo_name,
+        );
+        assert!(
+            system.starts_with(&expected_preamble),
+            "system prompt must start with the preamble.\nExpected prefix:\n{expected_preamble}\nActual system:\n{system}"
+        );
+        assert!(
+            system.contains(agent_body),
+            "system prompt must still contain the agent body"
+        );
+    }
+
+    /// Unit test for `build_system_prompt`: when `effective_root` is `None`,
+    /// the preamble must be absent and only the agent body is returned.
+    #[test]
+    fn test_build_system_prompt_no_root_omits_preamble() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let agent_name = "preamble_absent_agent";
+        let agent_body = "You are a coding agent without preamble.";
+        let def = agents::AgentDef {
+            name: agent_name.to_string(),
+            description: "no-preamble test agent".to_string(),
+            body: agent_body.to_string(),
+            include_project_config: false,
+            hooks: agents::AgentHooks::default(),
+        };
+        agents::write_agent(&agents_dir, &def).unwrap();
+
+        // Pass effective_root = None → preamble must be omitted, no panic.
+        let system = build_system_prompt(
+            None, // ← no git root
+            Some(agents_dir.as_path()),
+            Some(agent_name),
+        );
+
+        let sys = system.expect("agent body should still produce a system prompt");
+        assert!(
+            !sys.contains("ns2 agent harness"),
+            "preamble must NOT appear when effective_root is None, got: {sys}"
+        );
+        assert_eq!(sys, agent_body, "system must equal agent body when there is no git root");
     }
 
     // ── Hook dispatch tests (GH #33) ─────────────────────────────────────────
