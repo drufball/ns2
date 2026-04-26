@@ -148,6 +148,11 @@ async fn run_post_tool_use_hooks(
 /// Run Stop hooks.
 /// Returns `Some(injected_message)` if any hook exits non-zero (the message should be
 /// injected into the conversation to continue the loop), or `None` to allow completion.
+///
+/// Exit code 127 (command not found) is treated as a configuration error and fails
+/// open — the hook is skipped and the session is allowed to complete normally.
+/// This prevents an infinite loop when a hook script cannot be found (e.g. because
+/// `$CLAUDE_PROJECT_DIR` is unset and the path cannot be resolved).
 async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> {
     let stdin = serde_json::json!({ "session_id": session_id.to_string() });
     let stdin_str = stdin.to_string();
@@ -156,6 +161,15 @@ async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> 
         for cmd in &entry.hooks {
             let (exit_code, stdout, _stderr) = run_hook(cmd, &stdin_str).await;
             if exit_code != 0 {
+                // Exit 127 = command not found: configuration error, not a deliberate
+                // block. Fail open so the agent is not trapped in an infinite loop.
+                if exit_code == 127 {
+                    tracing::warn!(
+                        "stop hook command not found (exit 127): '{}' — failing open",
+                        cmd.command
+                    );
+                    continue;
+                }
                 return Some(if stdout.is_empty() {
                     format!("Stop hook exited with code {exit_code}")
                 } else {

@@ -4,7 +4,7 @@ targets:
   - crates/harness/src/**/*.rs
   - .ns2/agents/**/*.md
   - .claude/hooks/stop-commit-guard.sh
-verified: 2026-04-25T21:22:22Z
+verified: 2026-04-26T10:35:54Z
 ---
 
 # Flow 23: Stop Hook — Commit Guard

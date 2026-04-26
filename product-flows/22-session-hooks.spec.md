@@ -2,7 +2,7 @@
 targets:
   - crates/agents/src/**/*.rs
   - crates/harness/src/**/*.rs
-verified: 2026-04-25T21:22:22Z
+verified: 2026-04-26T10:35:54Z
 ---
 
 # Flow 22: Session Lifecycle Hooks (PreToolUse / PostToolUse / Stop)
