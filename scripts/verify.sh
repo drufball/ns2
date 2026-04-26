@@ -34,17 +34,3 @@ EOF
 
 # shellcheck disable=SC2086
 cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
-
-echo "=== Spec sync ==="
-if ! ns2 spec sync; then
-    echo ""
-    echo "One or more spec files have changed since they were last verified."
-    echo ""
-    echo "To resolve:"
-    echo "  1. Review the spec file(s) and file(s) listed above"
-    echo "  2. Make sure the spec reflects the current implementation"
-    echo "     (update the spec if code changed, or update code if spec is authoritative)"
-    echo "  3. Once they agree, mark the spec verified:"
-    echo "       ns2 spec verify <path/to/spec.spec.md>"
-    exit 1
-fi

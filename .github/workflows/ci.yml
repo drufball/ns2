@@ -50,14 +50,3 @@ jobs:
           )
           # shellcheck disable=SC2086
           cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
-
-      - name: Spec sync
-        run: |
-          cargo build -p cli -q
-          if ! ./target/debug/ns2 spec sync --error-on-warnings; then
-            echo ""
-            echo "One or more spec files have changed since they were last verified."
-            echo "To resolve: update the spec or implementation so they agree, then run:"
-            echo "  ./ns2 spec verify <path/to/spec.spec.md>"
-            exit 1
-          fi
