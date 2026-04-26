@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-26T10:36:35Z
+verified: 2026-04-26T16:15:47Z
 ---
 
 # Flow 18: Stateless Session Resume
