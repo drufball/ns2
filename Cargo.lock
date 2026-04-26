@@ -3479,6 +3479,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
 ]

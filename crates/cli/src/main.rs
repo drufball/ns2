@@ -271,7 +271,7 @@ enum WorktreeAction {
 // ────────────────────────────────────────────────────────────────────────────
 
 fn load_dotenv() {
-    let Some(root) = workspace::git_root() else { return };
+    let Some(root) = workspace::git_root_sync() else { return };
     let Ok(contents) = std::fs::read_to_string(root.join(".env")) else { return };
     for line in contents.lines() {
         let line = line.trim();
@@ -291,7 +291,7 @@ fn load_dotenv() {
 
 pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let repo_name = workspace::git_root()
+    let repo_name = workspace::git_root_sync()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "default".to_string());
 
@@ -1141,7 +1141,7 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
-                let git_root = workspace::git_root().unwrap_or_else(|| {
+                let git_root = workspace::git_root_sync().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
                 });
@@ -1172,7 +1172,7 @@ async fn main() {
                 println!("Created spec at {path_display}");
             }
             SpecAction::Sync { path, error_on_warnings } => {
-                let git_root = workspace::git_root().unwrap_or_else(|| {
+                let git_root = workspace::git_root_sync().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
                 });
@@ -1250,7 +1250,7 @@ async fn main() {
                 }
             }
             SpecAction::Verify { paths } => {
-                let git_root = workspace::git_root().unwrap_or_else(|| {
+                let git_root = workspace::git_root_sync().unwrap_or_else(|| {
                     eprintln!("Error: not inside a git repository");
                     std::process::exit(1);
                 });
@@ -1667,7 +1667,7 @@ async fn main() {
             }
         }
         Command::Worktree { action } => {
-            let git_root = workspace::git_root().unwrap_or_else(|| {
+            let git_root = workspace::git_root_sync().unwrap_or_else(|| {
                 eprintln!("Error: not inside a git repository");
                 std::process::exit(1);
             });
@@ -1675,7 +1675,7 @@ async fn main() {
 
             match action {
                 WorktreeAction::List => {
-                    let entries = workspace::list_worktrees(&git_root, &config.worktree_base);
+                    let entries = workspace::list_worktrees(&git_root, &config.worktree_base).await;
                     if entries.is_empty() {
                         println!("No worktrees found.");
                     } else {
@@ -1691,7 +1691,7 @@ async fn main() {
                 }
                 WorktreeAction::Create { branch } => {
                     let worktree_path = config.worktree_base.join(&branch);
-                    match workspace::ensure_worktree(&git_root, &worktree_path, &branch) {
+                    match workspace::ensure_worktree(&git_root, &worktree_path, &branch).await {
                         Some(path) => {
                             eprintln!(
                                 "Created worktree for branch {} at {}",
@@ -1711,7 +1711,7 @@ async fn main() {
                         &config.worktree_base,
                         &branch,
                         force,
-                    ) {
+                    ).await {
                         Ok(_path) => {
                             eprintln!("Deleted worktree for branch {branch}");
                         }

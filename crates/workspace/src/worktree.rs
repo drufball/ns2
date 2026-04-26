@@ -23,7 +23,10 @@ pub struct WorktreeEntry {
 ///    `git worktree add <path> <branch>`.
 ///
 /// Returns the worktree path on success, or logs a warning and returns `None` on failure.
-pub fn ensure_worktree(
+///
+/// This function is async and uses `tokio::process::Command` to avoid blocking
+/// the Tokio thread pool when multiple sessions start concurrently.
+pub async fn ensure_worktree(
     git_root: &Path,
     worktree_path: &Path,
     branch: &str,
@@ -35,7 +38,7 @@ pub fn ensure_worktree(
 
     // Create parent directories so `git worktree add` can place the worktree there.
     if let Some(parent) = worktree_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
             tracing::warn!(
                 "failed to create worktree parent dir {}: {e}",
                 parent.display()
@@ -45,10 +48,10 @@ pub fn ensure_worktree(
     }
 
     // Detect the remote default branch (e.g. origin/main or origin/master).
-    let default_branch = detect_remote_default_branch(git_root);
+    let default_branch = detect_remote_default_branch(git_root).await;
 
     // First attempt: create a new branch tracking the remote default branch.
-    let output = std::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .current_dir(git_root)
         .args([
             "worktree",
@@ -58,7 +61,8 @@ pub fn ensure_worktree(
             branch,
             &default_branch,
         ])
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(ref o) if o.status.success() => return Some(worktree_path.to_path_buf()),
@@ -76,7 +80,7 @@ pub fn ensure_worktree(
     }
 
     // Second attempt: branch already exists in git — check it out into the worktree.
-    let output = std::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .current_dir(git_root)
         .args([
             "worktree",
@@ -84,7 +88,8 @@ pub fn ensure_worktree(
             &worktree_path.to_string_lossy(),
             branch,
         ])
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(o) if o.status.success() => Some(worktree_path.to_path_buf()),
@@ -112,11 +117,15 @@ pub fn ensure_worktree(
 ///
 /// Returns the full remote ref (e.g. `"origin/master"` or `"origin/main"`).
 /// Falls back to `"origin/main"` when `origin/HEAD` is not set or the git command fails.
-pub(crate) fn detect_remote_default_branch(git_root: &Path) -> String {
-    std::process::Command::new("git")
+///
+/// This function is async and uses `tokio::process::Command` to avoid blocking
+/// the Tokio thread pool.
+pub(crate) async fn detect_remote_default_branch(git_root: &Path) -> String {
+    tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
         .output()
+        .await
         .ok()
         .and_then(|o| {
             if o.status.success() {
@@ -137,11 +146,15 @@ pub(crate) fn detect_remote_default_branch(git_root: &Path) -> String {
 /// keeping only entries whose path is under `worktree_base`.
 ///
 /// Returns an empty `Vec` when git is not available or the output cannot be parsed.
-pub fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<WorktreeEntry> {
-    let output = match std::process::Command::new("git")
+///
+/// This function is async and uses `tokio::process::Command` to avoid blocking
+/// the Tokio thread pool.
+pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<WorktreeEntry> {
+    let output = match tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["worktree", "list", "--porcelain"])
         .output()
+        .await
     {
         Ok(o) if o.status.success() => o.stdout,
         _ => return vec![],
@@ -220,7 +233,10 @@ pub enum DeleteWorktreeError {
 ///    If it has unmerged commits and `force` is false → `DeleteWorktreeError::UnmergedCommits`.
 /// 4. Run `git worktree remove --force <path>`.
 /// 5. Run `git branch -D <branch>`.
-pub fn delete_worktree(
+///
+/// This function is async and uses `tokio::process::Command` to avoid blocking
+/// the Tokio thread pool.
+pub async fn delete_worktree(
     git_root: &Path,
     worktree_base: &Path,
     branch: &str,
@@ -234,17 +250,18 @@ pub fn delete_worktree(
 
     // Check merge status unless --force was passed.
     if !force {
-        let merged = is_branch_merged_to_main(git_root, branch);
+        let merged = is_branch_merged_to_main(git_root, branch).await;
         if !merged {
             return Err(DeleteWorktreeError::UnmergedCommits(branch.to_string()));
         }
     }
 
     // Remove the worktree directory.
-    let remove_status = std::process::Command::new("git")
+    let remove_status = tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
-        .status();
+        .status()
+        .await;
 
     match remove_status {
         Ok(s) if s.success() => {}
@@ -262,10 +279,11 @@ pub fn delete_worktree(
     }
 
     // Delete the local branch.
-    let branch_status = std::process::Command::new("git")
+    let branch_status = tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["branch", "-D", branch])
-        .status();
+        .status()
+        .await;
 
     match branch_status {
         Ok(s) if s.success() => {}
@@ -291,18 +309,19 @@ pub fn delete_worktree(
 /// (detected via `origin/HEAD`, falling back to `main`).
 ///
 /// Uses `git merge-base --is-ancestor <branch> <default-branch>`.
-fn is_branch_merged_to_main(git_root: &Path, branch: &str) -> bool {
+async fn is_branch_merged_to_main(git_root: &Path, branch: &str) -> bool {
     // Detect the local name of the default branch (strip "origin/" prefix).
-    let remote_default = detect_remote_default_branch(git_root);
+    let remote_default = detect_remote_default_branch(git_root).await;
     let local_default = remote_default
         .strip_prefix("origin/")
         .unwrap_or(&remote_default)
         .to_string();
 
-    std::process::Command::new("git")
+    tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["merge-base", "--is-ancestor", branch, &local_default])
         .status()
+        .await
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -318,10 +337,10 @@ mod tests {
 
     /// Build a repo whose remote default branch is `master` (not `main`) and verify
     /// that `detect_remote_default_branch` returns `"origin/master"`.
-    #[test]
-    fn detect_remote_default_branch_returns_origin_master_when_remote_uses_master() {
+    #[tokio::test]
+    async fn detect_remote_default_branch_returns_origin_master_when_remote_uses_master() {
         let (local_dir, _origin_dir) = setup_git_repo_with_remote_branch("master");
-        let result = detect_remote_default_branch(local_dir.path());
+        let result = detect_remote_default_branch(local_dir.path()).await;
         assert_eq!(
             result, "origin/master",
             "should detect origin/master when remote HEAD points to master"
@@ -329,8 +348,8 @@ mod tests {
     }
 
     /// When `origin/HEAD` is not set at all, the function must fall back to `"origin/main"`.
-    #[test]
-    fn detect_remote_default_branch_falls_back_to_origin_main_when_head_unset() {
+    #[tokio::test]
+    async fn detect_remote_default_branch_falls_back_to_origin_main_when_head_unset() {
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["init", "--bare"])
@@ -353,7 +372,7 @@ mod tests {
             .current_dir(local_dir.path())
             .status();
 
-        let result = detect_remote_default_branch(local_dir.path());
+        let result = detect_remote_default_branch(local_dir.path()).await;
         assert_eq!(
             result, "origin/main",
             "should fall back to origin/main when origin/HEAD is not set"
@@ -363,14 +382,14 @@ mod tests {
     /// `ensure_worktree` must succeed even when the remote only has `origin/master`
     /// (not `origin/main`).  The function should auto-detect the default branch and
     /// use it as the start point instead of hardcoding `origin/main`.
-    #[test]
-    fn ensure_worktree_succeeds_when_remote_default_is_master() {
+    #[tokio::test]
+    async fn ensure_worktree_succeeds_when_remote_default_is_master() {
         let (local_dir, _origin_dir) = setup_git_repo_with_remote_branch("master");
         let wt_base = tempfile::TempDir::new().unwrap();
         let branch = "feat/from-master";
         let worktree_path = wt_base.path().join(branch);
 
-        let result = ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
 
         assert!(
             result.is_some(),
@@ -457,24 +476,24 @@ mod tests {
 
     // ── ensure_worktree ───────────────────────────────────────────────────────
 
-    #[test]
-    fn ensure_worktree_existing_dir_is_reused() {
+    #[tokio::test]
+    async fn ensure_worktree_existing_dir_is_reused() {
         let tmp = tempfile::TempDir::new().unwrap();
         let worktree_path = tmp.path().join("existing-wt");
         std::fs::create_dir_all(&worktree_path).unwrap();
 
         // git_root doesn't matter because the path already exists
-        let result = ensure_worktree(tmp.path(), &worktree_path, "my-branch");
+        let result = ensure_worktree(tmp.path(), &worktree_path, "my-branch").await;
         assert_eq!(result, Some(worktree_path));
     }
 
-    #[test]
-    fn ensure_worktree_creates_worktree_in_real_git_repo() {
+    #[tokio::test]
+    async fn ensure_worktree_creates_worktree_in_real_git_repo() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "feature/my-feature";
         let worktree_path = wt_base.path().join(branch);
 
-        let result = ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
 
         assert!(
             result.is_some(),
@@ -486,22 +505,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ensure_worktree_reuse_existing_worktree() {
+    #[tokio::test]
+    async fn ensure_worktree_reuse_existing_worktree() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "feat/reuse-test";
         let worktree_path = wt_base.path().join(branch);
 
-        let result1 = ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result1 = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(result1.is_some(), "first ensure_worktree should succeed");
 
-        let result2 = ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result2 = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(result2.is_some(), "second ensure_worktree should succeed (reuse)");
         assert!(worktree_path.is_dir(), "worktree dir should still exist");
     }
 
-    #[test]
-    fn ensure_worktree_existing_local_branch_checkout() {
+    #[tokio::test]
+    async fn ensure_worktree_existing_local_branch_checkout() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "existing-branch";
 
@@ -513,7 +532,7 @@ mod tests {
             .unwrap();
 
         let worktree_path = wt_base.path().join(branch);
-        let result = ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(
             result.is_some(),
             "ensure_worktree should succeed for existing local branch via fallback"
@@ -523,25 +542,25 @@ mod tests {
 
     // ── delete_worktree ───────────────────────────────────────────────────────
 
-    #[test]
-    fn delete_worktree_missing_path_returns_not_found() {
+    #[tokio::test]
+    async fn delete_worktree_missing_path_returns_not_found() {
         let tmp = tempfile::TempDir::new().unwrap();
         let base = tmp.path().to_path_buf();
-        let result = delete_worktree(tmp.path(), &base, "no-such-branch", false);
+        let result = delete_worktree(tmp.path(), &base, "no-such-branch", false).await;
         assert!(
             matches!(result, Err(DeleteWorktreeError::NotFound(_))),
             "expected NotFound, got: {result:?}"
         );
     }
 
-    #[test]
-    fn delete_worktree_unmerged_without_force_returns_error() {
+    #[tokio::test]
+    async fn delete_worktree_unmerged_without_force_returns_error() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "feat/unmerged";
         let worktree_path = wt_base.path().join(branch);
 
         // Create the worktree with a new commit not on main.
-        ensure_worktree(local_dir.path(), &worktree_path, branch).unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
 
         // Add a commit to the worktree branch so it has unmerged commits.
         std::fs::write(worktree_path.join("new_file.txt"), "content").unwrap();
@@ -556,20 +575,20 @@ mod tests {
             .status()
             .unwrap();
 
-        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, false);
+        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, false).await;
         assert!(
             matches!(result, Err(DeleteWorktreeError::UnmergedCommits(_))),
             "expected UnmergedCommits, got: {result:?}"
         );
     }
 
-    #[test]
-    fn delete_worktree_unmerged_with_force_succeeds() {
+    #[tokio::test]
+    async fn delete_worktree_unmerged_with_force_succeeds() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "feat/force-delete";
         let worktree_path = wt_base.path().join(branch);
 
-        ensure_worktree(local_dir.path(), &worktree_path, branch).unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
 
         // Add an unmerged commit.
         std::fs::write(worktree_path.join("extra.txt"), "data").unwrap();
@@ -584,7 +603,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, true);
+        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, true).await;
         assert!(
             result.is_ok(),
             "force delete of unmerged worktree should succeed, got: {result:?}"
@@ -592,17 +611,17 @@ mod tests {
         assert!(!worktree_path.exists(), "worktree directory should be gone");
     }
 
-    #[test]
-    fn delete_worktree_merged_branch_succeeds_without_force() {
+    #[tokio::test]
+    async fn delete_worktree_merged_branch_succeeds_without_force() {
         let (local_dir, wt_base) = setup_git_repo_with_remote();
         let branch = "feat/merged-branch";
         let worktree_path = wt_base.path().join(branch);
 
         // Create the worktree (branches off origin/main, so it is already merged into main).
-        ensure_worktree(local_dir.path(), &worktree_path, branch).unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
 
         // The branch has no unique commits → it IS an ancestor of main → merged.
-        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, false);
+        let result = delete_worktree(local_dir.path(), wt_base.path(), branch, false).await;
         assert!(
             result.is_ok(),
             "deleting a merged worktree without --force should succeed, got: {result:?}"
