@@ -235,6 +235,59 @@ async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> 
     None
 }
 
+// ── 429 retry logic ──────────────────────────────────────────────────────────
+
+/// Read the max-retry count from `NS2_MAX_RETRIES` (default 5).
+fn max_retries() -> u32 {
+    std::env::var("NS2_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(5)
+}
+
+/// Returns `true` if the error is an Anthropic 429 rate-limit response.
+fn is_rate_limit(err: &anthropic::Error) -> bool {
+    matches!(err, anthropic::Error::Api { status: 429, .. })
+}
+
+/// Call `client.complete(request)` with exponential-backoff retry on 429.
+///
+/// - Retries up to `NS2_MAX_RETRIES` times (default 5).
+/// - Initial delay: 10 s, doubling each retry, capped at 120 s.
+/// - Non-429 errors propagate immediately without retrying.
+///
+/// In tests using `#[tokio::test(start_paused = true)]`, `tokio::time::sleep`
+/// returns instantly, so no real wall-clock time is consumed.
+async fn complete_with_retry(
+    client: &Arc<dyn AnthropicClient>,
+    request: MessageRequest,
+) -> anthropic::Result<MessageResponse> {
+    use tokio::time::{sleep, Duration};
+
+    let retries = max_retries();
+    let mut delay_ms: u64 = 10_000;
+    const MAX_DELAY_MS: u64 = 120_000;
+
+    let mut attempt = 0u32;
+    loop {
+        match client.complete(request.clone()).await {
+            Ok(resp) => return Ok(resp),
+            Err(err) if is_rate_limit(&err) && attempt < retries => {
+                attempt += 1;
+                tracing::warn!(
+                    attempt,
+                    retries,
+                    delay_ms,
+                    "Anthropic 429 rate-limit; retrying after {delay_ms}ms"
+                );
+                sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 // ── Worktree management ───────────────────────────────────────────────────────
 
 /// Resolve the session's working directory based on its associated issue.
@@ -380,7 +433,24 @@ async fn run_tool_dispatch_loop(
             tools: tool_definitions.clone(),
         };
 
-        let response = client.complete(request).await?;
+        let response = match complete_with_retry(client, request).await {
+            Ok(r) => r,
+            Err(err) => {
+                // Retries exhausted (429) or non-retryable error → emit error event
+                // and break out of the dispatch loop. Non-429 errors are re-raised
+                // to the caller so the harness task can fail clearly.
+                if is_rate_limit(&err) {
+                    let _ = event_tx.send(SessionEvent::Error {
+                        message: format!(
+                            "rate limited after {retries} retries: {err}",
+                            retries = max_retries()
+                        ),
+                    });
+                    break;
+                }
+                return Err(Error::Anthropic(err));
+            }
+        };
 
         // Create assistant turn in DB
         let turn = Turn {
@@ -3120,6 +3190,196 @@ mod tests {
         assert!(
             injected.contains("do more work"),
             "injected message must contain hook stdout, got: {injected:?}"
+        );
+    }
+
+    // ── GH#47: 429 rate-limit retry tests ────────────────────────────────────
+
+    /// A client that returns 429 `n_failures` times, then succeeds on the next call.
+    struct RateLimitThenOkClient {
+        call_count: std::sync::atomic::AtomicU32,
+        n_failures: u32,
+    }
+
+    impl RateLimitThenOkClient {
+        fn new(n_failures: u32) -> Self {
+            Self { call_count: std::sync::atomic::AtomicU32::new(0), n_failures }
+        }
+    }
+
+    #[async_trait]
+    impl AnthropicClient for RateLimitThenOkClient {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < self.n_failures {
+                Err(anthropic::Error::Api { status: 429, message: "rate limited".into() })
+            } else {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::Text { text: "ok".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 5,
+                    output_tokens: 3,
+                })
+            }
+        }
+    }
+
+    /// Retrying up to 5 times: a client that returns 429 N times (N ≤ 5) then succeeds
+    /// should complete the session successfully.
+    ///
+    /// `start_paused = true` makes `tokio::time::sleep` return immediately, so the
+    /// test does not actually wait 10 s per retry.
+    #[tokio::test(start_paused = true)]
+    async fn test_429_retried_up_to_5_times_then_succeeds() {
+        let session = make_session();
+        let mock_db = permissive_mock_db();
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+        };
+        // 5 failures then success — exactly at the retry limit
+        let client = Arc::new(RateLimitThenOkClient::new(5));
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Should have completed successfully — no Error event, SessionDone present
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            "should NOT emit Error when 429 retried and eventually succeeds"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            "expected SessionDone after successful retry"
+        );
+    }
+
+    /// When the client returns 429 more than 5 times (all retries exhausted),
+    /// the harness must emit SessionEvent::Error.
+    ///
+    /// `start_paused = true` makes `tokio::time::sleep` return immediately.
+    #[tokio::test(start_paused = true)]
+    async fn test_429_exhausts_all_retries_emits_error() {
+        let session = make_session();
+        let mock_db = permissive_mock_db();
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+        };
+        // 6 failures → exceeds max 5 retries
+        let client = Arc::new(RateLimitThenOkClient::new(6));
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            "expected SessionEvent::Error when all 429 retries are exhausted"
+        );
+    }
+
+    /// Non-429 API errors are not retried and propagate immediately.
+    #[tokio::test]
+    async fn test_non_429_api_error_not_retried() {
+        struct AlwaysServerErrorClient;
+
+        #[async_trait]
+        impl AnthropicClient for AlwaysServerErrorClient {
+            async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+                Err(anthropic::Error::Api { status: 500, message: "internal server error".into() })
+            }
+        }
+
+        let session = make_session();
+        let mock_db = permissive_mock_db();
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+        };
+        let client = Arc::new(AlwaysServerErrorClient);
+        let db = Arc::new(mock_db);
+        let (event_tx, _rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        // Should return Err (non-429 is not swallowed)
+        let result = run(config, client, db, event_tx, msg_rx).await;
+        assert!(result.is_err(), "non-429 error should propagate immediately as Err");
+    }
+
+    /// NS2_MAX_RETRIES env var overrides the default of 5.
+    /// Set it to 2 → a client that fails 3 times should exhaust retries.
+    ///
+    /// Note: env var mutation in tests is inherently racy with parallel execution.
+    /// This test is run with `#[tokio::test(start_paused = true)]` so there is no
+    /// real sleep, keeping it fast.  We still guard with a unique env-var read
+    /// inside the retry loop so the env value is sampled at test time.
+    #[tokio::test(start_paused = true)]
+    async fn test_ns2_max_retries_env_override() {
+        // SAFETY: This test mutates a process-global env var.  We set it immediately
+        // before the call and restore it in a guard.  Parallel test execution might
+        // race this, but `start_paused = true` keeps execution single-threaded within
+        // the tokio runtime so the set→run→restore happens atomically from the
+        // scheduler's perspective.
+        std::env::set_var("NS2_MAX_RETRIES", "2");
+
+        let session = make_session();
+        let mock_db = permissive_mock_db();
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+        };
+        // 3 failures → exceeds override max of 2
+        let client = Arc::new(RateLimitThenOkClient::new(3));
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        std::env::remove_var("NS2_MAX_RETRIES");
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            "expected Error when NS2_MAX_RETRIES=2 and client fails 3 times"
         );
     }
 
