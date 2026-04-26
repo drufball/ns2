@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-26T16:18:47Z
+verified: 2026-04-26T17:28:05Z
 ---
 
 # CLI Commands Spec
@@ -582,6 +582,12 @@ Options:
 
 ```
 Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.
+
+Prints a confirmation to stderr including the session UUID:
+  Started issue <id>. Session: <uuid>
+
+Capture the session UUID for later tailing:
+  session=$(ns2 issue start --id "$id" 2>&1 | awk '/Session:/{print $NF}')
 
 Usage: ns2 issue start --id <ID>
 

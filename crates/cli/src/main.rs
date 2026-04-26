@@ -211,7 +211,7 @@ enum IssueAction {
         #[arg(long, default_value = "user", help = "Author name (defaults to 'user').")]
         author: String,
     },
-    #[command(about = "Create an agent session for this issue and start it.", long_about = "Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.")]
+    #[command(about = "Create an agent session for this issue and start it.", long_about = "Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.\n\nPrints a confirmation to stderr including the session UUID:\n  Started issue <id>. Session: <uuid>\n\nCapture the session UUID for later tailing:\n  session=$(ns2 issue start --id \"$id\" 2>&1 | awk '/Session:/{print $NF}')")]
     Start {
         #[arg(long, help = "The issue ID. Required.")]
         id: String,
