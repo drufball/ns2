@@ -77,9 +77,15 @@ Run `ns2 spec verify` on every file you touched, then confirm `ns2 spec sync --e
 
 ## Driving implementation via ns2 issues
 
-After the product flows are clean, plan and execute the implementation in narrow vertical slices. Each slice should deliver one independently verifiable behavior — not "implement the feature" but "add the DB layer", "add the HTTP route", "add the CLI command".
+### Before creating child issues
 
-Run issues **sequentially** — do not start the next issue until the current one completes.
+Always check for existing child issues before planning:
+```
+ns2 issue list --parent <this-issue-id>
+```
+Do not create a new issue for a slice if a child issue already exists for it (in any status: open, running, completed, failed).
+
+Also check recently completed child issues (status=completed) — their summary comments tell you what was already implemented.
 
 ### The sequence
 
