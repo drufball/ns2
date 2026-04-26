@@ -17,6 +17,14 @@ Read CLAUDE.md and crates/arch-tests/architecture.spec.md before starting any ta
 - Mock at crate boundaries using `mockall` — no real DB, HTTP, or filesystem in unit tests unless you're explicitly testing that layer
 - Each crate exposes a narrow public interface; test only through the public API
 
+## Scope discipline
+
+When you encounter a bug that is NOT part of your assigned task, do NOT fix it inline. Instead:
+1. File a GitHub issue: `gh issue create --title "Bug: ..." --body "..." --label bug`
+2. Note it in your summary as 'found but not fixed — see GH #N'
+
+This prevents multiple agents from independently patching the same file and creating merge conflicts.
+
 ## Workflow
 
 Use TDD: write a failing test first, then make it pass. When debugging, reproduce the error in a test before touching any code.
