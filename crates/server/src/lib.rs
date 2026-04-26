@@ -748,7 +748,18 @@ async fn start_issue(
     issue.updated_at = Utc::now();
     state.db.update_issue(&issue).await?;
 
-    let initial_message = format!("{}\n\n{}", issue.title, issue.body);
+    let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
+    if !issue.comments.is_empty() {
+        initial_message.push_str("\n\n---\n# Issue History\n");
+        for comment in &issue.comments {
+            initial_message.push_str(&format!(
+                "\n**{}** ({}): {}\n",
+                comment.author,
+                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
+                comment.body
+            ));
+        }
+    }
     let msg_tx = spawn_harness_sync(&state, session.clone(), Some(issue.id.clone()));
     msg_tx.send(initial_message).await.ok();
 
@@ -2996,6 +3007,242 @@ mod tests {
         // Only the original system comment from create_issue_with_status
         let comments = v["comments"].as_array().unwrap();
         assert_eq!(comments.len(), 1, "no new comment should be added when no comment provided");
+    }
+
+    // ─── start_issue initial message includes comment history ────────────────
+
+    /// When an issue has no comments, start_issue sends only "title\n\nbody" to the agent.
+    #[tokio::test]
+    async fn test_start_issue_initial_message_no_comments() {
+        use std::sync::Mutex;
+
+        // A client that records the user message text it receives
+        struct CapturingClient {
+            captured: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl anthropic::AnthropicClient for CapturingClient {
+            async fn complete(
+                &self,
+                request: anthropic::MessageRequest,
+            ) -> anthropic::Result<anthropic::MessageResponse> {
+                // The first user message is the initial_message we care about
+                if let Some((_, blocks)) = request.messages.iter().find(|(role, _)| {
+                    matches!(role, types::Role::User)
+                }) {
+                    let text: String = blocks.iter().filter_map(|b| {
+                        if let types::ContentBlock::Text { text } = b { Some(text.clone()) } else { None }
+                    }).collect();
+                    self.captured.lock().unwrap().push(text);
+                }
+                Ok(anthropic::MessageResponse {
+                    content: vec![types::ContentBlock::Text { text: "ok".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
+        let state = AppState {
+            db,
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            client,
+            tools: vec![],
+            model: "claude-opus-4-5".into(),
+        };
+        let app = build_router(state.clone());
+
+        // Create issue with NO comments
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "My Title",
+                "body": "My Body",
+                "assignee": "test-agent"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Start the issue
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Wait for the harness to call complete()
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("capturing client was never called");
+            }
+        }
+
+        let msgs = captured.lock().unwrap().clone();
+        let first_msg = &msgs[0];
+        assert_eq!(
+            first_msg, "My Title\n\nMy Body",
+            "with no comments, initial message should be exactly 'title\\n\\nbody', got: {first_msg:?}"
+        );
+        assert!(
+            !first_msg.contains("Issue History"),
+            "no comments → no '# Issue History' section"
+        );
+    }
+
+    /// When an issue has comments, start_issue appends the comment history to the initial message.
+    #[tokio::test]
+    async fn test_start_issue_initial_message_includes_comments() {
+        use std::sync::Mutex;
+
+        struct CapturingClient {
+            captured: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl anthropic::AnthropicClient for CapturingClient {
+            async fn complete(
+                &self,
+                request: anthropic::MessageRequest,
+            ) -> anthropic::Result<anthropic::MessageResponse> {
+                if let Some((_, blocks)) = request.messages.iter().find(|(role, _)| {
+                    matches!(role, types::Role::User)
+                }) {
+                    let text: String = blocks.iter().filter_map(|b| {
+                        if let types::ContentBlock::Text { text } = b { Some(text.clone()) } else { None }
+                    }).collect();
+                    self.captured.lock().unwrap().push(text);
+                }
+                Ok(anthropic::MessageResponse {
+                    content: vec![types::ContentBlock::Text { text: "ok".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
+        let state = AppState {
+            db: Arc::clone(&db),
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            client,
+            tools: vec![],
+            model: "claude-opus-4-5".into(),
+        };
+        let app = build_router(state.clone());
+
+        // Create issue
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "PM Task",
+                "body": "Do the thing",
+                "assignee": "product-manager"
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Add two comments via the API
+        app.clone()
+            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), serde_json::json!({
+                "author": "swe",
+                "body": "Slice 1 done"
+            })))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), serde_json::json!({
+                "author": "system",
+                "body": "session lost on server restart"
+            })))
+            .await
+            .unwrap();
+
+        // Start the issue — this is where the initial_message is constructed
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Wait for the harness to call complete()
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("capturing client was never called");
+            }
+        }
+
+        let msgs = captured.lock().unwrap().clone();
+        let first_msg = &msgs[0];
+
+        // Must begin with title + body
+        assert!(
+            first_msg.starts_with("PM Task\n\nDo the thing"),
+            "initial message must start with title\\n\\nbody, got: {first_msg:?}"
+        );
+
+        // Must include the history section header
+        assert!(
+            first_msg.contains("# Issue History"),
+            "initial message must contain '# Issue History', got: {first_msg:?}"
+        );
+
+        // Must include both comments' bodies
+        assert!(
+            first_msg.contains("Slice 1 done"),
+            "initial message must contain first comment body, got: {first_msg:?}"
+        );
+        assert!(
+            first_msg.contains("session lost on server restart"),
+            "initial message must contain second comment body, got: {first_msg:?}"
+        );
+
+        // Must include authors
+        assert!(
+            first_msg.contains("swe"),
+            "initial message must include comment author 'swe', got: {first_msg:?}"
+        );
+        assert!(
+            first_msg.contains("system"),
+            "initial message must include comment author 'system', got: {first_msg:?}"
+        );
     }
 
     /// POST /issues/zzzz/reopen → 404.
