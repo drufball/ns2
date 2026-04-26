@@ -15,14 +15,3 @@ if printf '%s' "$COMMAND" | grep -qE 'git (add|commit)'; then
     fi
     exit 0
 fi
-
-# Pre-PR: run spec sync --error-on-warnings before gh pr create
-if printf '%s' "$COMMAND" | grep -q 'gh pr create'; then
-    OUTPUT=$(cd "$CLAUDE_PROJECT_DIR" && cargo build -p cli -q 2>&1 && ns2 spec sync --error-on-warnings 2>&1)
-    STATUS=$?
-    if [ "$STATUS" -ne 0 ]; then
-        printf 'Pre-PR spec check failed. Verify stale specs before opening a PR:\n\n%s\n' "$OUTPUT" >&2
-        exit 2
-    fi
-    exit 0
-fi

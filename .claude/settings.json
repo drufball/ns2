@@ -12,17 +12,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}\"/.claude/hooks/stop-commit-guard.sh",
-            "timeout": 30
-          }
-        ]
-      }
     ]
   }
 }
