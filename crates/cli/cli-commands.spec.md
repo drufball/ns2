@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/**/*.rs
   - crates/cli/Cargo.toml
-verified: 2026-04-26T16:58:51Z
+verified: 2026-04-26T17:28:05Z
 ---
 
 # CLI Commands Spec
