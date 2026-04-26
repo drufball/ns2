@@ -193,7 +193,7 @@ pub async fn resolve_session_cwd(
     db: &Arc<dyn db::Db>,
     session_id: Uuid,
 ) -> Option<PathBuf> {
-    resolve_session_cwd_with_root(db, session_id, workspace::git_root()).await
+    resolve_session_cwd_with_root(db, session_id, workspace::git_root().await).await
 }
 
 /// Inner implementation that accepts an explicit `git_root` — injectable for tests.
@@ -211,7 +211,7 @@ pub(crate) async fn resolve_session_cwd_with_root(
     let config = workspace::read_ns2_config(&git_root);
     let worktree_path = config.worktree_base.join(&branch);
 
-    workspace::ensure_worktree(&git_root, &worktree_path, &branch)
+    workspace::ensure_worktree(&git_root, &worktree_path, &branch).await
 }
 
 pub struct StubClient;
@@ -467,7 +467,11 @@ pub async fn run(
     }
 
     // Resolve the effective git root (injected in tests; discovered via git in production).
-    let effective_root = config.git_root.clone().or_else(workspace::git_root);
+    let effective_root = if let Some(root) = config.git_root.clone() {
+        Some(root)
+    } else {
+        workspace::git_root().await
+    };
     let agents_dir = effective_root.as_ref().map(|r| r.join(".ns2").join("agents"));
 
     // Pre-compute the system prompt once (it does not change across turns).
@@ -653,14 +657,14 @@ mod tests {
     // ── Worktree tests ────────────────────────────────────────────────────────
 
     /// `ensure_worktree` with an existing directory returns `Some(path)` without running git.
-    #[test]
-    fn ensure_worktree_existing_dir_is_reused() {
+    #[tokio::test]
+    async fn ensure_worktree_existing_dir_is_reused() {
         let tmp = tempfile::TempDir::new().unwrap();
         let worktree_path = tmp.path().join("existing-wt");
         std::fs::create_dir_all(&worktree_path).unwrap();
 
         // git_root doesn't matter because the path already exists
-        let result = workspace::ensure_worktree(tmp.path(), &worktree_path, "my-branch");
+        let result = workspace::ensure_worktree(tmp.path(), &worktree_path, "my-branch").await;
         assert_eq!(result, Some(worktree_path));
     }
 
@@ -778,8 +782,8 @@ mod tests {
 
     /// Integration test: start a session with an issue that has a branch;
     /// verify `ensure_worktree` creates the directory in a real (temp) git repo.
-    #[test]
-    fn ensure_worktree_creates_worktree_in_real_git_repo() {
+    #[tokio::test]
+    async fn ensure_worktree_creates_worktree_in_real_git_repo() {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
@@ -826,7 +830,7 @@ mod tests {
         let branch = "feature/my-feature";
         let worktree_path = wt_base.path().join(branch);
 
-        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch).await;
 
         assert!(
             result.is_some(),
@@ -840,8 +844,8 @@ mod tests {
 
     /// Integration test: calling `ensure_worktree` twice for the same branch/path
     /// (worktree already exists) does not error and returns the path.
-    #[test]
-    fn ensure_worktree_reuse_existing_worktree() {
+    #[tokio::test]
+    async fn ensure_worktree_reuse_existing_worktree() {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
@@ -887,19 +891,19 @@ mod tests {
         let worktree_path = wt_base.path().join(branch);
 
         // First call: creates the worktree
-        let result1 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result1 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(result1.is_some(), "first ensure_worktree should succeed");
         assert!(worktree_path.is_dir(), "worktree dir should exist after first call");
 
         // Second call: directory already exists → reuse without running git commands
-        let result2 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result2 = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(result2.is_some(), "second ensure_worktree should succeed (reuse)");
         assert!(worktree_path.is_dir(), "worktree dir should still exist");
     }
 
     /// Integration test: `ensure_worktree` with an existing local branch (no `-b` needed).
-    #[test]
-    fn ensure_worktree_existing_local_branch_checkout() {
+    #[tokio::test]
+    async fn ensure_worktree_existing_local_branch_checkout() {
         // Create a bare "origin" repo
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
@@ -952,7 +956,7 @@ mod tests {
 
         // `git worktree add -b <branch> origin/main` will fail (branch exists),
         // but the fallback `git worktree add <path> <branch>` should succeed.
-        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch);
+        let result = workspace::ensure_worktree(local_dir.path(), &worktree_path, branch).await;
         assert!(
             result.is_some(),
             "ensure_worktree should succeed for existing local branch via fallback"

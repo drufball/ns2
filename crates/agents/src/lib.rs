@@ -134,7 +134,7 @@ pub struct AgentDef {
 }
 
 pub fn agents_dir() -> Option<std::path::PathBuf> {
-    workspace::git_root().map(|root| root.join(".ns2").join("agents"))
+    workspace::git_root_sync().map(|root| root.join(".ns2").join("agents"))
 }
 
 pub fn parse_agent_content(content: &str) -> Option<AgentDef> {
@@ -546,9 +546,9 @@ mod tests {
 
     #[test]
     fn agents_dir_matches_git_root_join() {
-        let expected = workspace::git_root().map(|r| r.join(".ns2").join("agents"));
+        let expected = workspace::git_root_sync().map(|r| r.join(".ns2").join("agents"));
         let actual = agents_dir();
-        assert_eq!(actual, expected, "agents_dir() must equal git_root().join('.ns2').join('agents')");
+        assert_eq!(actual, expected, "agents_dir() must equal git_root_sync().join('.ns2').join('agents')");
     }
 
     #[test]

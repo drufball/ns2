@@ -7,7 +7,33 @@ pub use worktree::{
     DeleteWorktreeError, WorktreeEntry,
 };
 
-pub fn git_root() -> Option<PathBuf> {
+/// Returns the root of the git repository containing the current working directory,
+/// or `None` if not inside a git repo.
+///
+/// This function is async and uses `tokio::process::Command` to avoid blocking
+/// the Tokio thread pool when called from an async context.
+pub async fn git_root() -> Option<PathBuf> {
+    tokio::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|p| PathBuf::from(p.trim()))
+}
+
+/// Synchronous variant of [`git_root`] for callers that cannot be made async
+/// (e.g. `agents::agents_dir()`, CLI startup code, specs discovery).
+///
+/// Prefer [`git_root`] in async contexts.  This function blocks the calling
+/// thread and must not be called from inside a Tokio worker thread.
+pub fn git_root_sync() -> Option<PathBuf> {
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
