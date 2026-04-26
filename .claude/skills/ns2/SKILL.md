@@ -146,8 +146,8 @@ If you need to check many issues at once, look at status first, then tail only f
 ns2 issue list --status running
 ns2 issue list --status failed
 
-# Only tail a specific failing session
-timeout 10 ns2 session tail --id "$SESSION" --turns 3
+# Only tail a specific failing session (background+kill for macOS)
+ns2 session tail --id "$SESSION" --turns 3 & sleep 10; kill %1 2>/dev/null; wait %1 2>/dev/null
 ```
 
 ## Reopening Failed Issues
@@ -174,11 +174,27 @@ If you see the agent going wrong during a tail check:
 ns2 session send --id "$SESSION" --message "Stop — you're modifying the wrong file. The fix belongs in crates/harness/src/lib.rs, not workspace. Start over on that approach."
 ```
 
+## The Stop Hook Will Commit Your Uncommitted Changes
+
+The ns2 stop hook runs when a session ends. If it finds uncommitted changes in the MAIN working directory (your branch, not the agent worktree), it will commit them automatically. This is by design — it prevents the agent from stopping with dirty state.
+
+**Implication:** If you have staged-but-uncommitted work on your branch when a swe agent's session ends, the stop hook will commit it with a generated message. This is usually fine, but be aware that the hook might commit partial work if you haven't finished staging everything.
+
+## Spec Sync Blocks Commits on All Stale Specs
+
+`ns2 spec sync` (which runs before every commit) fails if ANY error-severity spec is stale — even specs you didn't touch. Pre-existing stale specs from prior PRs will block your commits.
+
+**Workarounds:**
+- Verify specs that you've reviewed and confirmed are still accurate: `ns2 spec verify <path>`
+- For specs known to be drifted (e.g. agent-harness.spec.md per GH #22), lower their severity to `warning` in the frontmatter — this marks them as known-aspirational without falsely claiming they're verified
+- This is a known workflow friction point that needs rethinking at the project level
+
 ## Common Help Text Gaps (ns2 UX notes)
 
 Things the current help text doesn't make obvious:
-- `ns2 issue start` prints the session UUID to stdout — capture it with `| grep Session: | awk '{print $NF}'`
+- `ns2 issue start` prints the session UUID to **stderr** — capture with `2>&1 | awk '/Session:/{print $NF}'`
 - `session tail --turns 0` skips all history and shows only new events (useful for watching without replaying)
 - `ns2 worktree list` shows the full path for each worktree — use this to find where an issue's code lives
 - `ns2 issue wait` exits immediately if all issues are already in terminal state — safe to call unconditionally
 - The server must be rebuilt (`cargo build --release`) when code changes; just restarting an old binary picks up no changes
+- `timeout` is not available on macOS by default — use background + kill pattern instead
