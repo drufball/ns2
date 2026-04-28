@@ -156,6 +156,16 @@ fn server_does_not_depend_on_tui_or_cli() {
     }
 }
 
+/// `cli` is a command router and wiring layer — must not directly depend on `anthropic`, `harness`, or `tools`.
+/// Initialization of the anthropic client and standard tools is the server's responsibility.
+#[test]
+fn cli_does_not_own_initialization() {
+    let graph = build_dep_graph();
+    for forbidden in &["anthropic", "harness", "tools"] {
+        assert_no_direct_dep(&graph, "cli", forbidden);
+    }
+}
+
 /// `workspace` is a pure git operations crate — must not depend on db, anthropic, harness, server, tui, or cli.
 #[test]
 fn workspace_has_no_application_deps() {

@@ -49,8 +49,6 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub pid_file: PathBuf,
-    pub client: Arc<dyn anthropic::AnthropicClient>,
-    pub tools: Vec<Arc<dyn tools::Tool>>,
     pub model: String,
 }
 
@@ -872,6 +870,20 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let pid = std::process::id();
     std::fs::write(&config.pid_file, format!("{pid}\n"))?;
 
+    let client: Arc<dyn anthropic::AnthropicClient> = match std::env::var("ANTHROPIC_API_KEY").ok() {
+        Some(key) => Arc::new(anthropic::Client::new(key)),
+        None => {
+            eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
+            Arc::new(harness::StubClient)
+        }
+    };
+    let tools: Vec<Arc<dyn tools::Tool>> = vec![
+        Arc::new(tools::ReadTool { cwd: None }),
+        Arc::new(tools::BashTool { cwd: None }),
+        Arc::new(tools::WriteTool { cwd: None }),
+        Arc::new(tools::EditTool { cwd: None }),
+    ];
+
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let db = SqliteDb::connect(&db_url).await?;
@@ -880,8 +892,8 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-        client: config.client,
-        tools: config.tools,
+        client,
+        tools,
         model: config.model,
     };
 
