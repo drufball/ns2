@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
 use types::{Issue, Session};
 use uuid::Uuid;
 
@@ -738,23 +737,6 @@ async fn main() {
                     port,
                     data_dir,
                     pid_file,
-                    client: {
-                        let key = std::env::var("ANTHROPIC_API_KEY").ok();
-                        let c: Arc<dyn anthropic::AnthropicClient> = match key {
-                            Some(k) => Arc::new(anthropic::Client::new(k)),
-                            None => {
-                                eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
-                                Arc::new(harness::StubClient)
-                            }
-                        };
-                        c
-                    },
-                    tools: vec![
-                        Arc::new(tools::ReadTool { cwd: None }),
-                        Arc::new(tools::BashTool { cwd: None }),
-                        Arc::new(tools::WriteTool { cwd: None }),
-                        Arc::new(tools::EditTool { cwd: None }),
-                    ],
                     model: std::env::var("ANTHROPIC_MODEL")
                         .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
                 };

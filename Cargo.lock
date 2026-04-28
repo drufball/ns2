@@ -392,11 +392,9 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "agents",
- "anthropic",
  "chrono",
  "clap",
  "futures",
- "harness",
  "reqwest",
  "serde",
  "serde_json",
@@ -405,7 +403,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tools",
  "types",
  "uuid",
  "workspace",
