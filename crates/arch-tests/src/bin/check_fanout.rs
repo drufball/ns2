@@ -13,7 +13,7 @@
 //!   3. `mod <module_name>;` declarations in other files
 //!   4. Cargo.toml [dependencies] entries (crate-level only)
 //!
-//! Score = (fanin + fanout) * churn. Default threshold 300.
+//! Score = (fanin + fanout) * churn. Churn = commits in last 90 days. Default threshold 300.
 
 use regex::Regex;
 use std::{
@@ -341,7 +341,7 @@ fn git_churn(path: &Path, root: &Path) -> usize {
         Err(_) => return 0,
     };
     let output = Command::new("git")
-        .args(["log", "--oneline", "--", &rel.to_string_lossy()])
+        .args(["log", "--since=90 days ago", "--oneline", "--", &rel.to_string_lossy()])
         .current_dir(root)
         .output();
     match output {
@@ -529,8 +529,8 @@ fn main() {
     let sep = "=".repeat(110);
     println!("{}", sep);
     println!(
-        "{:<55} {:>6} {:>5} {:>5} {:>6} {:>13}",
-        "File", "Lines", "FOut", "FIn", "Churn", "V2(fi+fo)*ch"
+        "{:<55} {:>6} {:>5} {:>5} {:>7} {:>13}",
+        "File", "Lines", "FOut", "FIn", "Churn90", "V2(fi+fo)*ch"
     );
     println!("{}", sep);
 
@@ -539,7 +539,7 @@ fn main() {
     for r in &results {
         let flag = if r.score_v2 >= threshold { " <-- RISK" } else { "" };
         println!(
-            "{:<55} {:>6} {:>5} {:>5} {:>6} {:>13.1}{}",
+            "{:<55} {:>6} {:>5} {:>5} {:>7} {:>13.1}{}",
             r.path, r.lines, r.fanout, r.fanin, r.churn, r.score_v2, flag
         );
         if r.score_v2 >= threshold {
