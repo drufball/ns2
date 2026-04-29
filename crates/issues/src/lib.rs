@@ -3,6 +3,49 @@ use chrono::Utc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
 
+pub fn slugify(title: &str) -> String {
+    let lower = title.to_lowercase();
+    let mut result = String::new();
+    let mut in_sep = false;
+    for ch in lower.chars() {
+        if ch.is_alphanumeric() {
+            result.push(ch);
+            in_sep = false;
+        } else if !in_sep {
+            result.push('-');
+            in_sep = true;
+        }
+    }
+    result.trim_matches('-').to_string()
+}
+
+pub fn generate_issue_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    (0..4)
+        .map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+pub struct CreateIssueInput {
+    pub title: String,
+    pub body: String,
+    pub assignee: Option<String>,
+    pub parent_id: Option<String>,
+    pub blocked_on: Vec<String>,
+    pub branch: Option<String>,
+}
+
+pub struct EditIssueInput {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub assignee: Option<Option<String>>,
+    pub parent_id: Option<Option<String>>,
+    pub blocked_on: Option<Vec<String>>,
+    pub branch: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("db error: {0}")]
@@ -31,6 +74,105 @@ impl IssueService {
 
     pub fn db(&self) -> &Arc<dyn db::Db> {
         &self.db
+    }
+
+    pub async fn create_issue(&self, input: CreateIssueInput) -> Result<Issue> {
+        let now = Utc::now();
+        let id = generate_issue_id();
+        let branch = if let Some(b) = input.branch {
+            b
+        } else if let Some(ref parent_id) = input.parent_id {
+            match self.db.get_issue(parent_id.clone()).await {
+                Ok(parent) => parent.branch,
+                Err(_) => format!("{}-{}", id, slugify(&input.title)),
+            }
+        } else {
+            format!("{}-{}", id, slugify(&input.title))
+        };
+        let issue = Issue {
+            id,
+            title: input.title,
+            body: input.body,
+            status: IssueStatus::Open,
+            branch,
+            assignee: input.assignee,
+            session_id: None,
+            parent_id: input.parent_id,
+            blocked_on: input.blocked_on,
+            comments: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.create_issue(&issue).await?;
+        Ok(issue)
+    }
+
+    pub async fn edit_issue(&self, id: String, input: EditIssueInput) -> Result<Issue> {
+        let mut issue = self.db.get_issue(id).await?;
+        if let Some(title) = input.title {
+            issue.title = title;
+        }
+        if let Some(body) = input.body {
+            issue.body = body;
+        }
+        if let Some(assignee_opt) = input.assignee {
+            issue.assignee = assignee_opt;
+        }
+        if let Some(parent_opt) = input.parent_id {
+            issue.parent_id = parent_opt;
+        }
+        if let Some(blocked_on) = input.blocked_on {
+            issue.blocked_on = blocked_on;
+        }
+        if let Some(branch) = input.branch {
+            issue.branch = branch;
+        }
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        Ok(issue)
+    }
+
+    pub async fn add_comment(&self, id: String, author: String, body: String) -> Result<Issue> {
+        let mut issue = self.db.get_issue(id).await?;
+        issue.comments.push(IssueComment {
+            author,
+            created_at: Utc::now(),
+            body,
+        });
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        Ok(issue)
+    }
+
+    pub async fn finish_issue(&self, id: &str, summary: Option<String>) -> Result<()> {
+        let mut issue = self.db.get_issue(id.to_string()).await?;
+        if let Some(text) = summary {
+            if !text.is_empty() {
+                let author = issue.assignee.clone().unwrap_or_else(|| "agent".to_string());
+                issue.comments.push(IssueComment {
+                    author,
+                    created_at: Utc::now(),
+                    body: text,
+                });
+            }
+        }
+        issue.status = IssueStatus::Completed;
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        Ok(())
+    }
+
+    pub async fn fail_issue(&self, id: &str, error_message: String) -> Result<()> {
+        let mut issue = self.db.get_issue(id.to_string()).await?;
+        issue.comments.push(IssueComment {
+            author: "system".to_string(),
+            created_at: Utc::now(),
+            body: error_message,
+        });
+        issue.status = IssueStatus::Failed;
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        Ok(())
     }
 
     pub async fn start_issue(&self, id: String) -> Result<StartIssueOutcome> {
@@ -563,5 +705,256 @@ mod tests {
         assert_eq!(fetched_issue.comments.len(), 1);
         assert_eq!(fetched_issue.comments[0].author, "system");
         assert_eq!(fetched_issue.comments[0].body, "session lost on server restart");
+    }
+
+    // --- create_issue ---
+
+    #[tokio::test]
+    async fn create_issue_returns_open_issue_with_generated_id() {
+        let db = Arc::new(MemoryDb::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let issue = svc.create_issue(CreateIssueInput {
+            title: "Fix the bug".into(),
+            body: "Details".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: None,
+        }).await.unwrap();
+
+        assert_eq!(issue.status, IssueStatus::Open);
+        assert_eq!(issue.id.len(), 4);
+        assert!(issue.branch.contains("fix-the-bug"));
+
+        let persisted = db.get_issue(issue.id.clone()).await.unwrap();
+        assert_eq!(persisted.title, "Fix the bug");
+    }
+
+    #[tokio::test]
+    async fn create_issue_uses_explicit_branch() {
+        let db = Arc::new(MemoryDb::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let issue = svc.create_issue(CreateIssueInput {
+            title: "My task".into(),
+            body: "B".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: Some("my-explicit-branch".into()),
+        }).await.unwrap();
+
+        assert_eq!(issue.branch, "my-explicit-branch");
+    }
+
+    #[tokio::test]
+    async fn create_issue_inherits_parent_branch() {
+        let db = Arc::new(MemoryDb::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let parent = svc.create_issue(CreateIssueInput {
+            title: "Parent".into(),
+            body: "B".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: Some("parent-branch".into()),
+        }).await.unwrap();
+
+        let child = svc.create_issue(CreateIssueInput {
+            title: "Child".into(),
+            body: "B".into(),
+            assignee: None,
+            parent_id: Some(parent.id.clone()),
+            blocked_on: vec![],
+            branch: None,
+        }).await.unwrap();
+
+        assert_eq!(child.branch, "parent-branch");
+    }
+
+    // --- edit_issue ---
+
+    #[tokio::test]
+    async fn edit_issue_updates_fields() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
+            title: Some("New title".into()),
+            body: None,
+            assignee: None,
+            parent_id: None,
+            blocked_on: None,
+            branch: None,
+        }).await.unwrap();
+
+        assert_eq!(updated.title, "New title");
+        assert_eq!(updated.body, "Test body");
+    }
+
+    #[tokio::test]
+    async fn edit_issue_clears_parent_with_explicit_none() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.parent_id = Some("parent1".into());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
+            title: None,
+            body: None,
+            assignee: None,
+            parent_id: Some(None),
+            blocked_on: None,
+            branch: None,
+        }).await.unwrap();
+
+        assert!(updated.parent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_issue_absent_field_leaves_unchanged() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.parent_id = Some("parent1".into());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
+            title: Some("Renamed".into()),
+            body: None,
+            assignee: None,
+            parent_id: None,
+            blocked_on: None,
+            branch: None,
+        }).await.unwrap();
+
+        assert_eq!(updated.parent_id, Some("parent1".into()));
+    }
+
+    // --- add_comment ---
+
+    #[tokio::test]
+    async fn add_comment_appends_to_issue() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let updated = svc.add_comment("ab12".into(), "user".into(), "Great issue".into()).await.unwrap();
+
+        assert_eq!(updated.comments.len(), 1);
+        assert_eq!(updated.comments[0].author, "user");
+        assert_eq!(updated.comments[0].body, "Great issue");
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.comments.len(), 1);
+    }
+
+    // --- finish_issue ---
+
+    #[tokio::test]
+    async fn finish_issue_marks_completed_with_summary_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.assignee = Some("swe".into());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.finish_issue("ab12", Some("Done! All tests pass.".into())).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Completed);
+        assert_eq!(persisted.comments.len(), 1);
+        assert_eq!(persisted.comments[0].author, "swe");
+        assert_eq!(persisted.comments[0].body, "Done! All tests pass.");
+    }
+
+    #[tokio::test]
+    async fn finish_issue_no_summary_adds_no_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.finish_issue("ab12", None).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Completed);
+        assert_eq!(persisted.comments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn finish_issue_empty_summary_adds_no_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.finish_issue("ab12", Some(String::new())).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Completed);
+        assert_eq!(persisted.comments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn finish_issue_uses_agent_author_when_no_assignee() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.assignee = None;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.finish_issue("ab12", Some("summary".into())).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.comments[0].author, "agent");
+    }
+
+    // --- fail_issue ---
+
+    #[tokio::test]
+    async fn fail_issue_marks_failed_with_system_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.fail_issue("ab12", "timeout exceeded".into()).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Failed);
+        assert_eq!(persisted.comments.len(), 1);
+        assert_eq!(persisted.comments[0].author, "system");
+        assert_eq!(persisted.comments[0].body, "timeout exceeded");
+    }
+
+    // --- slugify ---
+
+    #[test]
+    fn slugify_simple_title() {
+        assert_eq!(slugify("Fix the bug"), "fix-the-bug");
+    }
+
+    #[test]
+    fn slugify_consecutive_specials_collapsed() {
+        assert_eq!(slugify("foo--bar"), "foo-bar");
+        assert_eq!(slugify("foo  bar"), "foo-bar");
+    }
+
+    #[test]
+    fn slugify_trims_leading_trailing_dashes() {
+        assert_eq!(slugify("  leading"), "leading");
+        assert_eq!(slugify("trailing  "), "trailing");
     }
 }
