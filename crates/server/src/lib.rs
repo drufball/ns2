@@ -4,6 +4,7 @@ use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
 mod state;
+mod harness_spawn;
 mod routes;
 
 pub use routes::{Error, Result};

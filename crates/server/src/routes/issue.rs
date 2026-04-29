@@ -6,7 +6,8 @@ use axum::{
 use serde::{Deserialize, Deserializer};
 use types::{Issue, IssueStatus};
 
-use crate::state::{spawn_harness_sync, AppState};
+use crate::harness_spawn::spawn_harness_sync;
+use crate::state::AppState;
 use super::Error;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
