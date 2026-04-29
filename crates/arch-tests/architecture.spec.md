@@ -2,39 +2,73 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-26T17:28:05Z
+verified: 2026-04-28T00:00:00Z
 ---
 
 # Architecture Spec
 
-## Overview
+## Design Principles
 
-The workspace is a flat set of crates, each owning one layer of the system. Dependencies are a directed, acyclic graph. Any crate should be able to be understood, tested, and replaced without reading the others.
+Flat set of crates, each owning one layer. Dependencies are a directed acyclic graph — any crate can be understood, tested, and replaced without reading the others.
 
-**Deep modules:** each crate exposes a narrow, well-defined public interface and hides its implementation complexity.
+**Do not add dependencies to a crate's `Cargo.toml` to work around an architectural boundary.** Adding a dep to the wrong crate is a violation, not a shortcut.
 
-**Do not add dependencies to a crate's `Cargo.toml` to work around an architectural boundary.** Adding a dependency to the wrong crate is an architectural violation, not a pragmatic shortcut. When in doubt, request input on how to proceed.
+When adding a substantial new unit of responsibilities or business logic, consider whether a new crate should be created instead of adding it to an existing one.
+
+## Dependency Graph
+
+```mermaid
+graph TD
+    types
+    workspace
+
+    db --> types
+    anthropic --> types
+    tools --> types
+    agents --> workspace
+    specs --> workspace
+
+    harness --> db & anthropic & tools & agents & workspace
+
+    issues --> db
+
+    server --> issues & db & anthropic & tools & harness
+
+    tui --> types
+    cli --> agents & specs & workspace
+```
+
+Arrows point from dependent to dependency.
 
 ## Crates
 
-**`types`** — shared domain types with no dependencies: `Session`, `Turn`, `ContentBlock`, `SessionStatus`, SSE event envelopes, tool input/output shapes. Everything else depends on this; it depends on nothing.
+**`types`** — shared domain types: `Session`, `Turn`, `ContentBlock`, `Issue`, SSE events, tool shapes. No behavior.
 
-**`db`** — all SQLite access via sqlx. Owns the schema, migrations, and every query. Nothing outside this crate writes SQL. Exposes an async repository interface that the rest of the system talks to.
+**`db`** — SQLite access via sqlx. Owns schema, migrations, and every query.
+_Doesn't own: SQL written anywhere else._
 
-**`anthropic`** — HTTP client for the Anthropic Messages API. Owns streaming SSE parsing, assembles raw deltas into complete `ContentBlock`s, and surfaces a clean async interface. All knowledge of the wire format lives here.
+**`anthropic`** — HTTP client for the Anthropic Messages API. Streaming SSE parsing, request/response types.
 
-**`tools`** — defines the `Tool` trait and implements the standard tools: `bash`, `read`, `write`, `edit`. Each tool is self-contained. The harness depends on this crate; tools have no knowledge of sessions or turns.
+**`tools`** — `Tool` trait plus `bash`, `read`, `write`, `edit` implementations.
+_Doesn't own: session or turn state._
 
-**`workspace`** — git worktree management. Creates a worktree for a branch on demand; worktrees persist until explicitly removed via CLI (typically after merge). Purely a git operations crate — no knowledge of sessions. Also exposes `git_root()` — a utility that returns the repository root, used by `cli` for locating config files and data directories. All git interactions belong here.
+**`workspace`** — git worktree management and `git_root()` discovery.
 
-**`agents`** — agent definition files. Reads and writes `.ns2/agents/*.md` files, which define agent types via YAML frontmatter (`name`, `description`) and a system prompt body. Exposes a pure in-memory `AgentDef` type, parsing/formatting helpers, and directory-based list/load/write operations. Depends only on `workspace` for `git_root()` discovery. No knowledge of sessions, turns, or HTTP.
+**`agents`** — reads/writes `.ns2/agents/*.md` agent definition files.
 
-**`specs`** — spec file management. Reads and writes `.spec.md` files anywhere in the repo, which declare which source files a spec governs via YAML frontmatter (`targets`: glob patterns, `verified`: UTC timestamp). Exposes a pure in-memory `SpecDef` type, parsing/formatting helpers, recursive discovery (`list_specs`), and staleness checking (`stale_files`). Depends only on `workspace` for `git_root()` discovery. No knowledge of sessions, turns, or HTTP.
+**`specs`** — reads/writes `.spec.md` files; staleness checking.
 
-**`harness`** — the agent turn loop. Depends on `anthropic`, `tools`, `db`, `agents`, and `workspace`. Owns context window construction, system prompt loading (reads the agent definition for `session.agent` via the `agents` crate), tool dispatch, and worktree resolution (looks up the issue branch via `db`, then calls `workspace::ensure_worktree` to set the session cwd). Emits events to a tokio broadcast channel — it has no knowledge of HTTP or subscribers. One instance runs per active session as a tokio task.
+**`harness`** — agent turn loop. Context window construction, system prompt loading, tool dispatch, worktree resolution. Emits events to a broadcast channel; one instance per active session.
+_Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP._
 
-**`server`** — axum HTTP server. Exposes routes for session management, issue management, SSE streaming, and worktree management: creating session records, listing sessions, queuing user messages; creating, listing, editing, and completing issues; linking issues to agent sessions via `issue start`; listing, creating, and deleting git worktrees via `ns2 worktree`. Multiple sessions may run concurrently on the same branch — worktree isolation replaces the old single-session-per-branch guard. Owns its own initialization: reads `ANTHROPIC_API_KEY` from the environment, constructs the `anthropic::Client`, and instantiates the standard tools (`ReadTool`, `BashTool`, `WriteTool`, `EditTool`). `ServerConfig` covers only transport-level concerns (port, db path, model). Spawns harness tasks for new sessions but doesn't reach into the turn loop — the harness runs independently once started. Subscribes to harness broadcast channels and fans events out to SSE clients.
+**`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/cancelled), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Exposes `IssueService` and `StartIssueOutcome`.
+_Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
+**Dependencies:** `types`, `db`.
 
-**`tui`** — ratatui terminal UI. Connects to the server via SSE and renders sessions. Thin client: all state comes from the server, nothing is computed locally.
+**`server`** — axum HTTP server. Routes, SSE fan-out, `ServerConfig`, session maps, harness spawning. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
+_Doesn't own: issue business logic — delegate to `issues`._
 
-**`cli`** — the `ns2` binary. Depends on `workspace` for git root discovery, `agents` for agent management commands, and `specs` for spec file commands. Must not directly depend on `anthropic`, `harness`, or `tools` — initialization of the Anthropic client and standard tools is the server's responsibility. On launch, checks if a server is already running (via a PID file or a probe to localhost). If not, starts one in the background. Then launches the TUI connected to the orchestrator session. Wires crates together; contains no logic of its own.
+**`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
+
+**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own.
+_Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._

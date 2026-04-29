@@ -346,3 +346,19 @@ impl AnthropicClient for Client {
         Ok(assembler.finish())
     }
 }
+
+/// A no-op [`AnthropicClient`] that returns a fixed stub response.
+/// Used when `ANTHROPIC_API_KEY` is not set.
+pub struct StubClient;
+
+#[async_trait::async_trait]
+impl AnthropicClient for StubClient {
+    async fn complete(&self, _request: MessageRequest) -> Result<MessageResponse> {
+        Ok(MessageResponse {
+            content: vec![types::ContentBlock::Text { text: "stub".into() }],
+            stop_reason: "end_turn".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+        })
+    }
+}

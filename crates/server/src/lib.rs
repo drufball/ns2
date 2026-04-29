@@ -32,6 +32,15 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<issues::Error> for Error {
+    fn from(e: issues::Error) -> Self {
+        match e {
+            issues::Error::Db(db_err) => Error::Db(db_err),
+            issues::Error::BadRequest(msg) => Error::BadRequest(msg),
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
@@ -55,9 +64,9 @@ pub struct ServerConfig {
 #[derive(Clone)]
 struct AppState {
     db: Arc<dyn db::Db>,
+    issue_service: issues::IssueService,
     sessions: Arc<tokio::sync::Mutex<HashMap<Uuid, tokio::sync::broadcast::Sender<SessionEvent>>>>,
     msg_senders: Arc<tokio::sync::Mutex<HashMap<Uuid, tokio::sync::mpsc::Sender<String>>>>,
-    /// Tracks session IDs for which a harness spawn is in flight (not yet inserted into msg_senders).
     spawning: Arc<tokio::sync::Mutex<HashSet<Uuid>>>,
     client: Arc<dyn anthropic::AnthropicClient>,
     tools: Vec<Arc<dyn tools::Tool>>,
@@ -95,42 +104,6 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-async fn create_session(
-    State(state): State<AppState>,
-    Json(req): Json<CreateSessionRequest>,
-) -> std::result::Result<(StatusCode, Json<Session>), Error> {
-    let now = Utc::now();
-    let has_message = req
-        .initial_message
-        .as_deref()
-        .map(|m| !m.is_empty())
-        .unwrap_or(false);
-
-    let initial_message = req.initial_message.unwrap_or_default();
-
-    let session = Session {
-        id: Uuid::new_v4(),
-        name: req.name.unwrap_or_else(|| "unnamed".to_string()),
-        status: SessionStatus::Created,
-        agent: req.agent,
-        created_at: now,
-        updated_at: now,
-    };
-    state.db.create_session(&session).await?;
-
-    if has_message {
-        let msg_tx = spawn_harness_sync(&state, session.clone(), None);
-        msg_tx.send(initial_message).await.ok();
-    }
-
-    Ok((StatusCode::CREATED, Json(session)))
-}
-
-/// Spawn a harness task for the given session.
-///
-/// Inserts both the broadcast sender AND the msg sender into their maps atomically
-/// (under a single combined lock acquisition) *before* returning. This prevents a
-/// second concurrent call from racing to spawn a second harness for the same session.
 fn spawn_harness_sync(
     state: &AppState,
     session: Session,
@@ -159,13 +132,9 @@ fn spawn_harness_sync(
 
     let session_id = session_clone.id;
 
-    // If this session is linked to an issue, subscribe to the event channel now so we can
-    // watch for SessionDone and SessionError events and propagate them to the issue status.
-    // The harness is designed to stay alive waiting for more messages, so we cannot rely on
-    // harness::run returning — instead we react to individual turn completions.
     let issue_watcher = issue_id.map(|id| {
         let mut rx = tx.subscribe();
-        let db_watch = Arc::clone(&state.db);
+        let db_watch = Arc::clone(&db);
         tokio::spawn(async move {
             let mut current_turn_text = String::new();
             let mut last_turn_text = String::new();
@@ -183,7 +152,6 @@ fn spawn_harness_sync(
                     }
                     SessionEvent::SessionDone { .. } => {
                         if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
-                            // Post agent's final turn as comment before marking completed
                             if !last_turn_text.is_empty() {
                                 let author = issue.assignee.clone()
                                     .unwrap_or_else(|| "agent".to_string());
@@ -219,7 +187,6 @@ fn spawn_harness_sync(
     });
 
     tokio::spawn(async move {
-        // Insert into maps atomically before yielding back to callers.
         {
             let mut smap = msg_senders_map.lock().await;
             let mut map = sessions_map.lock().await;
@@ -237,7 +204,6 @@ fn spawn_harness_sync(
             let _ = db_clone.update_session_status(session_id, SessionStatus::Failed).await;
         }
 
-        // Remove from maps when harness exits (msg_rx closed → all senders dropped)
         {
             let mut map = sessions_map.lock().await;
             map.remove(&session_id);
@@ -247,16 +213,43 @@ fn spawn_harness_sync(
             smap.remove(&session_id);
         }
 
-        // Note: we do NOT abort the watcher here because it may still be processing
-        // the final SessionDone or Error event from the broadcast channel. The watcher
-        // exits naturally once it handles a terminal event (its while-loop breaks on
-        // SessionDone and Error), or when the broadcast channel closes (all tx senders
-        // are dropped after this task ends), causing rx.recv() to return Err.
         drop(issue_watcher);
     });
 
     msg_tx_ret
 }
+
+async fn create_session(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSessionRequest>,
+) -> std::result::Result<(StatusCode, Json<Session>), Error> {
+    let now = Utc::now();
+    let has_message = req
+        .initial_message
+        .as_deref()
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+
+    let initial_message = req.initial_message.unwrap_or_default();
+
+    let session = Session {
+        id: Uuid::new_v4(),
+        name: req.name.unwrap_or_else(|| "unnamed".to_string()),
+        status: SessionStatus::Created,
+        agent: req.agent,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.create_session(&session).await?;
+
+    if has_message {
+        let msg_tx = spawn_harness_sync(&state, session.clone(), None);
+        msg_tx.send(initial_message).await.ok();
+    }
+
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
 
 async fn list_sessions(
     State(state): State<AppState>,
@@ -468,59 +461,6 @@ async fn update_session_status(
     Ok(Json(session))
 }
 
-/// Orphan sweep: run at startup before accepting any connections.
-///
-/// Finds all sessions stuck in `running` state (no live harness after restart),
-/// marks them `failed`, and for any linked issue does the same while appending a
-/// system comment so the issue history is self-explanatory.
-///
-/// Errors are logged and swallowed — a sweep failure must not crash the server.
-pub(crate) async fn orphan_sweep(db: &Arc<dyn db::Db>) {
-    let orphans = match db.list_sessions(Some(SessionStatus::Running)).await {
-        Ok(sessions) => sessions,
-        Err(e) => {
-            eprintln!("[orphan_sweep] failed to list running sessions: {e}");
-            return;
-        }
-    };
-
-    for session in orphans {
-        // 1. Mark the session failed.
-        if let Err(e) = db.update_session_status(session.id, SessionStatus::Failed).await {
-            eprintln!("[orphan_sweep] failed to update session {} to failed: {e}", session.id);
-            // Continue — try the rest.
-        }
-
-        // 2. Find any issue linked to this session and recover it too.
-        let issues = match db.list_issues_by_session_id(session.id).await {
-            Ok(issues) => issues,
-            Err(e) => {
-                eprintln!(
-                    "[orphan_sweep] failed to list issues for session {}: {e}",
-                    session.id
-                );
-                continue;
-            }
-        };
-
-        for mut issue in issues {
-            issue.comments.push(IssueComment {
-                author: "system".into(),
-                body: "session lost on server restart".into(),
-                created_at: Utc::now(),
-            });
-            issue.status = types::IssueStatus::Failed;
-            issue.updated_at = Utc::now();
-
-            if let Err(e) = db.update_issue(&issue).await {
-                eprintln!(
-                    "[orphan_sweep] failed to update issue {} to failed: {e}",
-                    issue.id
-                );
-            }
-        }
-    }
-}
 
 fn generate_issue_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -719,49 +659,10 @@ async fn start_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let mut issue = state.db.get_issue(id.clone()).await?;
-
-    if issue.assignee.is_none() {
-        return Err(Error::BadRequest("issue has no assignee; set one with `issue edit --assignee <agent>`".into()));
-    }
-    if issue.status != IssueStatus::Open {
-        return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
-    }
-
-    let now = Utc::now();
-    let session = Session {
-        id: Uuid::new_v4(),
-        name: format!("issue-{}", issue.id),
-        status: SessionStatus::Created,
-        agent: issue.assignee.clone(),
-        created_at: now,
-        updated_at: now,
-    };
-    state.db.create_session(&session).await?;
-
-    // Update issue to Running before spawning the harness so the DB write cannot
-    // race with the harness auto-completing the issue on a fast (stub) client.
-    issue.session_id = Some(session.id);
-    issue.status = IssueStatus::Running;
-    issue.updated_at = Utc::now();
-    state.db.update_issue(&issue).await?;
-
-    let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
-    if !issue.comments.is_empty() {
-        initial_message.push_str("\n\n---\n# Issue History\n");
-        for comment in &issue.comments {
-            initial_message.push_str(&format!(
-                "\n**{}** ({}): {}\n",
-                comment.author,
-                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
-                comment.body
-            ));
-        }
-    }
-    let msg_tx = spawn_harness_sync(&state, session.clone(), Some(issue.id.clone()));
-    msg_tx.send(initial_message).await.ok();
-
-    Ok(Json(issue))
+    let outcome = state.issue_service.start_issue(id).await?;
+    let msg_tx = spawn_harness_sync(&state, outcome.session, Some(outcome.issue.id.clone()));
+    msg_tx.send(outcome.initial_message).await.ok();
+    Ok(Json(outcome.issue))
 }
 
 async fn complete_issue(
@@ -769,18 +670,7 @@ async fn complete_issue(
     Path(id): Path<String>,
     Json(req): Json<CompleteIssueRequest>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let mut issue = state.db.get_issue(id.clone()).await?;
-    if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
-        return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
-    }
-    issue.comments.push(IssueComment {
-        author: "user".into(),
-        created_at: Utc::now(),
-        body: req.comment,
-    });
-    issue.status = IssueStatus::Completed;
-    issue.updated_at = Utc::now();
-    state.db.update_issue(&issue).await?;
+    let issue = state.issue_service.complete_issue(id, req.comment).await?;
     Ok(Json(issue))
 }
 
@@ -789,39 +679,8 @@ async fn reopen_issue(
     Path(id): Path<String>,
     body: Option<Json<ReopenIssueRequest>>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let mut issue = state.db.get_issue(id.clone()).await?;
-
-    // Only `failed` and `completed` can be reopened
-    let keep_session_id = match issue.status {
-        IssueStatus::Failed => false,   // clear session_id → fresh session on next start
-        IssueStatus::Completed => true, // keep session_id → resume history on next start
-        _ => {
-            return Err(Error::BadRequest(format!(
-                "cannot reopen issue {id}: only failed or completed issues can be reopened (current status: {})",
-                issue.status
-            )));
-        }
-    };
-
-    // Optionally append a user comment before the status transition
-    if let Some(Json(req)) = body {
-        if let Some(comment_text) = req.comment {
-            if !comment_text.is_empty() {
-                issue.comments.push(IssueComment {
-                    author: "user".into(),
-                    created_at: Utc::now(),
-                    body: comment_text,
-                });
-            }
-        }
-    }
-
-    issue.status = IssueStatus::Open;
-    if !keep_session_id {
-        issue.session_id = None;
-    }
-    issue.updated_at = Utc::now();
-    state.db.update_issue(&issue).await?;
+    let comment = body.and_then(|Json(req)| req.comment);
+    let issue = state.issue_service.reopen_issue(id, comment).await?;
     Ok(Json(issue))
 }
 
@@ -874,7 +733,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         Some(key) => Arc::new(anthropic::Client::new(key)),
         None => {
             eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
-            Arc::new(harness::StubClient)
+            Arc::new(anthropic::StubClient)
         }
     };
     let tools: Vec<Arc<dyn tools::Tool>> = vec![
@@ -887,8 +746,11 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let db = SqliteDb::connect(&db_url).await?;
+    let db: Arc<dyn db::Db> = Arc::new(db);
+    let issue_service = issues::IssueService::new(Arc::clone(&db));
     let state = AppState {
-        db: Arc::new(db) as Arc<dyn db::Db>,
+        db,
+        issue_service,
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
@@ -898,7 +760,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     };
 
     // Recover orphaned sessions before accepting any connections.
-    orphan_sweep(&state.db).await;
+    state.issue_service.orphan_sweep().await;
 
     let app = build_router(state);
 
@@ -960,33 +822,29 @@ mod tests {
         }
     }
 
-    async fn test_app() -> Router {
+    async fn test_state() -> AppState {
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
-        let state = AppState {
+        let issue_service = issues::IssueService::new(Arc::clone(&db));
+        AppState {
             db,
+            issue_service,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
-        };
+        }
+    }
+
+    async fn test_app() -> Router {
+        let state = test_state().await;
         build_router(state)
     }
 
     async fn test_app_with_state() -> (Router, AppState) {
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
-        let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
-        let state = AppState {
-            db,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            client,
-            tools: vec![],
-            model: "claude-opus-4-5".into(),
-        };
+        let state = test_state().await;
         let app = build_router(state.clone());
         (app, state)
     }
@@ -2616,21 +2474,6 @@ mod tests {
 
     // ─── Orphan sweep tests ───────────────────────────────────────────────────
 
-    /// Helper: build an AppState with a fresh in-memory DB (no router).
-    async fn test_state() -> AppState {
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
-        let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
-        AppState {
-            db,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            client,
-            tools: vec![],
-            model: "claude-opus-4-5".into(),
-        }
-    }
-
     /// A `running` session is swept to `failed` by `orphan_sweep`.
     #[tokio::test]
     async fn test_orphan_sweep_marks_running_session_failed() {
@@ -2646,7 +2489,7 @@ mod tests {
         };
         state.db.create_session(&session).await.unwrap();
 
-        orphan_sweep(&state.db).await;
+        state.issue_service.orphan_sweep().await;
 
         let fetched = state.db.get_session(session.id).await.unwrap();
         assert_eq!(
@@ -2688,7 +2531,7 @@ mod tests {
         };
         state.db.create_issue(&issue).await.unwrap();
 
-        orphan_sweep(&state.db).await;
+        state.issue_service.orphan_sweep().await;
 
         // Issue must be failed
         let fetched_issue = state.db.get_issue("ab12".into()).await.unwrap();
@@ -2739,7 +2582,7 @@ mod tests {
             state.db.create_session(&session).await.unwrap();
         }
 
-        orphan_sweep(&state.db).await;
+        state.issue_service.orphan_sweep().await;
 
         // Each session must retain its original status — the sweep touches only `running`.
         for (id, original_status) in &session_ids {
@@ -2769,7 +2612,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
 
         // Must not panic or return an error
-        orphan_sweep(&state.db).await;
+        state.issue_service.orphan_sweep().await;
 
         let fetched = state.db.get_session(session.id).await.unwrap();
         assert_eq!(
@@ -3060,8 +2903,10 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
+        let issue_service = issues::IssueService::new(Arc::clone(&db));
         let state = AppState {
             db,
+            issue_service,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
@@ -3156,8 +3001,10 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
+        let issue_service = issues::IssueService::new(Arc::clone(&db));
         let state = AppState {
-            db: Arc::clone(&db),
+            db,
+            issue_service,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
@@ -3369,8 +3216,10 @@ mod tests {
 
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
+        let issue_service = issues::IssueService::new(Arc::clone(&db));
         let state = AppState {
             db,
+            issue_service,
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),

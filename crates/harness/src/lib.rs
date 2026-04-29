@@ -1,5 +1,6 @@
 use agents::{AgentHooks, HookCommand, HookEntry};
 use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
+#[cfg(test)]
 use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
@@ -321,21 +322,7 @@ pub(crate) async fn resolve_session_cwd_with_root(
     workspace::ensure_worktree(&git_root, &worktree_path, &branch).await
 }
 
-pub struct StubClient;
-
-#[async_trait]
-impl AnthropicClient for StubClient {
-    async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-        Ok(MessageResponse {
-            content: vec![ContentBlock::Text {
-                text: "Hello! I'm a stub assistant.".into(),
-            }],
-            stop_reason: "end_turn".into(),
-            input_tokens: 10,
-            output_tokens: 8,
-        })
-    }
-}
+pub use anthropic::StubClient;
 
 pub struct HarnessConfig {
     pub session: Session,

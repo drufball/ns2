@@ -147,6 +147,15 @@ fn tui_is_thin_client_with_no_internal_deps() {
     }
 }
 
+/// `issues` owns issue lifecycle — must not depend on server, tui, or cli.
+#[test]
+fn issues_has_no_server_or_client_deps() {
+    let graph = build_dep_graph();
+    for forbidden in &["server", "tui", "cli"] {
+        assert_no_dep(&graph, "issues", forbidden);
+    }
+}
+
 /// `server` must not depend on tui or cli (it is consumed by cli, not the other way around).
 #[test]
 fn server_does_not_depend_on_tui_or_cli() {
@@ -476,6 +485,16 @@ fn direct_dep_edges_match_spec() {
     assert_no_direct_dep(&graph, "harness", "server");
     assert_no_direct_dep(&graph, "harness", "tui");
     assert_no_direct_dep(&graph, "harness", "cli");
+
+    // issues -> no harness/HTTP layer and no tool layer
+    assert_no_direct_dep(&graph, "issues", "harness");
+    assert_no_direct_dep(&graph, "issues", "anthropic");
+    assert_no_direct_dep(&graph, "issues", "tools");
+    assert_no_direct_dep(&graph, "issues", "workspace");
+    assert_no_direct_dep(&graph, "issues", "agents");
+    assert_no_direct_dep(&graph, "issues", "server");
+    assert_no_direct_dep(&graph, "issues", "tui");
+    assert_no_direct_dep(&graph, "issues", "cli");
 
     // server -> no client layer
     assert_no_direct_dep(&graph, "server", "tui");

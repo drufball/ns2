@@ -9,6 +9,7 @@ db = { path = "../db" }
 harness = { path = "../harness" }
 anthropic = { path = "../anthropic" }
 tools = { path = "../tools" }
+issues = { path = "../issues" }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
