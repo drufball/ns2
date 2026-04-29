@@ -42,10 +42,9 @@ jobs:
                   sys.exit(0)
           with open('crates/arch-tests/coverage-ignores.toml', 'rb') as f:
               data = tomllib.load(f)
-          flags = []
-          for e in data.get('file_ignore', []):
-              flags += ['--ignore-filename-regex', e['path']]
-          print(' '.join(flags))
+          patterns = [e['path'] for e in data.get('file_ignore', [])]
+          if patterns:
+              print('--ignore-filename-regex ' + '|'.join(patterns))
           EOF
           )
           # shellcheck disable=SC2086
