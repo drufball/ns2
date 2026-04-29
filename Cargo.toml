@@ -7,6 +7,7 @@ members = [
     "crates/workspace",
     "crates/agents",
     "crates/harness",
+    "crates/issues",
     "crates/server",
     "crates/tui",
     "crates/cli",
