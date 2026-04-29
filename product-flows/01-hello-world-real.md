@@ -1,10 +1,3 @@
----
-targets:
-  - crates/harness/src/**/*.rs
-  - crates/anthropic/src/**/*.rs
-  - crates/server/src/**/*.rs
-severity: warning
----
 
 # Flow 01: Hello World (Real Claude API)
 

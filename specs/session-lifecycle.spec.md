@@ -4,7 +4,7 @@ targets:
   - crates/harness/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-04-26T17:28:05Z
+verified: 2026-04-29T17:13:21Z
 ---
 
 # Session Lifecycle Spec
@@ -66,19 +66,7 @@ These maps are intentionally ephemeral. Nothing in the DB depends on them.
 
 ## Resume After Restart (`Completed` Sessions Accept New Messages)
 
-A session in `completed` state has no live harness. When `POST /sessions/:id/messages`
-is called on such a session:
-
-1. A new harness is spawned.
-2. The harness loads the full turn history from SQLite via `db.list_turns_with_blocks`.
-3. The full history is presented to the Anthropic API as the `messages` array so the
-   model has complete context.
-4. The session transitions back to `running`.
-5. SSE listeners that were connected before the restart are gone; new SSE subscribers
-   can connect and receive the new turn's events live.
-
-The `created` and `running` states already handle this path. The `completed` state adds
-the same spawn-on-demand behaviour so multi-turn sessions work seamlessly across restarts.
+A session in `completed` state has no live harness. When `POST /sessions/:id/messages` is called, a new harness spawns, loads the full turn history from SQLite, and presents it to the API as the prior `messages` array — giving the model complete context. The session transitions back to `running` and new SSE subscribers can connect immediately. The `created` and `running` states handle the same path; `completed` adds the same spawn-on-demand behaviour so multi-turn sessions work seamlessly across restarts.
 
 A `failed` or `cancelled` session must first be explicitly reopened (see Issue Lifecycle
 Spec, `ns2 issue reopen`) before accepting new messages.
@@ -126,9 +114,7 @@ history entirely, absent = all turns).
 
 ## Connect Sections
 
-- **harness:** `crates/harness/agent-harness.spec.md` — turn loop, context window
-  construction, tool dispatch
-- **data model:** `crates/db/data-model.spec.md` — schema, migrations, query interface
-- **architecture:** `crates/arch-tests/architecture.spec.md` — crate dependency rules
-- **issue lifecycle:** `crates/server/src/issue-lifecycle.spec.md` — issue states,
-  orphan recovery from the issue perspective
+- **harness:** `specs/agent-harness.spec.md` — turn loop, context window construction, tool dispatch
+- **data model:** `specs/data-model.spec.md` — schema, migrations, query interface
+- **architecture:** `specs/architecture.spec.md` — crate dependency rules
+- **issue lifecycle:** `specs/issue-lifecycle.spec.md` — issue states, orphan recovery from the issue perspective

@@ -5,7 +5,7 @@ targets:
   - crates/anthropic/src/**/*.rs
   - crates/tools/src/**/*.rs
 severity: warning
-verified: 2026-04-26T17:28:05Z
+verified: 2026-04-29T17:13:51Z
 ---
 
 # Agent Harness Spec
@@ -40,6 +40,8 @@ Each turn follows this sequence:
    - `max_tokens` / `stop_sequence` — treat as completion
    - `content_filter` — unrecoverable, mark session failed
 5. Persist the completed turn to SQLite before looping
+
+If the API call or stream fails mid-turn, the session is marked `failed` and the last successfully persisted turn index is recorded. On retry, the loop resumes from that point.
 
 ## Context Window Construction
 
@@ -76,7 +78,3 @@ Tools are Rust structs implementing a `Tool` trait: name, description, JSON sche
 **`write`** — writes content to a file, creating it (and any missing parent directories) if needed. Inputs: `path` (string), `content` (string). Overwrites existing files without confirmation — the agent is expected to read before writing if it cares about existing content.
 
 **`edit`** — makes a precise string replacement within a file. Inputs: `path` (string), `old_str` (string), `new_str` (string). Fails if `old_str` is not found or appears more than once in the file.
-
-## Error Handling
-
-If the API call or stream fails mid-turn, the session is marked `failed` and the last successfully persisted turn index is recorded. On retry, the loop resumes from that point.

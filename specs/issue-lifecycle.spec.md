@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-04-26T17:28:05Z
+verified: 2026-04-29T17:13:17Z
 ---
 
 # Issue Lifecycle Spec
@@ -52,17 +52,7 @@ on status will always see the comment once the issue is terminal.
 
 ## Comment Protocol
 
-Comments are stored in the `issues.comments` JSON array. Each comment has:
-- `author` — string; `"user"` for human comments, agent name for agent comments,
-  `"system"` for server-generated notices (orphan recovery, error messages)
-- `created_at` — UTC timestamp
-- `body` — text content
-
-`ns2 issue comment --id <id> --body <text> [--author <name>]` adds a comment manually.
-`ns2 issue complete --id <id> --comment <text>` adds a final user comment and transitions
-the issue to `completed`.
-`ns2 issue reopen --id <id> --comment <text>` adds a user comment before transitioning
-back to `open`.
+Comments are stored in the `issues.comments` JSON array with `author`, `created_at`, and `body` fields. The `author` is `"user"` for human comments, the agent name for agent output, and `"system"` for server-generated notices such as orphan recovery messages. The `comment` flag on `ns2 issue complete` and `ns2 issue reopen` appends a user comment before the status transition, ensuring it is visible in history when an agent resumes.
 
 ## Orphan Recovery
 
@@ -102,22 +92,11 @@ After reopening, the normal `open → running → completed` lifecycle applies.
 
 ## Validation Rules
 
-- **`ns2 issue start`** requires:
-  - Issue must be in `open` state (not `running`, `completed`, or `failed`).
-  - Issue must have an assignee; returns an error if `assignee` is `None`.
-  - The assignee agent must exist in `.ns2/agents/`.
-- **`ns2 issue complete`** requires:
-  - Issue must not already be in a terminal state (`completed` or `failed`).
-  - `--comment` flag is required.
-- **`ns2 issue reopen`** requires:
-  - Issue must be in `failed` or `completed` state.
-- **`ns2 issue new --start`** requires:
-  - `--assignee` must be provided (start needs an agent to run).
+`ns2 issue start` requires the issue to be in `open` state and to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed` or `completed` state. `ns2 issue new --start` requires `--assignee`.
 
 ## Connect Sections
 
-- **session lifecycle:** `crates/server/src/session-lifecycle.spec.md` — session states,
-  orphan sweep, SSE event stream
-- **CLI commands:** `crates/cli/cli-commands.spec.md` — `ns2 issue` subcommand reference
-- **data model:** `crates/db/data-model.spec.md` — schema for issues and comments
-- **architecture:** `crates/arch-tests/architecture.spec.md` — crate dependency rules
+- **session lifecycle:** `specs/session-lifecycle.spec.md` — session states, orphan sweep, SSE event stream
+- **CLI commands:** `specs/cli-commands/issue.spec.md` — `ns2 issue` subcommand reference
+- **data model:** `specs/data-model.spec.md` — schema for issues and comments
+- **architecture:** `specs/architecture.spec.md` — crate dependency rules

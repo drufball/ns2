@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-28T00:00:00Z
+verified: 2026-04-29T17:14:15Z
 ---
 
 # Architecture Spec
@@ -35,7 +35,7 @@ graph TD
     server --> issues & db & anthropic & tools & harness
 
     tui --> types
-    cli --> agents & specs & workspace
+    cli --> agents & specs & workspace & server & types
 ```
 
 Arrows point from dependent to dependency.
@@ -70,5 +70,5 @@ _Doesn't own: issue business logic — delegate to `issues`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 
-**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own.
+**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types.
 _Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._

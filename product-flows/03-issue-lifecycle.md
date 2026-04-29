@@ -1,11 +1,3 @@
----
-targets:
-  - crates/server/src/**/*.rs
-  - crates/cli/src/main.rs
-  - crates/db/src/**/*.rs
-  - crates/types/src/**/*.rs
-severity: warning
----
 
 # Flow 03: Issue Lifecycle
 

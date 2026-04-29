@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-04-26T16:18:47Z
+verified: 2026-04-29T17:14:16Z
 ---
 
 # Data Model Spec
@@ -20,9 +20,8 @@ SQLite via sqlx. The `db` crate owns all schema and migrations — nothing outsi
 |--------|------|-------|
 | `id` | TEXT PK | UUID |
 | `name` | TEXT | human-readable label |
-| `agent_type` | TEXT | maps to `.ns2/agents/<type>.md` |
-| `status` | TEXT | `created`, `running`, `waiting`, `completed`, `failed`, `cancelled` |
-| `branch` | TEXT | git branch the session operates on; always run from repo root |
+| `agent` | TEXT | optional; maps to `.ns2/agents/<name>.md` |
+| `status` | TEXT | `created`, `running`, `completed`, `failed`, `cancelled` |
 | `created_at` | INTEGER | unix timestamp |
 | `updated_at` | INTEGER | unix timestamp |
 
@@ -45,12 +44,12 @@ One row per content block within a turn, in order.
 |--------|------|-------|
 | `id` | TEXT PK | UUID |
 | `turn_id` | TEXT FK | → `turns.id` |
-| `index` | INTEGER | block order within turn (explicit from API) |
+| `block_index` | INTEGER | block order within turn (explicit from API) |
 | `role` | TEXT | `user` or `assistant` |
-| `type` | TEXT | discriminator: `text`, `tool_use`, `tool_result`, `thinking` |
-| `content` | TEXT | JSON; shape depends on `type` (see below) |
+| `content` | TEXT | JSON; self-describing — shape includes a `type` discriminator |
+| `created_at` | INTEGER | unix timestamp |
 
-The `content` column is a JSON string whose shape depends on `type`. The `type` column tells the `types` crate which `ContentBlock` enum variant to deserialize `content` into.
+The `content` column is a self-describing JSON blob. There is no separate `type` column — the JSON itself carries a `type` field (`text`, `tool_use`, `tool_result`, `thinking`) that the `types` crate uses to select the right `ContentBlock` enum variant during deserialization.
 
 ### `issues`
 
@@ -58,10 +57,11 @@ Work items that can be assigned to agents and tracked through a lifecycle.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | TEXT PK | 4-character nanoid (lowercase alphanumeric) |
+| `id` | TEXT PK | 4-character random alphanumeric (see below) |
 | `title` | TEXT | short description |
 | `body` | TEXT | full issue text |
 | `status` | TEXT | `open`, `running`, `completed`, `failed` |
+| `branch` | TEXT | git branch the issue operates on |
 | `assignee` | TEXT | optional; agent type name |
 | `session_id` | TEXT | optional; UUID of the linked agent session |
 | `parent_id` | TEXT | optional; ID of the parent issue |
@@ -70,7 +70,9 @@ Work items that can be assigned to agents and tracked through a lifecycle.
 | `created_at` | INTEGER | unix timestamp |
 | `updated_at` | INTEGER | unix timestamp |
 
-`blocked_on` and `comments` are stored as JSON in TEXT columns for simplicity.
+**Issue ID design.** Issue IDs are 4 characters (lowercase alphanumeric, e.g. `x7qm`) rather than UUIDs. The short form is human-readable in CLI output and easy to type. IDs are derived from UUID v4 bytes mapped through a 36-character alphabet, so they are random enough for the expected issue counts (collision probability is negligible at hundreds of issues). The generation logic lives in the `issues` crate.
+
+**`blocked_on` and `comments` as JSON TEXT.** Both fields are stored as JSON strings in TEXT columns rather than join tables. The access pattern for both is always "read/write the whole list at once" — there are no queries that filter by individual blocked-on IDs or comment authors. A join table would add schema complexity (cascade deletes, extra migrations, multi-row inserts) with no query benefit. SQLite's JSON support is available if needed in the future.
 
 ## Types (types crate)
 

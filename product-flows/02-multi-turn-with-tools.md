@@ -1,11 +1,3 @@
----
-targets:
-  - crates/tools/src/**/*.rs
-  - crates/harness/src/**/*.rs
-  - crates/server/src/**/*.rs
-  - crates/db/src/**/*.rs
-severity: warning
----
 
 # Flow 02: Multi-Turn Conversation with Tools
 

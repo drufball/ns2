@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/**/*.rs
-severity: error
+verified: 2026-04-29T17:14:17Z
 ---
 
 # CLI Architecture

@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-04-26T17:28:05Z
+verified: 2026-04-29T17:13:53Z
 ---
 
 # Agent Sessions Spec
@@ -19,11 +19,9 @@ Sessions work like `tmux`:
 - Messages sent by the user (or their proxy) to a session are queued for the next available turn. 
 - Agents can request input via a dedicated tool, which transitions the session to a `waiting` state.
 
-## Orchestrator Agent
+## Interaction Model
 
-Agent sessions support manual, tmux-style interaction of listing and attaching to sessions, but the default interaction will be through a top-level orchestrating agent. This agent has access to all of the same tools as a user: listing sessions, tailing recent turns, sending messages, etc.
-
-Most of the time, the user will work with the orchestrator and it will handle summarising & managing sessions.
+Sessions are managed primarily through the CLI (`ns2 issue start`, `ns2 issue wait`, `ns2 session send`, etc.), which talks to the server over HTTP. Users can also send messages directly to running sessions via the REST API. The CLI exposes commands for listing sessions, tailing recent turns, and sending messages — the same operations an orchestrating agent would use.
 
 ## Lifecycle
 
@@ -45,13 +43,8 @@ created → running → [waiting → running → ... →] completed | failed | c
 
 ## Concurrency
 
-- Arbitrary number of sessions run concurrently
-- Meta-agent session is always present (created on first launch, persisted across restarts)
-- Each session is an independent tokio task
+- Arbitrary number of sessions run concurrently as independent tokio tasks
 
-## TUI Interaction
+## Subscribing to a Session
 
-- Attach/detach is non-destructive — session continues regardless
-- On attach: server replays full history as SSE events, then streams live
-- Multiple TUI clients can attach to the same session simultaneously
-- Default TUI view is the meta-agent session
+Any client (CLI, future TUI) can subscribe to a session's SSE stream. On subscribe, the server replays full history as SSE events (filtered by `last_turns` if provided), then streams live events as they arrive. Multiple subscribers can attach to the same session simultaneously — attach and detach are non-destructive.
