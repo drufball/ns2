@@ -24,9 +24,13 @@ use std::{
     process,
 };
 
-fn count_code_loc_str(content: &str) -> usize {
+fn count_code_loc_str(content: &str) -> (usize, usize) {
     let mut in_block = false;
-    let mut code_lines = 0usize;
+    let mut prod_lines = 0usize;
+    let mut test_lines = 0usize;
+    let mut in_test_mod = false;
+    let mut cfg_test_seen = false;
+    let mut brace_depth = 0i32;
 
     for raw in content.lines() {
         let stripped = raw.trim();
@@ -34,61 +38,108 @@ fn count_code_loc_str(content: &str) -> usize {
         if in_block {
             if let Some(end) = stripped.find("*/") {
                 in_block = false;
-                // Check whether there is non-whitespace code after the closing */
                 let after_close = stripped[end + 2..].trim();
                 if !after_close.is_empty() && !after_close.starts_with("//") {
-                    code_lines += 1;
+                    if in_test_mod {
+                        test_lines += 1;
+                    } else {
+                        prod_lines += 1;
+                    }
+                    for ch in after_close.chars() {
+                        match ch {
+                            '{' => brace_depth += 1,
+                            '}' => {
+                                brace_depth -= 1;
+                                if in_test_mod && brace_depth == 0 {
+                                    in_test_mod = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             continue;
         }
 
         if stripped.is_empty() {
-            continue; // blank line
+            continue;
         }
 
         if stripped.starts_with("//") {
-            continue; // full-line comment
+            continue;
         }
 
+        if stripped == "#[cfg(test)]" && !in_test_mod {
+            cfg_test_seen = true;
+            test_lines += 1;
+            continue;
+        }
+
+        let is_code_line;
         if let Some(block_start) = stripped.find("/*") {
             let before = stripped[..block_start].trim();
             let after = &stripped[block_start + 2..];
             if after.contains("*/") {
-                // Inline block comment (/* ... */ on one line).
-                // The line counts as code only if there is real content
-                // outside the comment (before or after it).
-                if !before.is_empty() {
-                    code_lines += 1;
+                is_code_line = if !before.is_empty() {
+                    true
                 } else {
-                    // There might be content after the closing */
                     let close = after.find("*/").unwrap();
                     let after_close = after[close + 2..].trim();
-                    if !after_close.is_empty() && !after_close.starts_with("//") {
-                        code_lines += 1;
-                    }
-                    // else: line is purely a block comment — do not count
-                }
+                    !after_close.is_empty() && !after_close.starts_with("//")
+                };
             } else {
                 in_block = true;
-                // The part before /* on this line counts as code if non-empty
-                if !before.is_empty() {
-                    code_lines += 1;
-                }
+                is_code_line = !before.is_empty();
             }
+        } else {
+            is_code_line = true;
+        }
+
+        if !is_code_line {
             continue;
         }
 
-        code_lines += 1;
+        if cfg_test_seen && stripped.contains('{') {
+            cfg_test_seen = false;
+            in_test_mod = true;
+        }
+
+        if in_test_mod {
+            test_lines += 1;
+            for ch in stripped.chars() {
+                match ch {
+                    '{' => brace_depth += 1,
+                    '}' => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            in_test_mod = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            prod_lines += 1;
+            if cfg_test_seen {
+                for ch in stripped.chars() {
+                    match ch {
+                        '{' => brace_depth += 1,
+                        '}' => brace_depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
-    code_lines
+    (prod_lines, test_lines)
 }
 
-fn count_code_loc(path: &Path) -> usize {
+fn count_code_loc(path: &Path) -> (usize, usize) {
     match fs::read_to_string(path) {
         Ok(content) => count_code_loc_str(&content),
-        Err(_) => 0,
+        Err(_) => (0, 0),
     }
 }
 
@@ -116,7 +167,7 @@ mod tests {
     #[test]
     fn only_blank_lines_returns_zero() {
         let content = "\n   \n\t\n\n";
-        assert_eq!(count_code_loc_str(content), 0);
+        assert_eq!(count_code_loc_str(content), (0, 0));
     }
 
     #[test]
@@ -126,7 +177,7 @@ mod tests {
             // So is this
             //! doc comment
         ");
-        assert_eq!(count_code_loc_str(&content), 0);
+        assert_eq!(count_code_loc_str(&content), (0, 0));
     }
 
     #[test]
@@ -138,7 +189,7 @@ mod tests {
             }
         ");
         // 4 non-blank lines: fn, let x, let y, }
-        assert_eq!(count_code_loc_str(&content), 4);
+        assert_eq!(count_code_loc_str(&content), (4, 0));
     }
 
     #[test]
@@ -153,7 +204,7 @@ mod tests {
 
         ");
         // Code lines: `fn bar() {`, `let z = 3;`, `}`  → 3
-        assert_eq!(count_code_loc_str(&content), 3);
+        assert_eq!(count_code_loc_str(&content), (3, 0));
     }
 
     #[test]
@@ -166,7 +217,7 @@ mod tests {
             fn baz() {}
         ");
         // Only `fn baz() {}` is code.
-        assert_eq!(count_code_loc_str(&content), 1);
+        assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
@@ -178,44 +229,40 @@ mod tests {
             let b = 2;
         ");
         // `let a = 1;` (code before /*) + `let b = 2;` → 2
-        assert_eq!(count_code_loc_str(&content), 2);
+        assert_eq!(count_code_loc_str(&content), (2, 0));
     }
 
     #[test]
     fn pure_inline_block_comment_not_counted() {
-        // A line that is *only* a /* ... */ comment should not count.
         let content = "/* just a comment */\n";
-        assert_eq!(count_code_loc_str(content), 0);
+        assert_eq!(count_code_loc_str(content), (0, 0));
     }
 
     #[test]
     fn inline_block_comment_mixed_with_code_counts_once() {
-        // Code before the inline block comment — line counts as 1.
         let content = "let x = /* comment */ 42;\n";
-        assert_eq!(count_code_loc_str(content), 1);
+        assert_eq!(count_code_loc_str(content), (1, 0));
     }
 
     #[test]
     fn code_after_closing_block_comment_counted() {
-        // The closing */ is followed by real code on the same line.
         let content = dedent("
             /*
              * block
              */ let x = 1;
         ");
         // The line with */ and trailing code should count as 1.
-        assert_eq!(count_code_loc_str(&content), 1);
+        assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
     fn nested_block_comment_delimiter_does_not_reopen() {
-        // Rust doesn't support nested /* */ but we should handle /* inside block gracefully.
         let content = dedent("
             /* outer /* still outer
              */
             real_code();
         ");
-        assert_eq!(count_code_loc_str(&content), 1);
+        assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
@@ -227,7 +274,54 @@ mod tests {
             let b = 2;
         ");
         // Two pure inline block comments (not counted) + two code lines → 2
-        assert_eq!(count_code_loc_str(&content), 2);
+        assert_eq!(count_code_loc_str(&content), (2, 0));
+    }
+
+    #[test]
+    fn cfg_test_mod_excluded_from_prod_loc() {
+        let content = dedent("
+            fn foo() {
+                let x = 1;
+            }
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                #[test]
+                fn test_foo() {
+                    assert_eq!(1, 1);
+                }
+            }
+        ");
+        let (prod, _test) = count_code_loc_str(&content);
+        // prod code: `fn foo() {`, `let x = 1;`, `}` = 3 lines
+        assert_eq!(prod, 3);
+    }
+
+    #[test]
+    fn cfg_test_mod_counted_in_test_loc() {
+        let content = dedent("
+            fn foo() {}
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn bar() {}
+            }
+        ");
+        let (_prod, test) = count_code_loc_str(&content);
+        // test lines: `#[cfg(test)]`, `mod tests {`, `#[test]`, `fn bar() {}`, `}` = 5
+        assert_eq!(test, 5);
+    }
+
+    #[test]
+    fn prod_code_counted_normally_when_no_test_mod() {
+        let content = dedent("
+            fn foo() {
+                let x = 1;
+            }
+        ");
+        let (prod, test) = count_code_loc_str(&content);
+        assert_eq!(prod, 3);
+        assert_eq!(test, 0);
     }
 
     // ── is_test_file ─────────────────────────────────────────────────────────
@@ -368,15 +462,23 @@ fn main() {
             .to_string_lossy()
             .to_string();
 
-        let (limit, kind) = if is_test_file(&rel) {
-            (test_threshold, "test")
-        } else {
-            (threshold, "src")
-        };
+        let (prod_loc, test_loc) = count_code_loc(file);
 
-        let loc = count_code_loc(file);
-        if loc > limit {
-            violations.push(format!("  {} / {}  [{}]  {}", loc, limit, kind, rel));
+        if is_test_file(&rel) {
+            let total = prod_loc + test_loc;
+            if total > test_threshold {
+                violations.push(format!("  {} / {}  [test]  {}", total, test_threshold, rel));
+            }
+        } else {
+            if prod_loc > threshold {
+                violations.push(format!("  {} / {}  [src]  {}", prod_loc, threshold, rel));
+            }
+            if test_loc > test_threshold {
+                violations.push(format!(
+                    "  {} / {}  [inline-test]  {}",
+                    test_loc, test_threshold, rel
+                ));
+            }
         }
     }
 
