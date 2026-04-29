@@ -1,9 +1,8 @@
-use chrono::Utc;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use types::{IssueComment, IssueStatus, Session, SessionEvent, SessionStatus};
+use types::{Session, SessionEvent, SessionStatus};
 use uuid::Uuid;
 
 /// Central application state shared across all request handlers.
@@ -46,6 +45,7 @@ pub(crate) fn spawn_harness_sync(
     let msg_senders_map = Arc::clone(&state.msg_senders);
     let spawning_set = Arc::clone(&state.spawning);
     let db = Arc::clone(&state.db);
+    let issue_service = state.issue_service.clone();
     let client = Arc::clone(&state.client);
     let session_clone = session.clone();
     let event_tx = tx.clone();
@@ -64,7 +64,7 @@ pub(crate) fn spawn_harness_sync(
 
     let issue_watcher = issue_id.map(|id| {
         let mut rx = tx.subscribe();
-        let db_watch = Arc::clone(&db);
+        let svc = issue_service;
         tokio::spawn(async move {
             let mut current_turn_text = String::new();
             let mut last_turn_text = String::new();
@@ -81,35 +81,12 @@ pub(crate) fn spawn_harness_sync(
                         last_turn_text = std::mem::take(&mut current_turn_text);
                     }
                     SessionEvent::SessionDone { .. } => {
-                        if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
-                            if !last_turn_text.is_empty() {
-                                let author = issue
-                                    .assignee
-                                    .clone()
-                                    .unwrap_or_else(|| "agent".to_string());
-                                issue.comments.push(IssueComment {
-                                    author,
-                                    created_at: Utc::now(),
-                                    body: last_turn_text.clone(),
-                                });
-                            }
-                            issue.status = IssueStatus::Completed;
-                            issue.updated_at = Utc::now();
-                            let _ = db_watch.update_issue(&issue).await;
-                        }
+                        let summary = if last_turn_text.is_empty() { None } else { Some(last_turn_text) };
+                        let _ = svc.finish_issue(&id, summary).await;
                         break;
                     }
                     SessionEvent::Error { message } => {
-                        if let Ok(mut issue) = db_watch.get_issue(id.clone()).await {
-                            issue.comments.push(IssueComment {
-                                author: "system".to_string(),
-                                created_at: Utc::now(),
-                                body: message.clone(),
-                            });
-                            issue.status = IssueStatus::Failed;
-                            issue.updated_at = Utc::now();
-                            let _ = db_watch.update_issue(&issue).await;
-                        }
+                        let _ = svc.fail_issue(&id, message).await;
                         break;
                     }
                     _ => {}
