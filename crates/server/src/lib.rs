@@ -38,6 +38,7 @@ fn build_router(state: AppState) -> Router {
         .route("/issues/:id/start", post(issue::start_issue))
         .route("/issues/:id/complete", post(issue::complete_issue))
         .route("/issues/:id/reopen", post(issue::reopen_issue))
+        .route("/issues/:id/status", axum::routing::patch(issue::update_issue_status))
         .with_state(state)
 }
 

@@ -26,8 +26,8 @@ pub(crate) async fn run_start(port: u16) {
     }
 }
 
-pub(crate) fn run_stop() {
-    let (_, pid_file) = data_dir_and_pid(9876);
+pub(crate) fn run_stop(port: u16) {
+    let (_, pid_file) = data_dir_and_pid(port);
     match std::fs::read_to_string(&pid_file) {
         Ok(pid_str) => {
             let pid = pid_str.trim().to_string();

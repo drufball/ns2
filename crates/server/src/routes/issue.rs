@@ -81,6 +81,11 @@ pub(crate) struct ReopenIssueRequest {
     pub(crate) comment: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct UpdateIssueStatusRequest {
+    pub(crate) status: String,
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 pub(crate) async fn create_issue(
@@ -177,4 +182,17 @@ pub(crate) async fn reopen_issue(
     let comment = body.and_then(|Json(req)| req.comment);
     let issue = state.issue_service.reopen_issue(id, comment).await?;
     Ok(Json(issue))
+}
+
+pub(crate) async fn update_issue_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateIssueStatusRequest>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let new_status = req.status.parse::<IssueStatus>().map_err(Error::BadRequest)?;
+    let mut issue = state.db.get_issue(id.clone()).await?;
+    issue.status = new_status;
+    state.db.update_issue(&issue).await?;
+    let updated = state.db.get_issue(id).await?;
+    Ok(Json(updated))
 }

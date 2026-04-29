@@ -150,6 +150,11 @@ pub(crate) async fn detect_remote_default_branch(git_root: &Path) -> String {
 /// This function is async and uses `tokio::process::Command` to avoid blocking
 /// the Tokio thread pool.
 pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<WorktreeEntry> {
+    // Canonicalize the base path so that symlink chains (e.g. /var → /private/var on macOS)
+    // don't prevent the prefix filter from matching git's output.
+    let canonical_base = std::fs::canonicalize(worktree_base)
+        .unwrap_or_else(|_| worktree_base.to_path_buf());
+
     let output = match tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["worktree", "list", "--porcelain"])
@@ -165,7 +170,7 @@ pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<Worktr
         Err(_) => return vec![],
     };
 
-    parse_worktree_porcelain(&text, worktree_base)
+    parse_worktree_porcelain(&text, &canonical_base)
 }
 
 /// Parse the porcelain output of `git worktree list --porcelain`.

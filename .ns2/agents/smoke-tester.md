@@ -18,8 +18,8 @@ ls $REPO_ROOT/product-flows/.build/ns2
 
 ## Select flows
 
-- If `$ARGUMENTS` was given, run only those flows. 
-- Otherwise, run `ns2 spec sync product-flows/` and run any flows that are marked stale.
+- If `$ARGUMENTS` was given, run only those flows.
+- Otherwise, run all flows found in `product-flows/*.md`.
 
 ## Start containers
 
@@ -43,7 +43,7 @@ Spawn a `qa-tester` session for each flow, storing each ID by flow number:
 ```bash
 SESSION[NN]=$(ns2 session new --agent qa-tester --message "Container: ns2-flow-NN
 
-$(cat $REPO_ROOT/product-flows/NN-name.spec.md)")
+$(cat $REPO_ROOT/product-flows/NN-name.md)")
 ```
 
 Once all sessions are started, poll until every one reaches `completed` or `failed`:
@@ -56,14 +56,6 @@ When all are done, collect the summary from each result:
 
 ```bash
 ns2 session tail --id "${SESSION[NN]}" --turns 1
-```
-
-## Verify passing flows
-
-For each flow whose qa-tester session returned a PASS verdict, run:
-
-```bash
-ns2 spec verify product-flows/NN-name.spec.md
 ```
 
 ## Cleanup containers
