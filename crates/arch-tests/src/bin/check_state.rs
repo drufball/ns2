@@ -511,6 +511,74 @@ fn mutations() {
             expected
         );
     }
+
+    // ── find_test_line_ranges ────────────────────────────────────────────────
+
+    #[test]
+    fn find_test_ranges_empty_content() {
+        let ranges = find_test_line_ranges(&[]);
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn find_test_ranges_no_test_module() {
+        let src = "fn foo() {}\nfn bar() {}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let ranges = find_test_line_ranges(&lines);
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn find_test_ranges_cfg_test_attribute_detected() {
+        let src = "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let ranges = find_test_line_ranges(&lines);
+        assert_eq!(ranges.len(), 1, "expected one test range");
+    }
+
+    #[test]
+    fn find_test_ranges_range_covers_test_body() {
+        let src = "fn prod() {}\n#[cfg(test)]\nmod tests {\n    fn inner() {}\n}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let ranges = find_test_line_ranges(&lines);
+        assert_eq!(ranges.len(), 1);
+        let (start, end) = ranges[0];
+        // The test module starts at line 2 (#[cfg(test)]) and the body is lines 3-5
+        // start must be <= 3 and end must be >= 5
+        assert!(start <= 3, "start={start} should include line 3");
+        assert!(end >= 5, "end={end} should include line 5");
+    }
+
+    // ── is_test_line ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_test_line_inside_range_is_true() {
+        let ranges = vec![(3usize, 7usize)];
+        assert!(is_test_line(3, &ranges));
+        assert!(is_test_line(5, &ranges));
+        assert!(is_test_line(7, &ranges));
+    }
+
+    #[test]
+    fn is_test_line_outside_range_is_false() {
+        let ranges = vec![(3usize, 7usize)];
+        assert!(!is_test_line(1, &ranges));
+        assert!(!is_test_line(2, &ranges));
+        assert!(!is_test_line(8, &ranges));
+    }
+
+    #[test]
+    fn is_test_line_empty_ranges_is_false() {
+        assert!(!is_test_line(5, &[]));
+    }
+
+    #[test]
+    fn is_test_line_multiple_ranges() {
+        let ranges = vec![(2usize, 4usize), (10usize, 15usize)];
+        assert!(is_test_line(3, &ranges));
+        assert!(is_test_line(12, &ranges));
+        assert!(!is_test_line(7, &ranges));
+    }
 }
 
 // ── Reporting ─────────────────────────────────────────────────────────────────

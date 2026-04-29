@@ -256,3 +256,34 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::SessionStatus;
+
+    #[test]
+    fn session_is_terminal_completed() {
+        assert!(session_is_terminal(&SessionStatus::Completed));
+    }
+
+    #[test]
+    fn session_is_terminal_failed() {
+        assert!(session_is_terminal(&SessionStatus::Failed));
+    }
+
+    #[test]
+    fn session_is_terminal_cancelled() {
+        assert!(session_is_terminal(&SessionStatus::Cancelled));
+    }
+
+    #[test]
+    fn session_not_terminal_running() {
+        assert!(!session_is_terminal(&SessionStatus::Running));
+    }
+
+    #[test]
+    fn session_not_terminal_created() {
+        assert!(!session_is_terminal(&SessionStatus::Created));
+    }
+}

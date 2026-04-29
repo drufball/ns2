@@ -542,6 +542,69 @@ mod tests {
         assert!((m.cohesion_score - 1.0).abs() < 1e-9); // 0 or 1 fn → 1.0
         assert!(!m.flagged);
     }
+
+    // ── extract ───────────────────────────────────────────────────────────────
+
+    fn parse(src: &str) -> syn::File {
+        syn::parse_str(src).expect("parse failed")
+    }
+
+    #[test]
+    fn extract_empty_file_no_functions_no_locals() {
+        let file = parse("");
+        let (fns, locals) = extract(&file);
+        assert!(fns.is_empty());
+        assert!(locals.defined.is_empty());
+    }
+
+    #[test]
+    fn extract_top_level_fn_collected() {
+        let file = parse("fn foo() {}");
+        let (fns, locals) = extract(&file);
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].display_name, "fn foo");
+        assert!(locals.defined.contains("foo"));
+    }
+
+    #[test]
+    fn extract_struct_in_locals() {
+        let file = parse("struct Foo; fn bar() {}");
+        let (_, locals) = extract(&file);
+        assert!(locals.defined.contains("Foo"));
+        assert!(locals.defined.contains("bar"));
+    }
+
+    #[test]
+    fn extract_impl_methods_collected() {
+        let file = parse("struct Foo; impl Foo { fn new() -> Foo { Foo } fn run(&self) {} }");
+        let (fns, locals) = extract(&file);
+        let names: Vec<&str> = fns.iter().map(|f| f.display_name.as_str()).collect();
+        assert!(names.iter().any(|n| n.contains("new")), "expected new method: {:?}", names);
+        assert!(names.iter().any(|n| n.contains("run")), "expected run method: {:?}", names);
+        assert!(locals.defined.contains("Foo"));
+    }
+
+    #[test]
+    fn extract_fn_body_refs_captured() {
+        let file = parse("struct Bar; fn foo() { let _x = Bar; }");
+        let (fns, _) = extract(&file);
+        assert_eq!(fns.len(), 1);
+        assert!(fns[0].refs.contains("Bar"), "refs should contain Bar: {:?}", fns[0].refs);
+    }
+
+    // ── impl_type_name ────────────────────────────────────────────────────────
+
+    #[test]
+    fn impl_type_name_extracts_struct_name() {
+        let file = parse("struct Foo; impl Foo { fn method(&self) {} }");
+        for item in &file.items {
+            if let syn::Item::Impl(imp) = item {
+                assert_eq!(impl_type_name(imp), Some("Foo".to_string()));
+                return;
+            }
+        }
+        panic!("no impl block found");
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
