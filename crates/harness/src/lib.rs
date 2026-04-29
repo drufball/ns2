@@ -1,12 +1,15 @@
+mod cwd;
+mod history;
 mod hooks;
 mod loop_;
 mod prompt;
+mod retry;
 
 #[cfg(test)]
 use async_trait::async_trait;
 
+pub use cwd::resolve_session_cwd;
 pub use loop_::run;
-pub use loop_::resolve_session_cwd;
 pub use anthropic::StubClient;
 
 #[cfg(test)]
@@ -18,10 +21,13 @@ use types::{ContentBlock, Role, SessionEvent};
 #[cfg(test)]
 use uuid::Uuid;
 #[cfg(test)]
-use loop_::{
-    is_rate_limit, load_history, max_retries, persist_user_message,
-    resolve_session_cwd_with_root, run_tool_dispatch_loop,
-};
+use cwd::resolve_session_cwd_with_root;
+#[cfg(test)]
+use history::{load_history, persist_user_message};
+#[cfg(test)]
+use loop_::run_tool_dispatch_loop;
+#[cfg(test)]
+use retry::{is_rate_limit, max_retries};
 #[cfg(test)]
 use prompt::build_system_prompt;
 #[cfg(test)]

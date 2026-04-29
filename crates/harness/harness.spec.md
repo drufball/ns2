@@ -11,11 +11,24 @@ Re-exports the public API: `run`, `resolve_session_cwd`, `StubClient`, `HarnessC
 imports from all other modules via `use super::*`.
 
 ### `loop_.rs` — agent turn loop
-Owns the message loop (`run`), tool dispatch (`run_tool_dispatch_loop`), retry logic
-(`complete_with_retry`), history loading (`load_history`), message persistence
-(`persist_user_message`), and session worktree resolution (`resolve_session_cwd`,
-`resolve_session_cwd_with_root`). Orchestrates the other modules: calls into `prompt`,
-`hooks`, and the Anthropic client.
+Owns the message loop (`run`) and tool dispatch (`run_tool_dispatch_loop`). Orchestrates
+the other modules: calls into `cwd`, `history`, `retry`, `prompt`, and `hooks`.
+
+### `retry.rs` — 429 retry logic
+Owns all Anthropic rate-limit retry behaviour: `max_retries`, `is_rate_limit`, and
+`complete_with_retry`. Pure function over the Anthropic client — no DB access, no
+knowledge of session or turn state.
+
+### `history.rs` — DB persistence helpers
+Owns conversation history persistence: `load_history` and `persist_user_message`.
+Reads and writes turns and content blocks; emits the corresponding `SessionEvent`s.
+No knowledge of the Anthropic client or retry logic.
+
+### `cwd.rs` — working directory resolution
+Owns session working-directory resolution: `resolve_session_cwd` and
+`resolve_session_cwd_with_root`. Looks up the session's associated issue branch and
+ensures the corresponding git worktree exists. Pure lookup — no side effects beyond
+worktree creation.
 
 ### `hooks.rs` — hook execution
 Single owner of all hook execution logic. Provides `run_hook`, `matching_hook_entries`,
@@ -36,14 +49,18 @@ the message list and window budget. No knowledge of hooks or prompts.
 
 ```
 lib.rs
-  └── loop_.rs  →  prompt.rs   (no deps on loop_/hooks)
+  └── loop_.rs  →  cwd.rs      (no deps on loop_/hooks/history/retry)
+              →  history.rs  (no deps on loop_/hooks/cwd/retry)
+              →  retry.rs    (no deps on loop_/hooks/cwd/history)
+              →  prompt.rs   (no deps on loop_/hooks)
               →  hooks.rs    (no deps on loop_/prompt)
               →  anthropic client
               →  db
 ```
 
-`prompt.rs` and `hooks.rs` are leaves: they depend only on external crates
-(`agents`, `regex`, `serde_json`, etc.) and not on each other or on `loop_`.
+`prompt.rs`, `hooks.rs`, `retry.rs`, `history.rs`, and `cwd.rs` are leaves: they depend
+only on external crates (`agents`, `db`, `workspace`, `anthropic`, etc.) and not on each
+other or on `loop_`.
 
 ## Invariants
 
@@ -51,4 +68,11 @@ lib.rs
   processes or interprets hook exit codes.
 - `prompt.rs` is the single owner of system prompt construction. No other module
   assembles or formats the system prompt string.
+- `retry.rs` is the single owner of rate-limit retry logic. No other module implements
+  backoff or inspects 429 status codes.
+- `history.rs` is the single owner of turn/content-block DB persistence within the
+  harness. No other module calls `create_turn` or `create_content_block` for history
+  purposes.
+- `cwd.rs` is the single owner of session working-directory resolution. No other module
+  calls `ensure_worktree` on behalf of a session.
 - `lib.rs` contains no business logic — only type definitions, re-exports, and tests.

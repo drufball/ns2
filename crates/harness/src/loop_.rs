@@ -1,174 +1,20 @@
+use crate::cwd::resolve_session_cwd;
+use crate::history::{load_history, persist_user_message};
 use crate::hooks::{run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
 use crate::prompt::build_system_prompt;
+use crate::retry::{complete_with_retry, is_rate_limit, max_retries};
 use crate::HarnessConfig;
-use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
-use chrono::Utc;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use types::{ContentBlock, ContentBlockDelta, Role, SessionEvent, SessionStatus, Turn};
+use types::{ContentBlock, Role, SessionEvent, SessionStatus, Turn};
 use uuid::Uuid;
-
-// ── 429 retry logic ──────────────────────────────────────────────────────────
-
-/// Read the max-retry count from `NS2_MAX_RETRIES` (default 5).
-pub(crate) fn max_retries() -> u32 {
-    std::env::var("NS2_MAX_RETRIES")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(5)
-}
-
-/// Returns `true` if the error is an Anthropic 429 rate-limit response.
-pub(crate) fn is_rate_limit(err: &anthropic::Error) -> bool {
-    matches!(err, anthropic::Error::Api { status: 429, .. })
-}
-
-/// Call `client.complete(request)` with exponential-backoff retry on 429.
-///
-/// - Retries up to `NS2_MAX_RETRIES` times (default 5).
-/// - Initial delay: 10 s, doubling each retry, capped at 120 s.
-/// - Non-429 errors propagate immediately without retrying.
-///
-/// In tests using `#[tokio::test(start_paused = true)]`, `tokio::time::sleep`
-/// returns instantly, so no real wall-clock time is consumed.
-pub(crate) async fn complete_with_retry(
-    client: &Arc<dyn AnthropicClient>,
-    request: MessageRequest,
-) -> anthropic::Result<MessageResponse> {
-    use tokio::time::{sleep, Duration};
-
-    let retries = max_retries();
-    let mut delay_ms: u64 = 10_000;
-    const MAX_DELAY_MS: u64 = 120_000;
-
-    let mut attempt = 0u32;
-    loop {
-        match client.complete(request.clone()).await {
-            Ok(resp) => return Ok(resp),
-            Err(err) if is_rate_limit(&err) && attempt < retries => {
-                attempt += 1;
-                tracing::warn!(
-                    attempt,
-                    retries,
-                    delay_ms,
-                    "Anthropic 429 rate-limit; retrying after {delay_ms}ms"
-                );
-                sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-// ── Worktree management ───────────────────────────────────────────────────────
-
-/// Resolve the session's working directory based on its associated issue.
-///
-/// - If the session has an associated issue with a non-empty `branch`:
-///   reads `ns2.toml`, computes `<base>/<branch>`, ensures the worktree
-///   exists, and returns the worktree path.
-/// - Otherwise: returns `None` (use git root as cwd).
-pub async fn resolve_session_cwd(
-    db: &Arc<dyn db::Db>,
-    session_id: Uuid,
-) -> Option<PathBuf> {
-    resolve_session_cwd_with_root(db, session_id, workspace::git_root().await).await
-}
-
-/// Inner implementation that accepts an explicit `git_root` — injectable for tests.
-pub(crate) async fn resolve_session_cwd_with_root(
-    db: &Arc<dyn db::Db>,
-    session_id: Uuid,
-    git_root: Option<PathBuf>,
-) -> Option<PathBuf> {
-    let issues = db.list_issues_by_session_id(session_id).await.ok()?;
-    let branch = issues.into_iter().find_map(|i| {
-        if i.branch.is_empty() { None } else { Some(i.branch) }
-    })?;
-
-    let git_root = git_root?;
-    let config = workspace::read_ns2_config(&git_root);
-    let worktree_path = config.worktree_base.join(&branch);
-
-    workspace::ensure_worktree(&git_root, &worktree_path, &branch).await
-}
-
-// ── Context (history) ─────────────────────────────────────────────────────────
-
-/// Load conversation history from the DB for a session.
-/// Returns turns in order, each as `(Role, Vec<ContentBlock>)`.
-/// Turns with mixed roles are grouped by the role stored on each block;
-/// consecutive blocks with the same role are merged into one entry.
-pub(crate) async fn load_history(
-    db: &Arc<dyn db::Db>,
-    session_id: Uuid,
-) -> crate::Result<Vec<(Role, Vec<ContentBlock>)>> {
-    let turns = db.list_turns(session_id).await?;
-    let mut history: Vec<(Role, Vec<ContentBlock>)> = Vec::new();
-
-    for turn in &turns {
-        let blocks = db.list_content_blocks(turn.id).await?;
-        if blocks.is_empty() {
-            continue;
-        }
-        // Each turn is stored with a consistent role; group all blocks under one entry.
-        // If blocks have mixed roles (shouldn't happen in practice), group by first role.
-        let role = blocks[0].0.clone();
-        let content: Vec<ContentBlock> = blocks.into_iter().map(|(_, b)| b).collect();
-
-        // Merge with previous entry if same role
-        if let Some(last) = history.last_mut() {
-            if last.0 == role {
-                last.1.extend(content);
-                continue;
-            }
-        }
-        history.push((role, content));
-    }
-
-    Ok(history)
-}
-
-/// Persist a user message as a turn+block in the DB and emit events.
-pub(crate) async fn persist_user_message(
-    db: &Arc<dyn db::Db>,
-    session_id: Uuid,
-    message: &str,
-    event_tx: &broadcast::Sender<SessionEvent>,
-) -> crate::Result<Turn> {
-    let user_turn = Turn {
-        id: Uuid::new_v4(),
-        session_id,
-        token_count: None,
-        created_at: Utc::now(),
-    };
-    db.create_turn(&user_turn).await?;
-    let user_block = ContentBlock::Text { text: message.to_string() };
-    db.create_content_block(user_turn.id, 0, &Role::User, &user_block).await?;
-    let _ = event_tx.send(SessionEvent::TurnStarted { turn: user_turn.clone() });
-    let _ = event_tx.send(SessionEvent::ContentBlockDelta {
-        turn_id: user_turn.id,
-        index: 0,
-        delta: ContentBlockDelta::TextDelta { text: message.to_string() },
-    });
-    let _ = event_tx.send(SessionEvent::ContentBlockDone {
-        turn_id: user_turn.id,
-        index: 0,
-        block: user_block,
-    });
-    let _ = event_tx.send(SessionEvent::TurnDone { turn_id: user_turn.id });
-    Ok(user_turn)
-}
-
-// ── Tool dispatch loop ────────────────────────────────────────────────────────
+use chrono::Utc;
 
 /// Run the tool dispatch loop for a single LLM turn sequence.
 /// `messages` should already contain the full history including the new user message.
 pub(crate) async fn run_tool_dispatch_loop(
     config: &HarnessConfig,
-    client: &Arc<dyn AnthropicClient>,
+    client: &Arc<dyn anthropic::AnthropicClient>,
     db: &Arc<dyn db::Db>,
     event_tx: &broadcast::Sender<SessionEvent>,
     hooks: &agents::AgentHooks,
@@ -179,7 +25,7 @@ pub(crate) async fn run_tool_dispatch_loop(
         config.tools.iter().map(|t| t.definition()).collect();
 
     loop {
-        let request = MessageRequest {
+        let request = anthropic::MessageRequest {
             model: config.model.clone(),
             system: system.clone(),
             messages: messages.clone(),
@@ -223,7 +69,7 @@ pub(crate) async fn run_tool_dispatch_loop(
                 let _ = event_tx.send(SessionEvent::ContentBlockDelta {
                     turn_id: turn.id,
                     index,
-                    delta: ContentBlockDelta::TextDelta { text: text.clone() },
+                    delta: types::ContentBlockDelta::TextDelta { text: text.clone() },
                 });
             }
             db.create_content_block(turn.id, index as i64, &Role::Assistant, block).await?;
@@ -321,11 +167,9 @@ pub(crate) async fn run_tool_dispatch_loop(
     Ok(None)
 }
 
-// ── Main run loop ─────────────────────────────────────────────────────────────
-
 pub async fn run(
     mut config: HarnessConfig,
-    client: Arc<dyn AnthropicClient>,
+    client: Arc<dyn anthropic::AnthropicClient>,
     db: Arc<dyn db::Db>,
     event_tx: broadcast::Sender<SessionEvent>,
     mut msg_rx: mpsc::Receiver<String>,
