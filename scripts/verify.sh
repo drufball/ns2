@@ -24,11 +24,10 @@ except ImportError:
 with open("crates/arch-tests/coverage-ignores.toml", "rb") as f:
     data = tomllib.load(f)
 
-flags = []
-for entry in data.get("file_ignore", []):
-    flags.append("--ignore-filename-regex")
-    flags.append(entry["path"])
-print(" ".join(flags))
+patterns = [entry["path"] for entry in data.get("file_ignore", [])]
+if patterns:
+    combined = "|".join(patterns)
+    print(f"--ignore-filename-regex {combined}")
 EOF
 )
 

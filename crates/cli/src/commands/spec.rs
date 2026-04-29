@@ -190,3 +190,65 @@ pub(crate) fn run_verify(paths: Vec<String>) {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_valid_spec(dir: &std::path::Path, name: &str, target: &str) {
+        let path = dir.join(name);
+        let content = format!("---\ntargets:\n  - {target}\n---\n");
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn verify_spec_paths_empty_input() {
+        let result = verify_spec_paths(std::path::Path::new("/tmp"), &[]);
+        assert!(result.stdout_lines.is_empty());
+        assert!(result.stderr_lines.is_empty());
+        assert!(!result.any_failed);
+    }
+
+    #[test]
+    fn verify_spec_paths_valid_spec_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        write_valid_spec(dir.path(), "test.spec.md", "crates/foo/src/lib.rs");
+        let abs_path = dir.path().join("test.spec.md").to_str().unwrap().to_string();
+        let result = verify_spec_paths(dir.path(), &[abs_path]);
+        assert!(!result.any_failed, "expected success, got: {:?}", result.stderr_lines);
+        assert_eq!(result.stdout_lines.len(), 1);
+        assert!(result.stderr_lines.is_empty());
+    }
+
+    #[test]
+    fn verify_spec_paths_relative_path_resolved_against_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write_valid_spec(dir.path(), "my.spec.md", "src/lib.rs");
+        let result = verify_spec_paths(dir.path(), &["my.spec.md".to_string()]);
+        assert!(!result.any_failed, "expected success, got: {:?}", result.stderr_lines);
+        assert_eq!(result.stdout_lines.len(), 1);
+    }
+
+    #[test]
+    fn verify_spec_paths_nonexistent_path_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = "/nonexistent/path/does-not-exist.spec.md".to_string();
+        let result = verify_spec_paths(dir.path(), &[missing]);
+        assert!(result.any_failed);
+        assert_eq!(result.stderr_lines.len(), 1);
+        assert!(result.stdout_lines.is_empty());
+    }
+
+    #[test]
+    fn verify_spec_paths_multiple_paths_some_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_valid_spec(dir.path(), "ok.spec.md", "src/main.rs");
+        let result = verify_spec_paths(dir.path(), &[
+            "ok.spec.md".to_string(),
+            "missing.spec.md".to_string(),
+        ]);
+        assert!(result.any_failed);
+        assert_eq!(result.stdout_lines.len(), 1);
+        assert_eq!(result.stderr_lines.len(), 1);
+    }
+}

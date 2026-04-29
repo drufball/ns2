@@ -95,6 +95,7 @@ fn count_code_loc(path: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::count_code_loc_str;
+    use super::is_test_file;
 
     // Helper: trim leading indentation from a here-doc string so we can
     // write nicely-indented test content inside a test function.
@@ -227,6 +228,43 @@ mod tests {
         ");
         // Two pure inline block comments (not counted) + two code lines → 2
         assert_eq!(count_code_loc_str(&content), 2);
+    }
+
+    // ── is_test_file ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_test_file_tests_dir_in_path() {
+        assert!(is_test_file("crates/foo/tests/integration.rs"));
+    }
+
+    #[test]
+    fn is_test_file_ends_with_test_rs_suffix() {
+        assert!(is_test_file("crates/foo/src/server_test.rs"));
+    }
+
+    #[test]
+    fn is_test_file_basename_starts_with_test_prefix() {
+        assert!(is_test_file("crates/foo/src/test_helpers.rs"));
+    }
+
+    #[test]
+    fn is_test_file_bare_name_starts_with_test() {
+        assert!(is_test_file("test_utils.rs"));
+    }
+
+    #[test]
+    fn is_test_file_normal_src_file_is_false() {
+        assert!(!is_test_file("crates/foo/src/lib.rs"));
+    }
+
+    #[test]
+    fn is_test_file_normal_bare_name_is_false() {
+        assert!(!is_test_file("utils.rs"));
+    }
+
+    #[test]
+    fn is_test_file_nested_tests_dir_in_path() {
+        assert!(is_test_file("crates/bar/tests/mod.rs"));
     }
 }
 

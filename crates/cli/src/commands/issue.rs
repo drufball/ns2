@@ -454,3 +454,100 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::IssueTreeNode;
+    use chrono::Utc;
+
+    fn make_issue(status: types::IssueStatus) -> types::Issue {
+        types::Issue {
+            id: "i-001".to_string(),
+            title: "Test".to_string(),
+            body: String::new(),
+            status,
+            branch: String::new(),
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_node(status: types::IssueStatus, children: Vec<IssueTreeNode>) -> IssueTreeNode {
+        IssueTreeNode { issue: make_issue(status), snippet: None, children }
+    }
+
+    #[test]
+    fn issue_is_terminal_completed() {
+        assert!(issue_is_terminal(&types::IssueStatus::Completed));
+    }
+
+    #[test]
+    fn issue_is_terminal_failed() {
+        assert!(issue_is_terminal(&types::IssueStatus::Failed));
+    }
+
+    #[test]
+    fn issue_is_not_terminal_open() {
+        assert!(!issue_is_terminal(&types::IssueStatus::Open));
+    }
+
+    #[test]
+    fn issue_is_not_terminal_running() {
+        assert!(!issue_is_terminal(&types::IssueStatus::Running));
+    }
+
+    #[test]
+    fn all_nodes_terminal_empty_roots() {
+        assert!(all_nodes_terminal(&[]));
+    }
+
+    #[test]
+    fn all_nodes_terminal_single_completed_leaf() {
+        let roots = vec![make_node(types::IssueStatus::Completed, vec![])];
+        assert!(all_nodes_terminal(&roots));
+    }
+
+    #[test]
+    fn all_nodes_terminal_single_running_is_false() {
+        let roots = vec![make_node(types::IssueStatus::Running, vec![])];
+        assert!(!all_nodes_terminal(&roots));
+    }
+
+    #[test]
+    fn all_nodes_terminal_terminal_root_with_terminal_child() {
+        let child = make_node(types::IssueStatus::Completed, vec![]);
+        let root = make_node(types::IssueStatus::Failed, vec![child]);
+        assert!(all_nodes_terminal(&[root]));
+    }
+
+    #[test]
+    fn all_nodes_terminal_terminal_root_with_running_child() {
+        let child = make_node(types::IssueStatus::Running, vec![]);
+        let root = make_node(types::IssueStatus::Completed, vec![child]);
+        assert!(!all_nodes_terminal(&[root]));
+    }
+
+    #[test]
+    fn all_nodes_terminal_multiple_roots_all_terminal() {
+        let roots = vec![
+            make_node(types::IssueStatus::Completed, vec![]),
+            make_node(types::IssueStatus::Failed, vec![]),
+        ];
+        assert!(all_nodes_terminal(&roots));
+    }
+
+    #[test]
+    fn all_nodes_terminal_multiple_roots_one_non_terminal() {
+        let roots = vec![
+            make_node(types::IssueStatus::Completed, vec![]),
+            make_node(types::IssueStatus::Running, vec![]),
+        ];
+        assert!(!all_nodes_terminal(&roots));
+    }
+}

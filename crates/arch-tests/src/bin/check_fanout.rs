@@ -717,4 +717,51 @@ let _rt = tokio::runtime::Runtime::new();
         let (count, crates) = fanout_from_str(src);
         assert_eq!(count, 0, "numeric type turbofish must not count, got: {:?}", crates);
     }
+
+    // ── module_names_for_file ─────────────────────────────────────────────────
+
+    #[test]
+    fn module_names_lib_rs_returns_crate_name() {
+        use std::path::PathBuf;
+        let crate_root = PathBuf::from("/repo/crates/mylib");
+        let rs_path = crate_root.join("src/lib.rs");
+        let names = module_names_for_file(&rs_path, &crate_root, "mylib");
+        assert_eq!(names, vec!["mylib"]);
+    }
+
+    #[test]
+    fn module_names_main_rs_returns_crate_name() {
+        use std::path::PathBuf;
+        let crate_root = PathBuf::from("/repo/crates/mycli");
+        let rs_path = crate_root.join("src/main.rs");
+        let names = module_names_for_file(&rs_path, &crate_root, "mycli");
+        assert_eq!(names, vec!["mycli"]);
+    }
+
+    #[test]
+    fn module_names_submodule_returns_two_names() {
+        use std::path::PathBuf;
+        let crate_root = PathBuf::from("/repo/crates/mylib");
+        let rs_path = crate_root.join("src/helpers.rs");
+        let names = module_names_for_file(&rs_path, &crate_root, "mylib");
+        assert_eq!(names, vec!["mylib::helpers", "helpers"]);
+    }
+
+    #[test]
+    fn module_names_mod_rs_uses_parent_dir_name() {
+        use std::path::PathBuf;
+        let crate_root = PathBuf::from("/repo/crates/mylib");
+        let rs_path = crate_root.join("src/commands/mod.rs");
+        let names = module_names_for_file(&rs_path, &crate_root, "mylib");
+        assert_eq!(names, vec!["mylib::commands", "commands"]);
+    }
+
+    #[test]
+    fn module_names_outside_src_dir_returns_empty() {
+        use std::path::PathBuf;
+        let crate_root = PathBuf::from("/repo/crates/mylib");
+        let rs_path = PathBuf::from("/repo/crates/other/src/lib.rs");
+        let names = module_names_for_file(&rs_path, &crate_root, "mylib");
+        assert!(names.is_empty());
+    }
 }
