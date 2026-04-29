@@ -82,7 +82,10 @@ enum ServerAction {
         port: u16,
     },
     #[command(about = "Stop a running server.", long_about = "Stop a running server.\n\nPID file: ~/.ns2/<repo-name>/server-<port>.pid (default: ~/.ns2/<repo-name>/server-9876.pid).")]
-    Stop,
+    Stop {
+        #[arg(long, default_value_t = 9876, help = "Port the server is listening on. Must match the --port used at start.")]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -298,8 +301,8 @@ async fn main() {
             ServerAction::Start { port } => {
                 commands::server::run_start(port).await;
             }
-            ServerAction::Stop => {
-                commands::server::run_stop();
+            ServerAction::Stop { port } => {
+                commands::server::run_stop(port);
             }
         },
         Command::Session { action } => match action {
