@@ -5,6 +5,27 @@ edition = "2021"
 
 [lib]
 
+[dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+regex = "1"
+
+[[bin]]
+name = "check-loc"
+path = "src/bin/check_loc.rs"
+
+[[bin]]
+name = "check-fanout"
+path = "src/bin/check_fanout.rs"
+
+[[bin]]
+name = "check-state"
+path = "src/bin/check_state.rs"
+
+[[bin]]
+name = "cohesion"
+path = "src/bin/cohesion.rs"
+
 [dev-dependencies]
 cargo_metadata = "0.18"
 serde = { version = "1", features = ["derive"] }

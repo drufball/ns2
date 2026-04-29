@@ -130,7 +130,10 @@ name = "arch-tests"
 version = "0.1.0"
 dependencies = [
  "cargo_metadata",
+ "proc-macro2",
+ "regex",
  "serde",
+ "syn 2.0.117",
  "toml",
 ]
 
