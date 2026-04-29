@@ -19,3 +19,19 @@
 [[file_ignore]]
 path = "cli/src/main"
 reason = "main() is a command dispatcher with HTTP calls and process spawning; testable helpers (parse_sse_frames, data_dir_and_pid, format_session_event) are extracted and covered separately"
+
+[[file_ignore]]
+path = "cli/src/client"
+reason = "async HTTP client wrapper; all functions make real network calls to a running server and are not unit-testable"
+
+[[file_ignore]]
+path = "cli/src/commands/agent"
+reason = "all three entry points (run_list, run_new, run_edit) require a real git root via agents_dir() and make real filesystem writes; no extractable pure logic"
+
+[[file_ignore]]
+path = "cli/src/commands/worktree"
+reason = "all three entry points (run_list, run_create, run_delete) invoke git worktree subcommands and require a real repository; no extractable pure logic"
+
+[[file_ignore]]
+path = "arch-tests/src/bin"
+reason = "standalone architecture analysis tools; pure analysis logic (count_code_loc_str, analyze_content, lcom4, fanout_from_str, module_names_for_file, is_test_file, find_test_line_ranges, etc.) is covered by in-binary tests; uncovered code is main(), report(), print_detail(), file-walking, and git-churn helpers that require a real workspace"
