@@ -11,7 +11,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use types::{Session, SessionEvent, SessionStatus};
 use uuid::Uuid;
 
-use crate::state::{spawn_harness_sync, AppState};
+use crate::harness_spawn::spawn_harness_sync;
+use crate::state::AppState;
 use super::Error;
 
 // ─── Request / Response types ─────────────────────────────────────────────────
