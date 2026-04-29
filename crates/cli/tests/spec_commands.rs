@@ -107,6 +107,10 @@ fn spec_sync_clean_exits_zero() {
         .assert()
         .success();
 
+    // Commit the spec so CI's git-ancestry staleness check sees it as newer than main.rs.
+    harness.git(&["add", "cli.spec.md"]);
+    harness.git(&["commit", "-m", "verify spec"]);
+
     harness
         .ns2()
         .args(["spec", "sync", "cli.spec.md"])
