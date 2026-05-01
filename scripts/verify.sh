@@ -31,5 +31,10 @@ if patterns:
 EOF
 )
 
+if ! cargo llvm-cov --version &>/dev/null 2>&1; then
+    echo "cargo-llvm-cov not installed, skipping coverage check"
+    exit 0
+fi
+
 # shellcheck disable=SC2086
 cargo llvm-cov --fail-under-lines 85 $IGNORE_FLAGS
