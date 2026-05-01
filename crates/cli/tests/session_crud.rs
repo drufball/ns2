@@ -2,6 +2,22 @@ mod common;
 
 use predicates::prelude::*;
 
+// ─── Flow 55: --timeout flag ──────────────────────────────────────────────────
+
+#[test]
+fn session_wait_timeout_exits_nonzero_on_non_terminal_session() {
+    let mut h = common::TestHarness::new();
+    h.start_server();
+
+    // A session without a message stays in 'created' — never finishes.
+    let uuid = h.ns2_stdout(&["session", "new"]);
+
+    h.ns2()
+        .args(["session", "wait", "--id", &uuid, "--timeout", "1"])
+        .assert()
+        .failure();
+}
+
 // ─── Flow 02: session create / list ──────────────────────────────────────────
 
 #[test]
