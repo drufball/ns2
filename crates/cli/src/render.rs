@@ -49,6 +49,38 @@ pub(crate) fn print_issue_row(issue: &Issue) {
     println!("{}", format_issue_row(issue));
 }
 
+pub(crate) fn format_issue_show(issue: &Issue) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("id:         {}\n", issue.id));
+    out.push_str(&format!("title:      {}\n", issue.title));
+    out.push_str(&format!("status:     {}\n", issue.status));
+    out.push_str(&format!("assignee:   {}\n", issue.assignee.as_deref().unwrap_or("-")));
+    out.push_str(&format!("branch:     {}\n", issue.branch));
+    if let Some(pid) = &issue.parent_id {
+        out.push_str(&format!("parent:     {pid}\n"));
+    }
+    if !issue.blocked_on.is_empty() {
+        out.push_str(&format!("blocked-on: {}\n", issue.blocked_on.join(", ")));
+    }
+    out.push_str(&format!("created:    {}\n", issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    out.push_str(&format!("updated:    {}\n", issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    out.push_str("\nbody:\n");
+    out.push_str(&issue.body);
+    out.push('\n');
+    if !issue.comments.is_empty() {
+        out.push_str("\ncomments:\n");
+        for comment in &issue.comments {
+            out.push_str(&format!(
+                "  [{}] {}: {}\n",
+                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
+                comment.author,
+                comment.body,
+            ));
+        }
+    }
+    out
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Session event formatting
 

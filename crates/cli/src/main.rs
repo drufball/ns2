@@ -250,6 +250,13 @@ enum IssueAction {
         #[arg(long = "id", num_args = 1.., help = "Issue IDs to wait on. Repeat for multiple.")]
         ids: Vec<String>,
     },
+    #[command(about = "Show details of a single issue.", long_about = "Print full details of a single issue: title, body, status, assignee, branch, and comments.\n\nWith --json, output is machine-readable JSON suitable for scripting:\n  STATUS=$(ns2 issue show --id \"$id\" --json | jq -r .status)")]
+    Show {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+        #[arg(long, help = "Output as JSON instead of human-readable format.")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -372,6 +379,9 @@ async fn main() {
             IssueAction::Wait { ids } => {
                 commands::issue::run_wait(&cli.server, ids).await;
             }
+            IssueAction::Show { id, json } => {
+                commands::issue::run_show(&cli.server, id, json).await;
+            }
         },
         Command::Worktree { action } => match action {
             WorktreeAction::List => {
@@ -393,10 +403,10 @@ mod tests {
     use types::*;
     use uuid::Uuid;
     use crate::render::{
-        format_issue_row, format_session_event, format_sync_error, format_sync_warning,
-        issue_status_symbol, parse_sse_frames, render_issue_tree, render_session_line,
-        render_tree_line, session_status_symbol, spinner_char, truncate_str, IssueTreeNode,
-        SPINNER_FRAMES,
+        format_issue_row, format_issue_show, format_session_event, format_sync_error,
+        format_sync_warning, issue_status_symbol, parse_sse_frames, render_issue_tree,
+        render_session_line, render_tree_line, session_status_symbol, spinner_char, truncate_str,
+        IssueTreeNode, SPINNER_FRAMES,
     };
     use crate::commands::spec::verify_spec_paths;
     use crate::commands::issue::{issue_is_terminal, all_nodes_terminal};
@@ -938,6 +948,103 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
+    }
+
+    // --- issue show CLI parse tests ---
+
+    #[test]
+    fn issue_show_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "show", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Show { id, json } } => {
+                assert_eq!(id, "ab12");
+                assert!(!json);
+            }
+            _ => panic!("expected issue show command"),
+        }
+    }
+
+    #[test]
+    fn issue_show_parses_json_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "show", "--id", "ab12", "--json"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Show { id, json } } => {
+                assert_eq!(id, "ab12");
+                assert!(json);
+            }
+            _ => panic!("expected issue show command"),
+        }
+    }
+
+    #[test]
+    fn issue_show_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "show"]);
+        assert!(result.is_err(), "show without --id should fail to parse");
+    }
+
+    // --- format_issue_show render tests ---
+
+    fn make_show_issue() -> Issue {
+        Issue {
+            id: "ab12".into(),
+            title: "My Title".into(),
+            body: "My body text".into(),
+            status: types::IssueStatus::Open,
+            branch: "feat/my-branch".into(),
+            assignee: Some("swe".into()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap().into(),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z").unwrap().into(),
+        }
+    }
+
+    #[test]
+    fn format_issue_show_contains_id_title_status_body() {
+        let issue = make_show_issue();
+        let out = format_issue_show(&issue);
+        assert!(out.contains("ab12"), "should contain id");
+        assert!(out.contains("My Title"), "should contain title");
+        assert!(out.contains("open"), "should contain status");
+        assert!(out.contains("My body text"), "should contain body");
+    }
+
+    #[test]
+    fn format_issue_show_contains_assignee_and_branch() {
+        let issue = make_show_issue();
+        let out = format_issue_show(&issue);
+        assert!(out.contains("swe"), "should contain assignee");
+        assert!(out.contains("feat/my-branch"), "should contain branch");
+    }
+
+    #[test]
+    fn format_issue_show_no_assignee_shows_dash() {
+        let mut issue = make_show_issue();
+        issue.assignee = None;
+        let out = format_issue_show(&issue);
+        assert!(out.contains("assignee:   -"), "no assignee should show dash");
+    }
+
+    #[test]
+    fn format_issue_show_displays_comments() {
+        let mut issue = make_show_issue();
+        issue.comments = vec![types::IssueComment {
+            author: "user".into(),
+            body: "This is a comment".into(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T11:00:00Z").unwrap().into(),
+        }];
+        let out = format_issue_show(&issue);
+        assert!(out.contains("This is a comment"), "should contain comment body");
+        assert!(out.contains("user"), "should contain comment author");
+    }
+
+    #[test]
+    fn format_issue_show_no_comments_omits_comments_section() {
+        let issue = make_show_issue();
+        let out = format_issue_show(&issue);
+        assert!(!out.contains("comments:"), "no comments should omit comments section");
     }
 
     #[test]
