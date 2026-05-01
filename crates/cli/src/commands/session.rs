@@ -142,8 +142,19 @@ pub(crate) async fn run_send(server: &str, id: Option<String>, name: Option<Stri
 
 pub(crate) async fn run_stop(server: &str, id: Option<String>, name: Option<String>) {
     let session_id = resolve_session_id(server, id, name).await;
-    // For MVP, just print "not implemented" — real cancellation is out of scope
-    println!("Stop not yet implemented for session {session_id}");
+    let url = format!("{}/sessions/{}/cancel", server, session_id);
+    let client = reqwest::Client::new();
+    let resp = client.post(&url).send().await.unwrap_or_else(|e| {
+        handle_connection_error(&e);
+    });
+    if !resp.status().is_success() {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            eprintln!("Error: session not found: {session_id}");
+            std::process::exit(1);
+        }
+        print_error_response(resp).await;
+    }
+    eprintln!("Session {session_id} cancelled.");
 }
 
 pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {

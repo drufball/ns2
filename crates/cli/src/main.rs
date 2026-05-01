@@ -256,6 +256,11 @@ enum IssueAction {
         #[arg(long, help = "Exit after N seconds even if issues have not finished. Exits 1 if timeout fired before completion.")]
         timeout: Option<u64>,
     },
+    #[command(about = "Cancel a running or open issue.", long_about = "Cancel a running or open issue.\n\nSends a cancellation signal to the session associated with the issue, transitions the issue to 'cancelled' status, and terminates the harness loop cleanly.\n\nOnly open or running issues can be cancelled. Use `issue reopen` to resume work on a cancelled issue.")]
+    Cancel {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+    },
     #[command(about = "Show details of a single issue.", long_about = "Print full details of a single issue: title, body, status, assignee, branch, and comments.\n\nWith --json, output is machine-readable JSON suitable for scripting:\n  STATUS=$(ns2 issue show --id \"$id\" --json | jq -r .status)")]
     Show {
         #[arg(long, help = "The issue ID. Required.")]
@@ -388,6 +393,9 @@ async fn main() {
             IssueAction::Show { id, json } => {
                 commands::issue::run_show(&cli.server, id, json).await;
             }
+            IssueAction::Cancel { id } => {
+                commands::issue::run_cancel(&cli.server, id).await;
+            }
         },
         Command::Worktree { action } => match action {
             WorktreeAction::List => {
@@ -427,6 +435,11 @@ mod tests {
     #[test]
     fn issue_is_terminal_failed_is_true() {
         assert!(issue_is_terminal(&types::IssueStatus::Failed));
+    }
+
+    #[test]
+    fn issue_is_terminal_cancelled_is_true() {
+        assert!(issue_is_terminal(&types::IssueStatus::Cancelled));
     }
 
     #[test]
@@ -1052,6 +1065,34 @@ mod tests {
     fn issue_show_missing_id_fails_to_parse() {
         let result = Cli::try_parse_from(["ns2", "issue", "show"]);
         assert!(result.is_err(), "show without --id should fail to parse");
+    }
+
+    #[test]
+    fn issue_cancel_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "cancel", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Cancel { id } } => {
+                assert_eq!(id, "ab12");
+            }
+            _ => panic!("expected issue cancel command"),
+        }
+    }
+
+    #[test]
+    fn issue_cancel_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "cancel"]);
+        assert!(result.is_err(), "cancel without --id should fail to parse");
+    }
+
+    #[test]
+    fn session_stop_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "stop", "--id", "550e8400-e29b-41d4-a716-446655440000"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Stop { id, .. } } => {
+                assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+            }
+            _ => panic!("expected session stop command"),
+        }
     }
 
     // --- format_issue_show render tests ---

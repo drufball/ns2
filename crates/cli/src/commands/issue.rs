@@ -5,7 +5,7 @@ use crate::client::{handle_connection_error, print_error_response};
 use crate::render::{format_issue_show, print_issue_row, render_issue_tree, IssueTreeNode};
 
 pub(crate) fn issue_is_terminal(status: &IssueStatus) -> bool {
-    matches!(status, IssueStatus::Completed | IssueStatus::Failed)
+    matches!(status, IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled)
 }
 
 /// Check whether every node in the issue tree (roots AND all descendants) is terminal.
@@ -314,6 +314,22 @@ pub(crate) async fn run_show(server: &str, id: String, json: bool) {
     }
 }
 
+pub(crate) async fn run_cancel(server: &str, id: String) {
+    let client = reqwest::Client::new();
+    let url = format!("{}/issues/{}/cancel", server, id);
+    let resp = client.post(&url).send().await.unwrap_or_else(|e| {
+        handle_connection_error(&e);
+    });
+    if !resp.status().is_success() {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            eprintln!("Error: issue not found: {id}");
+            std::process::exit(1);
+        }
+        print_error_response(resp).await;
+    }
+    eprintln!("Issue {id} cancelled.");
+}
+
 pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     if ids.is_empty() {
         eprintln!("Error: at least one --id is required");
@@ -528,6 +544,11 @@ mod tests {
     #[test]
     fn issue_is_terminal_failed() {
         assert!(issue_is_terminal(&types::IssueStatus::Failed));
+    }
+
+    #[test]
+    fn issue_is_terminal_cancelled() {
+        assert!(issue_is_terminal(&types::IssueStatus::Cancelled));
     }
 
     #[test]

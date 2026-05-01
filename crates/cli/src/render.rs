@@ -195,6 +195,7 @@ pub(crate) fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String,
         IssueStatus::Completed => ("✔".to_string(), "completed"),
         IssueStatus::Failed => ("✗".to_string(), "failed"),
         IssueStatus::Open => ("●".to_string(), "open"),
+        IssueStatus::Cancelled => ("⊘".to_string(), "cancelled"),
     }
 }
 
