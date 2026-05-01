@@ -12,6 +12,8 @@ use chrono::Utc;
 
 /// Run the tool dispatch loop for a single LLM turn sequence.
 /// `messages` should already contain the full history including the new user message.
+/// Hook subprocesses are started with `config.cwd` as their working directory so they
+/// operate on the session's worktree rather than the server's cwd.
 pub(crate) async fn run_tool_dispatch_loop(
     config: &HarnessConfig,
     client: &Arc<dyn anthropic::AnthropicClient>,
@@ -86,7 +88,7 @@ pub(crate) async fn run_tool_dispatch_loop(
             "tool_use" => { /* dispatch tools below */ }
             "end_turn" => {
                 // Run Stop hooks; if any exit non-zero, return their stdout as an injected message
-                if let Some(injected) = run_stop_hooks(hooks, config.session.id).await {
+                if let Some(injected) = run_stop_hooks(hooks, config.session.id, config.cwd.as_deref()).await {
                     return Ok(Some(injected));
                 }
                 break;
@@ -113,7 +115,7 @@ pub(crate) async fn run_tool_dispatch_loop(
             if let ContentBlock::ToolUse { id, name, input } = block {
                 // Run PreToolUse hooks
                 let result = if let Some(blocked) =
-                    run_pre_tool_use_hooks(hooks, name, input).await
+                    run_pre_tool_use_hooks(hooks, name, input, config.cwd.as_deref()).await
                 {
                     // Hook blocked the tool — return hook stderr as the tool result
                     blocked
@@ -127,7 +129,7 @@ pub(crate) async fn run_tool_dispatch_loop(
                         None => format!("Error: unknown tool '{name}'"),
                     };
                     // Run PostToolUse hooks (exit code ignored)
-                    run_post_tool_use_hooks(hooks, name, input, &tool_output).await;
+                    run_post_tool_use_hooks(hooks, name, input, &tool_output, config.cwd.as_deref()).await;
                     tool_output
                 };
                 tool_result_blocks.push(ContentBlock::ToolResult {
@@ -181,6 +183,7 @@ pub async fn run(
 
     // If we resolved a cwd, rebuild the standard tool set with that cwd so all
     // file operations and shell commands run relative to the worktree.
+    // Also store it on config so hooks are spawned with the same working directory.
     if let Some(ref cwd) = session_cwd {
         config.tools = vec![
             Arc::new(tools::BashTool { cwd: Some(cwd.clone()) }),
@@ -188,6 +191,7 @@ pub async fn run(
             Arc::new(tools::WriteTool { cwd: Some(cwd.clone()) }),
             Arc::new(tools::EditTool { cwd: Some(cwd.clone()) }),
         ];
+        config.cwd = Some(cwd.clone());
     }
 
     // Resolve the effective git root (injected in tests; discovered via git in production).

@@ -33,6 +33,7 @@ pub(crate) fn spawn_harness_sync(
         model,
         tools,
         git_root: None,
+        cwd: None,
     };
 
     let session_id = session_clone.id;

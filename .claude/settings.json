@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}\"/.claude/hooks/stop-commit-push.sh",
+            "timeout": 30,
+            "statusMessage": "Checking for uncommitted or unpushed work..."
+          }
+        ]
+      }
     ]
   }
 }

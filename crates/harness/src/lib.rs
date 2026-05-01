@@ -53,6 +53,10 @@ pub struct HarnessConfig {
     pub tools: Vec<Arc<dyn tools::Tool>>,
     /// Injectable git root for tests. Production code passes `None`; tests pass `Some(temp_dir)`.
     pub git_root: Option<PathBuf>,
+    /// Session working directory (worktree path). Hooks are spawned with this as their cwd
+    /// so they operate on the correct tree. Set by `run()` after resolving the worktree;
+    /// tests leave this as `None`.
+    pub cwd: Option<PathBuf>,
 }
 
 
@@ -273,6 +277,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
 
         let client = Arc::new(StubClient);
@@ -318,6 +323,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -364,6 +370,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -385,6 +392,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -429,6 +437,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -520,6 +529,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(MultiBlockClient);
         let db = Arc::new(mock_db);
@@ -553,6 +563,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -651,6 +662,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -719,6 +731,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysErrTool)],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -869,6 +882,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(TwoToolClient { call_count: std::sync::atomic::AtomicU32::new(0) });
         let db = Arc::new(mock_db);
@@ -979,6 +993,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
 
         let db = Arc::new(mock_db);
@@ -1053,6 +1068,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(MaxTokensClient);
         let db = Arc::new(mock_db);
@@ -1150,6 +1166,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)], // only "read", not "nonexistent_tool"
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(UnknownToolClient::new());
         let db = Arc::new(mock_db);
@@ -1198,6 +1215,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![], // empty
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(StubClient);
         let db = Arc::new(mock_db);
@@ -1275,6 +1293,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -1339,6 +1358,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(TwoToolOrderingClient {
             call_count: std::sync::atomic::AtomicU32::new(0),
@@ -1433,6 +1453,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(KnownTokenClient);
         let db = Arc::new(mock_db);
@@ -1562,6 +1583,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
 
         let db = Arc::new(mock_db);
@@ -1653,6 +1675,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1702,6 +1725,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1756,6 +1780,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1807,6 +1832,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1864,6 +1890,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1924,6 +1951,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(SystemCapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -2005,7 +2033,7 @@ mod tests {
         };
 
         let result =
-            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"})).await;
+            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"}), None).await;
         assert!(result.is_none(), "exit 0 hook must not block the tool, got: {result:?}");
     }
 
@@ -2022,7 +2050,7 @@ mod tests {
         };
 
         let result =
-            run_pre_tool_use_hooks(&hooks, "bash", &serde_json::json!({})).await;
+            run_pre_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), None).await;
         assert!(result.is_some(), "exit 1 hook must block the tool");
         let msg = result.unwrap();
         assert!(
@@ -2044,7 +2072,7 @@ mod tests {
         };
 
         let result =
-            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({})).await;
+            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({}), None).await;
         assert!(result.is_none(), "hook for 'bash' must not match tool 'read'");
     }
 
@@ -2060,7 +2088,7 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        run_post_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), "result").await;
+        run_post_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), "result", None).await;
     }
 
     #[tokio::test]
@@ -2075,7 +2103,7 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        let result = run_stop_hooks(&hooks, Uuid::new_v4(), None).await;
         assert!(result.is_none(), "exit 0 stop hook must allow completion, got: {result:?}");
     }
 
@@ -2091,7 +2119,7 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        let result = run_stop_hooks(&hooks, Uuid::new_v4(), None).await;
         assert!(result.is_some(), "exit 1 stop hook must inject a message");
         let msg = result.unwrap();
         assert!(
@@ -2115,7 +2143,7 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        let result = run_stop_hooks(&hooks, Uuid::new_v4()).await;
+        let result = run_stop_hooks(&hooks, Uuid::new_v4(), None).await;
         assert!(
             result.is_none(),
             "exit 127 (command not found) must fail open and allow completion, got: {result:?}"
@@ -2123,9 +2151,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stop_hook_runs_in_session_cwd() {
+        use agents::{AgentHooks, HookEntry};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Write a marker in the temp dir; the hook echoes pwd and exits 1 to surface the cwd.
+        std::fs::write(tmp.path().join("marker.txt"), "present").unwrap();
+
+        let hooks = AgentHooks {
+            stop: vec![HookEntry {
+                matcher: None,
+                hooks: vec![hook_cmd("echo $(pwd); exit 1", 5)],
+            }],
+            ..AgentHooks::default()
+        };
+
+        let result = run_stop_hooks(&hooks, Uuid::new_v4(), Some(tmp.path())).await;
+        assert!(result.is_some(), "hook must inject a message when running with a cwd");
+        let msg = result.unwrap();
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            msg.trim().ends_with(canonical.to_str().unwrap()),
+            "hook must run in the session cwd; expected suffix {:?}, got: {msg:?}",
+            canonical.to_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn test_hook_timeout_kills_command_and_returns_exit_1() {
         let cmd = hook_cmd("sleep 5", 1);
-        let (exit_code, _stdout, stderr) = run_hook(&cmd, "{}").await;
+        let (exit_code, _stdout, stderr) = run_hook(&cmd, "{}", None).await;
         assert_eq!(exit_code, 1, "timed-out hook must return exit_code=1");
         assert!(
             stderr.contains("timed out"),
@@ -2173,6 +2228,7 @@ mod tests {
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
@@ -2227,6 +2283,7 @@ mod tests {
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
@@ -2284,6 +2341,7 @@ mod tests {
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: None,
+            cwd: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
@@ -2324,6 +2382,7 @@ mod tests {
             model: "test".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
         let mock_db = permissive_mock_db();
@@ -2359,6 +2418,7 @@ mod tests {
             model: "test".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client: Arc<dyn AnthropicClient> = Arc::new(StubClient);
         let mock_db = permissive_mock_db();
@@ -2421,6 +2481,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         // 5 failures then success — exactly at the retry limit
         let client = Arc::new(RateLimitThenOkClient::new(5));
@@ -2462,6 +2523,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         // 6 failures → exceeds max 5 retries
         let client = Arc::new(RateLimitThenOkClient::new(6));
@@ -2504,6 +2566,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         let client = Arc::new(AlwaysServerErrorClient);
         let db = Arc::new(mock_db);
@@ -2541,6 +2604,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             tools: vec![],
             git_root: None,
+            cwd: None,
         };
         // 3 failures → exceeds override max of 2
         let client = Arc::new(RateLimitThenOkClient::new(3));
@@ -2612,6 +2676,7 @@ mod tests {
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);
@@ -2675,6 +2740,7 @@ mod tests {
             model: "test".into(),
             tools: vec![Arc::new(AlwaysOkTool)],
             git_root: Some(tmp.path().to_path_buf()),
+            cwd: None,
         };
         let client = Arc::new(ToolUseClient::new());
         let db = Arc::new(mock_db);

@@ -1,22 +1,29 @@
 use agents::{AgentHooks, HookCommand, HookEntry};
 use regex::Regex;
+use std::path::Path;
 use uuid::Uuid;
 
 /// Run a single hook command with JSON on stdin.
 /// Returns `(exit_code, stdout, stderr)`.
 /// Kills the process and returns exit_code=1 on timeout.
-pub(crate) async fn run_hook(cmd: &HookCommand, stdin_json: &str) -> (i32, String, String) {
+/// When `cwd` is `Some`, the subprocess is started with that working directory
+/// so hooks run inside the agent's worktree rather than the server's cwd.
+pub(crate) async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&Path>) -> (i32, String, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     use tokio::time::{sleep, Duration};
 
-    let mut child = match Command::new("sh")
+    let mut builder = Command::new("sh");
+    builder
         .arg("-c")
         .arg(&cmd.command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        builder.current_dir(dir);
+    }
+    let mut child = match builder.spawn()
     {
         Ok(c) => c,
         Err(e) => {
@@ -79,10 +86,12 @@ pub(crate) fn matching_hook_entries<'a>(entries: &'a [HookEntry], tool_name: &st
 /// Run PreToolUse hooks for `tool_name`.
 /// Returns `Some(blocked_message)` if any hook exits non-zero (tool should be skipped),
 /// or `None` if all hooks pass.
+/// `cwd` is forwarded to the hook subprocess so it runs in the session's worktree.
 pub(crate) async fn run_pre_tool_use_hooks(
     hooks: &AgentHooks,
     tool_name: &str,
     tool_input: &serde_json::Value,
+    cwd: Option<&Path>,
 ) -> Option<String> {
     let stdin = serde_json::json!({
         "tool_name": tool_name,
@@ -92,7 +101,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
 
     for entry in matching_hook_entries(&hooks.pre_tool_use, tool_name) {
         for cmd in &entry.hooks {
-            let (exit_code, _stdout, stderr) = run_hook(cmd, &stdin_str).await;
+            let (exit_code, _stdout, stderr) = run_hook(cmd, &stdin_str, cwd).await;
             if exit_code != 0 {
                 return Some(if stderr.is_empty() {
                     format!("Hook blocked tool '{tool_name}' (exit {exit_code})")
@@ -106,11 +115,13 @@ pub(crate) async fn run_pre_tool_use_hooks(
 }
 
 /// Run PostToolUse hooks for `tool_name`. Exit code is always ignored.
+/// `cwd` is forwarded to the hook subprocess so it runs in the session's worktree.
 pub(crate) async fn run_post_tool_use_hooks(
     hooks: &AgentHooks,
     tool_name: &str,
     tool_input: &serde_json::Value,
     tool_result: &str,
+    cwd: Option<&Path>,
 ) {
     let stdin = serde_json::json!({
         "tool_name": tool_name,
@@ -121,7 +132,7 @@ pub(crate) async fn run_post_tool_use_hooks(
 
     for entry in matching_hook_entries(&hooks.post_tool_use, tool_name) {
         for cmd in &entry.hooks {
-            run_hook(cmd, &stdin_str).await;
+            run_hook(cmd, &stdin_str, cwd).await;
         }
     }
 }
@@ -134,13 +145,16 @@ pub(crate) async fn run_post_tool_use_hooks(
 /// open — the hook is skipped and the session is allowed to complete normally.
 /// This prevents an infinite loop when a hook script cannot be found (e.g. because
 /// `$CLAUDE_PROJECT_DIR` is unset and the path cannot be resolved).
-pub(crate) async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid) -> Option<String> {
+///
+/// `cwd` sets the working directory for the hook subprocess so it runs inside the
+/// session's worktree rather than the server process's cwd.
+pub(crate) async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid, cwd: Option<&Path>) -> Option<String> {
     let stdin = serde_json::json!({ "session_id": session_id.to_string() });
     let stdin_str = stdin.to_string();
 
     for entry in &hooks.stop {
         for cmd in &entry.hooks {
-            let (exit_code, stdout, _stderr) = run_hook(cmd, &stdin_str).await;
+            let (exit_code, stdout, _stderr) = run_hook(cmd, &stdin_str, cwd).await;
             if exit_code != 0 {
                 // Exit 127 = command not found: configuration error, not a deliberate
                 // block. Fail open so the agent is not trapped in an infinite loop.

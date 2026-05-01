@@ -256,3 +256,54 @@ exit 0
     );
     assert!(combined.contains("uncommitted changes"), "expected 'uncommitted changes' message");
 }
+
+#[test]
+fn commit_guard_exits_nonzero_on_unpushed_commits() {
+    let mut h = common::TestHarness::new();
+    h.start_server();
+    h.setup_origin();
+    // Push initial state so the local branch tracks origin
+    h.git(&["push", "-u", "origin", "HEAD"]);
+
+    let hooks_dir = h.repo_dir.path().join(".claude/hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let script_path = hooks_dir.join("stop-commit-push.sh");
+    std::fs::write(&script_path, r#"#!/usr/bin/env bash
+GIT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+STATUS=$(git -C "$GIT_DIR" status --short 2>/dev/null)
+if [ -n "$STATUS" ]; then
+  echo "You have uncommitted changes. Please commit your work before stopping."
+  exit 1
+fi
+HAS_REMOTE=$(git -C "$GIT_DIR" remote 2>/dev/null)
+if [ -n "$HAS_REMOTE" ]; then
+  UNPUSHED=$(git -C "$GIT_DIR" log HEAD --oneline --not --remotes 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$UNPUSHED" -gt 0 ]; then
+    echo "You have ${UNPUSHED} unpushed commit(s). Please push your work before stopping."
+    exit 1
+  fi
+fi
+exit 0
+"#).unwrap();
+    std::process::Command::new("chmod")
+        .args(["+x", script_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // Commit the script so the working tree is clean
+    h.git(&["add", "."]);
+    h.git(&["commit", "-m", "add commit-push guard"]);
+    // Do NOT push — this commit should be detected as unpushed
+    let repo_dir = h.repo_dir.path().to_path_buf();
+    let output = std::process::Command::new(script_path.to_str().unwrap())
+        .current_dir(&repo_dir)
+        .env("CLAUDE_PROJECT_DIR", &repo_dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "exit code should be non-zero with unpushed commits");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("unpushed commit"), "expected 'unpushed commit' message, got: {combined}");
+}
