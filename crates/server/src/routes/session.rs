@@ -291,6 +291,58 @@ pub(crate) async fn update_session_status(
     Ok(Json(session))
 }
 
+/// POST /sessions/:id/cancel — cancel a running or created session.
+///
+/// Drops the mpsc sender so the harness exits cleanly on its next recv() call,
+/// marks the session `cancelled` in the DB, and marks any linked issue `failed`
+/// (the issue wasn't explicitly cancelled — its session was, so the issue impl failed).
+pub(crate) async fn cancel_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> std::result::Result<Json<Session>, Error> {
+    let session = state.db.get_session(id).await.map_err(|e| match e {
+        db::Error::NotFound => Error::NotFound,
+        other => Error::Db(other),
+    })?;
+
+    match session.status {
+        SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+            return Err(Error::BadRequest(format!(
+                "session is already in terminal state: {}",
+                session.status
+            )));
+        }
+        _ => {}
+    }
+
+    // Drop the msg sender — harness exits cleanly on next recv().
+    {
+        let mut senders = state.msg_senders.lock().await;
+        senders.remove(&id);
+    }
+
+    state.db.update_session_status(id, SessionStatus::Cancelled).await?;
+
+    // Mark any linked issue as failed (the issue wasn't explicitly cancelled).
+    let linked_issues = state.db.list_issues_by_session_id(id).await.unwrap_or_default();
+    for mut issue in linked_issues {
+        use types::{IssueComment, IssueStatus};
+        if matches!(issue.status, IssueStatus::Running | IssueStatus::Open) {
+            issue.comments.push(IssueComment {
+                author: "system".to_string(),
+                created_at: chrono::Utc::now(),
+                body: "session cancelled".to_string(),
+            });
+            issue.status = IssueStatus::Failed;
+            issue.updated_at = chrono::Utc::now();
+            let _ = state.db.update_issue(&issue).await;
+        }
+    }
+
+    let updated = state.db.get_session(id).await?;
+    Ok(Json(updated))
+}
+
 /// GET /sessions/:id/last_text — return the last assistant text content block for a session.
 /// Returns JSON: {"text": "<content>"} or {"text": null} if no text content found.
 pub(crate) async fn session_last_text(

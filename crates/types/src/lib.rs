@@ -9,6 +9,7 @@ pub enum IssueStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl std::fmt::Display for IssueStatus {
@@ -18,6 +19,7 @@ impl std::fmt::Display for IssueStatus {
             IssueStatus::Running => write!(f, "running"),
             IssueStatus::Completed => write!(f, "completed"),
             IssueStatus::Failed => write!(f, "failed"),
+            IssueStatus::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -30,6 +32,7 @@ impl std::str::FromStr for IssueStatus {
             "running" => Ok(IssueStatus::Running),
             "completed" => Ok(IssueStatus::Completed),
             "failed" => Ok(IssueStatus::Failed),
+            "cancelled" => Ok(IssueStatus::Cancelled),
             _ => Err(format!("unknown issue status: {s}")),
         }
     }
@@ -448,6 +451,7 @@ mod tests {
             IssueStatus::Running,
             IssueStatus::Completed,
             IssueStatus::Failed,
+            IssueStatus::Cancelled,
         ] {
             let s = status.to_string();
             let parsed: IssueStatus = s.parse().expect("should parse");
@@ -459,6 +463,17 @@ mod tests {
     fn issue_status_from_str_unknown_returns_err() {
         let result: std::result::Result<IssueStatus, _> = "bogus".parse();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn issue_status_display_cancelled() {
+        assert_eq!(IssueStatus::Cancelled.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn issue_status_from_str_cancelled() {
+        let s: IssueStatus = "cancelled".parse().expect("should parse");
+        assert_eq!(s, IssueStatus::Cancelled);
     }
 
     // --- Issue serde round-trip ---

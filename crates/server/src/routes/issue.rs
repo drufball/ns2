@@ -184,6 +184,33 @@ pub(crate) async fn reopen_issue(
     Ok(Json(issue))
 }
 
+/// POST /issues/:id/cancel — cancel a running or open issue.
+///
+/// Marks the issue `cancelled`. If the issue has a linked session, also drops
+/// the session's msg sender (terminating the harness) and marks the session
+/// `cancelled` in the DB.
+pub(crate) async fn cancel_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Issue>, Error> {
+    let issue = state.issue_service.cancel_issue(id).await?;
+
+    if let Some(session_id) = issue.session_id {
+        // Drop the msg sender so the harness exits cleanly.
+        {
+            let mut senders = state.msg_senders.lock().await;
+            senders.remove(&session_id);
+        }
+        // Update session status to cancelled.
+        let _ = state
+            .db
+            .update_session_status(session_id, types::SessionStatus::Cancelled)
+            .await;
+    }
+
+    Ok(Json(issue))
+}
+
 pub(crate) async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,

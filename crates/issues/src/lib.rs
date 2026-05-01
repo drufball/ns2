@@ -233,16 +233,40 @@ impl IssueService {
         Ok(issue)
     }
 
+    pub async fn cancel_issue(&self, id: String) -> Result<Issue> {
+        let mut issue = self.db.get_issue(id.clone()).await?;
+
+        match issue.status {
+            IssueStatus::Open | IssueStatus::Running => {}
+            _ => {
+                return Err(Error::BadRequest(format!(
+                    "cannot cancel issue {id}: only open or running issues can be cancelled (current status: {})",
+                    issue.status
+                )));
+            }
+        }
+
+        issue.comments.push(IssueComment {
+            author: "system".to_string(),
+            created_at: Utc::now(),
+            body: "issue cancelled by user".to_string(),
+        });
+        issue.status = IssueStatus::Cancelled;
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        Ok(issue)
+    }
+
     pub async fn reopen_issue(&self, id: String, comment: Option<String>) -> Result<Issue> {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
-        // Only `failed` and `completed` can be reopened
+        // Only `failed`, `completed`, and `cancelled` can be reopened
         let keep_session_id = match issue.status {
-            IssueStatus::Failed => false,   // clear session_id → fresh session on next start
-            IssueStatus::Completed => true, // keep session_id → resume history on next start
+            IssueStatus::Failed | IssueStatus::Cancelled => false, // clear session_id → fresh session on next start
+            IssueStatus::Completed => true,                        // keep session_id → resume history on next start
             _ => {
                 return Err(Error::BadRequest(format!(
-                    "cannot reopen issue {id}: only failed or completed issues can be reopened (current status: {})",
+                    "cannot reopen issue {id}: only failed, completed, or cancelled issues can be reopened (current status: {})",
                     issue.status
                 )));
             }
@@ -937,6 +961,95 @@ mod tests {
         assert_eq!(persisted.comments.len(), 1);
         assert_eq!(persisted.comments[0].author, "system");
         assert_eq!(persisted.comments[0].body, "timeout exceeded");
+    }
+
+    // --- cancel_issue ---
+
+    #[tokio::test]
+    async fn cancel_open_issue_transitions_to_cancelled() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.cancel_issue("ab12".into()).await.unwrap();
+
+        assert_eq!(result.status, IssueStatus::Cancelled);
+        assert_eq!(result.comments.len(), 1);
+        assert_eq!(result.comments[0].author, "system");
+        assert_eq!(result.comments[0].body, "issue cancelled by user");
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_running_issue_transitions_to_cancelled() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.session_id = Some(Uuid::new_v4());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.cancel_issue("ab12".into()).await.unwrap();
+
+        assert_eq!(result.status, IssueStatus::Cancelled);
+        assert!(result.session_id.is_some(), "session_id should be preserved");
+    }
+
+    #[tokio::test]
+    async fn cancel_completed_issue_fails() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Completed;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.cancel_issue("ab12".into()).await;
+
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn cancel_failed_issue_fails() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Failed;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.cancel_issue("ab12".into()).await;
+
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn cancel_already_cancelled_issue_fails() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Cancelled;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.cancel_issue("ab12".into()).await;
+
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn reopen_cancelled_issue_clears_session_id() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Cancelled;
+        issue.session_id = Some(Uuid::new_v4());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.reopen_issue("ab12".into(), None).await.unwrap();
+
+        assert_eq!(result.status, IssueStatus::Open);
+        assert!(result.session_id.is_none());
     }
 
     // --- slugify ---
