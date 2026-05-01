@@ -575,8 +575,12 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["commit", "-m", "unmerged commit"])
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "unmerged commit"])
             .current_dir(&worktree_path)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .status()
             .unwrap();
 
@@ -603,8 +607,12 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["commit", "-m", "extra"])
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "extra"])
             .current_dir(&worktree_path)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .status()
             .unwrap();
 
@@ -668,8 +676,12 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
             .current_dir(local_dir.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .status()
             .unwrap();
         std::process::Command::new("git")
@@ -719,8 +731,12 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
             .current_dir(local_dir.path())
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .status()
             .unwrap();
         std::process::Command::new("git")
