@@ -116,6 +116,8 @@ enum SessionAction {
         name: Option<String>,
         #[arg(long, help = "Only replay the last N turns of history before streaming live. 0 skips all history.")]
         turns: Option<usize>,
+        #[arg(long, help = "Exit after N seconds even if the session has not finished. Exits 0 if session completed naturally, 1 if timeout fired.")]
+        timeout: Option<u64>,
     },
     #[command(about = "Queue a message to a session.", long_about = "Queue a message to a session.\n\nUse this to give follow-up instructions, provide additional context, or correct an agent that's going down an incorrect path. The message is queued immediately; the agent picks it up on its next turn. Messages can only be sent to sessions that are in the `created` or `running` state.")]
     Send {
@@ -137,6 +139,8 @@ enum SessionAction {
     Wait {
         #[arg(long = "id", num_args = 1.., help = "Session UUIDs to wait on. Repeat for multiple.")]
         ids: Vec<String>,
+        #[arg(long, help = "Exit after N seconds even if sessions have not finished. Exits 1 if timeout fired before completion.")]
+        timeout: Option<u64>,
     },
 }
 
@@ -249,6 +253,8 @@ enum IssueAction {
     Wait {
         #[arg(long = "id", num_args = 1.., help = "Issue IDs to wait on. Repeat for multiple.")]
         ids: Vec<String>,
+        #[arg(long, help = "Exit after N seconds even if issues have not finished. Exits 1 if timeout fired before completion.")]
+        timeout: Option<u64>,
     },
     #[command(about = "Show details of a single issue.", long_about = "Print full details of a single issue: title, body, status, assignee, branch, and comments.\n\nWith --json, output is machine-readable JSON suitable for scripting:\n  STATUS=$(ns2 issue show --id \"$id\" --json | jq -r .status)")]
     Show {
@@ -319,8 +325,8 @@ async fn main() {
             SessionAction::New { name, agent, message, wait } => {
                 commands::session::run_new(&cli.server, name, agent, message, wait).await;
             }
-            SessionAction::Tail { id, name, turns } => {
-                commands::session::run_tail(&cli.server, id, name, turns).await;
+            SessionAction::Tail { id, name, turns, timeout } => {
+                commands::session::run_tail(&cli.server, id, name, turns, timeout).await;
             }
             SessionAction::Send { id, name, message } => {
                 commands::session::run_send(&cli.server, id, name, message).await;
@@ -328,8 +334,8 @@ async fn main() {
             SessionAction::Stop { id, name } => {
                 commands::session::run_stop(&cli.server, id, name).await;
             }
-            SessionAction::Wait { ids } => {
-                commands::session::run_wait(&cli.server, ids).await;
+            SessionAction::Wait { ids, timeout } => {
+                commands::session::run_wait(&cli.server, ids, timeout).await;
             }
         },
         Command::Agent { action } => match action {
@@ -376,8 +382,8 @@ async fn main() {
             IssueAction::List { status, assignee, parent, blocked_on } => {
                 commands::issue::run_list(&cli.server, status, assignee, parent, blocked_on).await;
             }
-            IssueAction::Wait { ids } => {
-                commands::issue::run_wait(&cli.server, ids).await;
+            IssueAction::Wait { ids, timeout } => {
+                commands::issue::run_wait(&cli.server, ids, timeout).await;
             }
             IssueAction::Show { id, json } => {
                 commands::issue::run_show(&cli.server, id, json).await;
@@ -610,6 +616,72 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn session_tail_parses_timeout_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc", "--timeout", "10"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Tail { timeout, .. } } => {
+                assert_eq!(timeout, Some(10));
+            }
+            _ => panic!("expected session tail command"),
+        }
+    }
+
+    #[test]
+    fn session_tail_no_timeout_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Tail { timeout, .. } } => {
+                assert_eq!(timeout, None);
+            }
+            _ => panic!("expected session tail command"),
+        }
+    }
+
+    #[test]
+    fn session_wait_parses_timeout_flag() {
+        let cli = Cli::try_parse_from(["ns2", "session", "wait", "--id", "abc", "--timeout", "30"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Wait { timeout, .. } } => {
+                assert_eq!(timeout, Some(30));
+            }
+            _ => panic!("expected session wait command"),
+        }
+    }
+
+    #[test]
+    fn session_wait_no_timeout_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "session", "wait", "--id", "abc"]).unwrap();
+        match cli.command {
+            Command::Session { action: SessionAction::Wait { timeout, .. } } => {
+                assert_eq!(timeout, None);
+            }
+            _ => panic!("expected session wait command"),
+        }
+    }
+
+    #[test]
+    fn issue_wait_parses_timeout_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "wait", "--id", "abc", "--timeout", "60"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Wait { timeout, .. } } => {
+                assert_eq!(timeout, Some(60));
+            }
+            _ => panic!("expected issue wait command"),
+        }
+    }
+
+    #[test]
+    fn issue_wait_no_timeout_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "wait", "--id", "abc"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Wait { timeout, .. } } => {
+                assert_eq!(timeout, None);
+            }
+            _ => panic!("expected issue wait command"),
+        }
+    }
+
+    #[test]
     fn session_tail_parses_turns_flag() {
         let cli = Cli::try_parse_from(["ns2", "session", "tail", "--id", "abc", "--turns", "5"]).unwrap();
         match cli.command {
@@ -726,7 +798,7 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Session { action: SessionAction::Wait { ids } } => {
+            Command::Session { action: SessionAction::Wait { ids, .. } } => {
                 assert_eq!(ids.len(), 2);
                 assert!(ids.iter().any(|id| id == uuid1));
                 assert!(ids.iter().any(|id| id == uuid2));

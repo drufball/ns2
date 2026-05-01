@@ -314,13 +314,16 @@ pub(crate) async fn run_show(server: &str, id: String, json: bool) {
     }
 }
 
-pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
+pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     if ids.is_empty() {
         eprintln!("Error: at least one --id is required");
         std::process::exit(1);
     }
 
     let client = reqwest::Client::new();
+    let deadline = timeout.map(|secs| {
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
+    });
 
     // Helper: fetch an issue tree rooted at `id` recursively.
     async fn fetch_issue_tree(
@@ -466,6 +469,13 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
                 final_statuses.push((root.issue.id.clone(), root.issue.status.clone()));
             }
             break;
+        }
+
+        if let Some(dl) = deadline {
+            if tokio::time::Instant::now() >= dl {
+                eprintln!("Timeout expired.");
+                std::process::exit(1);
+            }
         }
 
         tick = tick.wrapping_add(1);

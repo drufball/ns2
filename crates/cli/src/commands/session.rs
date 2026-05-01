@@ -108,13 +108,21 @@ pub(crate) async fn run_new(
     }
 }
 
-pub(crate) async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>) {
+pub(crate) async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>, timeout: Option<u64>) {
     let session_id = resolve_session_id(server, id, name).await;
     let mut url = format!("{}/sessions/{}/events", server, session_id);
     if let Some(n) = turns {
         url = format!("{url}?last_turns={n}");
     }
-    stream_events(&url, false).await;
+    if let Some(secs) = timeout {
+        let duration = tokio::time::Duration::from_secs(secs);
+        if tokio::time::timeout(duration, stream_events(&url, false)).await.is_err() {
+            eprintln!("Timeout expired.");
+            std::process::exit(1);
+        }
+    } else {
+        stream_events(&url, false).await;
+    }
 }
 
 pub(crate) async fn run_send(server: &str, id: Option<String>, name: Option<String>, message: String) {
@@ -138,7 +146,7 @@ pub(crate) async fn run_stop(server: &str, id: Option<String>, name: Option<Stri
     println!("Stop not yet implemented for session {session_id}");
 }
 
-pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
+pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     if ids.is_empty() {
         eprintln!("Error: at least one --id is required");
         std::process::exit(1);
@@ -153,6 +161,10 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
     }
 
     use std::io::Write;
+
+    let deadline = timeout.map(|secs| {
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
+    });
 
     let mut terminal_statuses: HashMap<String, SessionStatus> = HashMap::new();
     // Track snippet text per session id for the progress display.
@@ -238,6 +250,14 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>) {
         if all_done {
             break;
         }
+
+        if let Some(dl) = deadline {
+            if tokio::time::Instant::now() >= dl {
+                eprintln!("Timeout expired.");
+                std::process::exit(1);
+            }
+        }
+
         tick = tick.wrapping_add(1);
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
     }

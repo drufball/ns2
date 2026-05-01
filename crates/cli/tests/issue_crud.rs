@@ -3,6 +3,22 @@ mod common;
 use common::TestHarness;
 use predicates::prelude::*;
 
+// ─── Flow 55: issue wait --timeout ───────────────────────────────────────────
+
+#[test]
+fn issue_wait_timeout_exits_nonzero_on_non_terminal_issue() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    // An issue in 'open' state with no session — never finishes on its own.
+    let id = h.ns2_stdout(&["issue", "new", "--title", "t", "--body", "b"]);
+
+    h.ns2()
+        .args(["issue", "wait", "--id", &id, "--timeout", "1"])
+        .assert()
+        .failure();
+}
+
 fn write_agent(h: &TestHarness, name: &str) {
     let dir = h.repo_dir.path().join(".ns2/agents");
     std::fs::create_dir_all(&dir).unwrap();
