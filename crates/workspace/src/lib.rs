@@ -185,7 +185,7 @@ mod tests {
         for i in 0..n {
             std::fs::write(r.join("file.txt"), format!("v{i}")).unwrap();
             run(&["add", "file.txt"]);
-            run(&["commit", "-m", &format!("commit {i}")]);
+            run(&["-c", "commit.gpgsign=false", "commit", "-m", &format!("commit {i}")]);
         }
         tmp
     }
