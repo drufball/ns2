@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use types::{Issue, IssueStatus};
 use crate::client::{handle_connection_error, print_error_response};
-use crate::render::{print_issue_row, render_issue_tree, IssueTreeNode};
+use crate::render::{format_issue_show, print_issue_row, render_issue_tree, IssueTreeNode};
 
 pub(crate) fn issue_is_terminal(status: &IssueStatus) -> bool {
     matches!(status, IssueStatus::Completed | IssueStatus::Failed)
@@ -283,6 +283,34 @@ pub(crate) async fn run_list(
         for issue in &issues {
             print_issue_row(issue);
         }
+    }
+}
+
+pub(crate) async fn run_show(server: &str, id: String, json: bool) {
+    let client = reqwest::Client::new();
+    let url = format!("{}/issues/{}", server, id);
+    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+        handle_connection_error(&e);
+    });
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        eprintln!("Error: issue not found: {id}");
+        std::process::exit(1);
+    }
+    if !resp.status().is_success() {
+        print_error_response(resp).await;
+    }
+    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+        eprintln!("Error parsing response: {e}");
+        std::process::exit(1);
+    });
+    if json {
+        let out = serde_json::to_string_pretty(&issue).unwrap_or_else(|e| {
+            eprintln!("Error serializing to JSON: {e}");
+            std::process::exit(1);
+        });
+        println!("{out}");
+    } else {
+        print!("{}", format_issue_show(&issue));
     }
 }
 

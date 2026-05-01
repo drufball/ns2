@@ -449,3 +449,49 @@ fn extract_branch(json: &str) -> String {
     let end = json[start..].find('"').expect("branch value not terminated") + start;
     json[start..end].to_string()
 }
+
+// Flow: issue show
+
+#[test]
+fn issue_show_prints_title_body_and_status() {
+    let mut h = TestHarness::new();
+    h.start_server();
+    let id = h.ns2_stdout(&["issue", "new", "--title", "Show Me", "--body", "Full description here"]);
+    let out = h.ns2_stdout(&["issue", "show", "--id", &id]);
+    assert!(out.contains("Show Me"), "show should contain title");
+    assert!(out.contains("Full description here"), "show should contain body");
+    assert!(out.contains("open"), "show should contain status");
+}
+
+#[test]
+fn issue_show_json_outputs_valid_json_with_expected_fields() {
+    let mut h = TestHarness::new();
+    h.start_server();
+    let id = h.ns2_stdout(&["issue", "new", "--title", "JSON Issue", "--body", "json body"]);
+    let out = h.ns2_stdout(&["issue", "show", "--id", &id, "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("--json output should be valid JSON");
+    assert_eq!(parsed["id"].as_str().unwrap(), id, "JSON id should match");
+    assert_eq!(parsed["title"].as_str().unwrap(), "JSON Issue");
+    assert_eq!(parsed["body"].as_str().unwrap(), "json body");
+    assert_eq!(parsed["status"].as_str().unwrap(), "open");
+}
+
+#[test]
+fn issue_show_missing_id_exits_nonzero() {
+    let mut h = TestHarness::new();
+    h.start_server();
+    h.ns2()
+        .args(["issue", "show", "--id", "zzzz"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn issue_show_displays_comments() {
+    let mut h = TestHarness::new();
+    h.start_server();
+    let id = h.ns2_stdout(&["issue", "new", "--title", "With Comment", "--body", "b"]);
+    h.ns2().args(["issue", "comment", "--id", &id, "--body", "a comment here"]).assert().success();
+    let out = h.ns2_stdout(&["issue", "show", "--id", &id]);
+    assert!(out.contains("a comment here"), "show should display comments");
+}
