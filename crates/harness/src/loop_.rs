@@ -122,7 +122,7 @@ pub(crate) async fn run_tool_dispatch_loop(
                 } else {
                     // Run the actual tool
                     let tool_output = match config.tools.iter().find(|t| t.definition().name == *name) {
-                        Some(tool) => match tool.execute(input.clone()).await {
+                        Some(tool) => match tool.execute(input.clone(), config.cwd.as_deref()).await {
                             Ok(output) => output,
                             Err(e) => format!("Error: {e}"),
                         },
@@ -181,17 +181,10 @@ pub async fn run(
     // a git worktree and set cwd to the worktree path.
     let session_cwd = resolve_session_cwd(&db, config.session.id).await;
 
-    // If we resolved a cwd, rebuild the standard tool set with that cwd so all
-    // file operations and shell commands run relative to the worktree.
-    // Also store it on config so hooks are spawned with the same working directory.
-    if let Some(ref cwd) = session_cwd {
-        config.tools = vec![
-            Arc::new(tools::BashTool { cwd: Some(cwd.clone()) }),
-            Arc::new(tools::ReadTool { cwd: Some(cwd.clone()) }),
-            Arc::new(tools::WriteTool { cwd: Some(cwd.clone()) }),
-            Arc::new(tools::EditTool { cwd: Some(cwd.clone()) }),
-        ];
-        config.cwd = Some(cwd.clone());
+    // If we resolved a cwd, store it on config so it is passed to tool dispatch
+    // and hook subprocesses at execution time.
+    if let Some(cwd) = session_cwd {
+        config.cwd = Some(cwd);
     }
 
     // Resolve the effective git root (injected in tests; discovered via git in production).

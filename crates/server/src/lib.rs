@@ -58,10 +58,10 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         }
     };
     let tools: Vec<Arc<dyn tools::Tool>> = vec![
-        Arc::new(tools::ReadTool { cwd: None }),
-        Arc::new(tools::BashTool { cwd: None }),
-        Arc::new(tools::WriteTool { cwd: None }),
-        Arc::new(tools::EditTool { cwd: None }),
+        Arc::new(tools::ReadTool),
+        Arc::new(tools::BashTool),
+        Arc::new(tools::WriteTool),
+        Arc::new(tools::EditTool),
     ];
 
     let db_path = config.data_dir.join("ns2.db");

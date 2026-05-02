@@ -629,7 +629,7 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value) -> tools::Result<String> {
+        async fn execute(&self, _input: serde_json::Value, _cwd: Option<&std::path::Path>) -> tools::Result<String> {
             Ok("file content here".into())
         }
     }
@@ -647,7 +647,7 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value) -> tools::Result<String> {
+        async fn execute(&self, _input: serde_json::Value, _cwd: Option<&std::path::Path>) -> tools::Result<String> {
             Err(tools::Error::InvalidInput("cannot read file".into()))
         }
     }
