@@ -17,7 +17,9 @@ use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 #[cfg(test)]
 use chrono::Utc;
 #[cfg(test)]
-use types::{ContentBlock, Role, SessionEvent};
+use types::{ContentBlock, Role};
+#[cfg(test)]
+use events::SessionEvent;
 #[cfg(test)]
 use uuid::Uuid;
 #[cfg(test)]
@@ -299,7 +301,7 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, SessionEvent::ContentBlockDelta { .. })));
         assert!(events.iter().any(|e| matches!(e, SessionEvent::ContentBlockDone { .. })));
         assert!(events.iter().any(|e| matches!(e, SessionEvent::TurnDone { .. })));
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })));
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
     }
 
     #[tokio::test]
@@ -421,7 +423,7 @@ mod tests {
             "missing TurnDone"
         );
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "missing SessionDone"
         );
     }
@@ -455,11 +457,14 @@ mod tests {
 
         let done_event = events
             .iter()
-            .find(|e| matches!(e, SessionEvent::SessionDone { .. }))
+            .find(|e| matches!(e, SessionEvent::Done))
             .expect("no SessionDone event");
 
+        // The session_id is tracked by the broadcast channel subscription;
+        // the Done variant itself no longer carries it (it's on the outer SystemEvent wrapper).
         assert!(
-            matches!(done_event, SessionEvent::SessionDone { session_id: sid } if *sid == session_id)
+            matches!(done_event, SessionEvent::Done),
+            "expected Done event"
         );
     }
 
@@ -680,7 +685,7 @@ mod tests {
 
         // Should have a SessionDone at the end
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "missing SessionDone"
         );
 
@@ -750,7 +755,7 @@ mod tests {
 
         // Should still complete
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "missing SessionDone"
         );
 
@@ -922,7 +927,7 @@ mod tests {
         assert_eq!(tool_result_blocks.len(), 2, "expected 2 ToolResult blocks");
 
         // SessionDone should be present
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })));
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
     }
 
     /// Test: second user message is processed with all prior turns in context.
@@ -1095,7 +1100,7 @@ mod tests {
 
         // Loop should have exited cleanly (SessionDone is emitted)
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "expected SessionDone after max_tokens"
         );
     }
@@ -1184,7 +1189,7 @@ mod tests {
 
         // Loop should complete
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "expected SessionDone"
         );
 
@@ -1233,7 +1238,7 @@ mod tests {
 
         // Session should complete normally
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "expected SessionDone"
         );
         // No Error events
@@ -1384,8 +1389,10 @@ mod tests {
             SessionEvent::ContentBlockDone { block: ContentBlock::ToolUse { .. }, .. } => "ContentBlockDone(ToolUse)",
             SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. } => "ContentBlockDone(ToolResult)",
             SessionEvent::TurnDone { .. } => "TurnDone",
-            SessionEvent::SessionDone { .. } => "SessionDone",
+            SessionEvent::Done => "SessionDone",
             SessionEvent::Error { .. } => "Error",
+            SessionEvent::ToolUseStart { .. } => "ToolUseStart",
+            SessionEvent::ToolUseDone { .. } => "ToolUseDone",
         }).collect();
 
         let expected: &[&str] = &[
@@ -2504,7 +2511,7 @@ mod tests {
             "should NOT emit Error when 429 retried and eventually succeeds"
         );
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::SessionDone { .. })),
+            events.iter().any(|e| matches!(e, SessionEvent::Done)),
             "expected SessionDone after successful retry"
         );
     }

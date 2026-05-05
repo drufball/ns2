@@ -13,6 +13,8 @@ pub use routes::session::CreateSessionRequest;
 use state::AppState;
 use routes::{issue, session};
 
+use events::EventBus;
+
 pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
@@ -78,6 +80,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         client,
         tools,
         model: config.model,
+        event_bus: EventBus::new(1024),
     };
 
     // Recover orphaned sessions before accepting any connections.
@@ -124,7 +127,8 @@ mod tests {
     use std::sync::Arc;
     use db::SqliteDb;
     use uuid::Uuid;
-    use types::{Session, SessionStatus, SessionEvent, IssueStatus, IssueComment};
+    use types::{Session, SessionStatus, IssueStatus, IssueComment};
+    use events::SessionEvent;
     use routes::session::event_from;
     use routes::issue::slugify;
 
@@ -162,6 +166,7 @@ mod tests {
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
+            event_bus: EventBus::new(1024),
         }
     }
 
@@ -641,8 +646,7 @@ mod tests {
         use axum::response::{sse::Sse, IntoResponse};
         use std::convert::Infallible;
 
-        let session_id = Uuid::new_v4();
-        let ev = SessionEvent::SessionDone { session_id };
+        let ev = SessionEvent::Done;
         let sse_event = event_from(&ev);
 
         let stream = futures::stream::once(async move { Ok::<_, Infallible>(sse_event) });
@@ -656,9 +660,7 @@ mod tests {
             .expect("SSE body must contain a data: line");
         let json = &data_line["data: ".len()..];
         let decoded: SessionEvent = serde_json::from_str(json).expect("must deserialize back");
-        assert!(
-            matches!(decoded, SessionEvent::SessionDone { session_id: sid } if sid == session_id)
-        );
+        assert!(matches!(decoded, SessionEvent::Done));
     }
 
     // --- has_message boundary ---
@@ -746,7 +748,7 @@ mod tests {
             .any(|l| {
                 let json = &l["data: ".len()..];
                 serde_json::from_str::<SessionEvent>(json)
-                    .map(|ev| matches!(ev, SessionEvent::SessionDone { .. }))
+                    .map(|ev| matches!(ev, SessionEvent::Done))
                     .unwrap_or(false)
             });
         assert!(has_session_done, "completed session events must include SessionDone");
@@ -819,7 +821,7 @@ mod tests {
         let has_session_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
             serde_json::from_str::<SessionEvent>(json)
-                .map(|ev| matches!(ev, SessionEvent::SessionDone { .. }))
+                .map(|ev| matches!(ev, SessionEvent::Done))
                 .unwrap_or(false)
         });
         assert!(has_session_done, "completed session should still emit SessionDone");
@@ -2146,6 +2148,7 @@ mod tests {
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
+            event_bus: EventBus::new(1024),
         };
         let app = build_router(state.clone());
 
@@ -2240,6 +2243,7 @@ mod tests {
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
+            event_bus: EventBus::new(1024),
         };
         let app = build_router(state.clone());
 
@@ -2433,6 +2437,7 @@ mod tests {
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
+            event_bus: EventBus::new(1024),
         };
         let app = build_router(state.clone());
 
@@ -2537,7 +2542,7 @@ mod tests {
                             last_turn_text = std::mem::take(&mut current_turn_text);
                         }
                     }
-                    SessionEvent::SessionDone { .. } => {
+                    SessionEvent::Done => {
                         if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
                             if !last_turn_text.is_empty() {
                                 let author = issue.assignee.clone()
@@ -2577,7 +2582,7 @@ mod tests {
         }).unwrap();
         tx.send(SessionEvent::TurnDone { turn_id: turn_id2 }).unwrap();
 
-        tx.send(SessionEvent::SessionDone { session_id }).unwrap();
+        tx.send(SessionEvent::Done).unwrap();
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
         loop {
@@ -3018,7 +3023,7 @@ mod tests {
                             last_turn_text = std::mem::take(&mut current_turn_text);
                         }
                     }
-                    SessionEvent::SessionDone { .. } => {
+                    SessionEvent::Done => {
                         if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
                             if !last_turn_text.is_empty() {
                                 let author = issue.assignee.clone()
@@ -3044,7 +3049,7 @@ mod tests {
         let turn_id = Uuid::new_v4();
 
         tx.send(SessionEvent::TurnDone { turn_id }).unwrap();
-        tx.send(SessionEvent::SessionDone { session_id }).unwrap();
+        tx.send(SessionEvent::Done).unwrap();
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
         loop {

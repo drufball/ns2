@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/types",
+    "crates/events",
     "crates/db",
     "crates/anthropic",
     "crates/tools",

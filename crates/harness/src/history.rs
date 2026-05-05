@@ -1,7 +1,8 @@
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use types::{ContentBlock, ContentBlockDelta, Role, SessionEvent, Turn};
+use types::{ContentBlock, ContentBlockDelta, Role, Turn};
+use events::SessionEvent;
 use uuid::Uuid;
 
 /// Load conversation history from the DB for a session.

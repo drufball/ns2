@@ -46,12 +46,12 @@ pub(crate) async fn stream_events(url: &str, to_stderr: bool) {
             let frames = parse_sse_frames(&mut buffer, s);
             for line in frames {
                 if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<types::SessionEvent>(data) {
+                    if let Ok(event) = serde_json::from_str::<events::SessionEvent>(data) {
                         print_session_event(&event, to_stderr);
-                        if matches!(event, types::SessionEvent::SessionDone { .. }) {
+                        if matches!(event, events::SessionEvent::Done) {
                             return;
                         }
-                        if matches!(event, types::SessionEvent::Error { .. }) {
+                        if matches!(event, events::SessionEvent::Error { .. }) {
                             std::process::exit(1);
                         }
                     }

@@ -1,13 +1,15 @@
 use std::sync::Arc;
-use types::{SessionEvent, SessionStatus};
+use events::{SessionEvent, SystemEvent};
+use types::SessionStatus;
 
 use crate::state::AppState;
 
 /// Spawn a harness task for the given session and return the mpsc sender that
 /// can be used to deliver messages to it.
 ///
-/// This function registers the broadcast sender and mpsc sender in `AppState`
-/// once the task starts, and removes them when the task finishes.
+/// Events are emitted to BOTH the per-session broadcast channel (for backward
+/// compat with `/sessions/:id/events` SSE) and the global `EventBus` (wrapped
+/// in `SystemEvent::Session { session_id, event }`).
 pub(crate) fn spawn_harness_sync(
     state: &AppState,
     session: types::Session,
@@ -27,6 +29,7 @@ pub(crate) fn spawn_harness_sync(
     let msg_tx_ret = msg_tx.clone();
     let tools = state.tools.clone();
     let model = state.model.clone();
+    let event_bus = state.event_bus.clone();
 
     let config = harness::HarnessConfig {
         session: session_clone.clone(),
@@ -56,7 +59,7 @@ pub(crate) fn spawn_harness_sync(
                     SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
                         last_turn_text = std::mem::take(&mut current_turn_text);
                     }
-                    SessionEvent::SessionDone { .. } => {
+                    SessionEvent::Done => {
                         let summary = if last_turn_text.is_empty() { None } else { Some(last_turn_text) };
                         let _ = svc.finish_issue(&id, summary).await;
                         break;
@@ -70,6 +73,33 @@ pub(crate) fn spawn_harness_sync(
             }
         })
     });
+
+    // Spawn a task that subscribes to the per-session channel and forwards
+    // each event to the global bus wrapped in `SystemEvent::Session`.
+    let bus_forwarder = {
+        let mut rx = tx.subscribe();
+        let bus = event_bus.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        bus.send(SystemEvent::Session {
+                            session_id,
+                            event: ev,
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            "global event bus forwarder lagged by {n} messages for session {session_id}"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        })
+    };
 
     tokio::spawn(async move {
         {
@@ -103,6 +133,7 @@ pub(crate) fn spawn_harness_sync(
         }
 
         drop(issue_watcher);
+        drop(bus_forwarder);
     });
 
     msg_tx_ret

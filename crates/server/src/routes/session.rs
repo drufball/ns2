@@ -8,7 +8,8 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
-use types::{Session, SessionEvent, SessionStatus};
+use types::{Session, SessionStatus};
+use events::SessionEvent;
 use uuid::Uuid;
 
 use crate::harness_spawn::spawn_harness_sync;
@@ -162,7 +163,7 @@ pub(crate) async fn session_events(
 
         match sess.status {
             SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
-                history.push(SessionEvent::SessionDone { session_id: id });
+                history.push(SessionEvent::Done);
             }
             _ => {}
         }

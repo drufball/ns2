@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 types = { path = "../types" }
+events = { path = "../events" }
 db = { path = "../db" }
 harness = { path = "../harness" }
 anthropic = { path = "../anthropic" }
@@ -15,6 +16,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }

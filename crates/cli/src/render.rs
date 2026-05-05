@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use types::{Issue, SessionEvent, SessionStatus, ContentBlock, IssueStatus};
+use types::{Issue, SessionStatus, ContentBlock, IssueStatus};
+use events::SessionEvent;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Spinner / animated progress helpers
@@ -85,7 +86,7 @@ pub(crate) fn format_issue_show(issue: &Issue) -> String {
 // Session event formatting
 
 pub(crate) fn format_session_event(event: &SessionEvent) -> Option<String> {
-    use types::SessionEvent::*;
+    use events::SessionEvent::*;
     match event {
         TurnStarted { turn } => Some(format!("[turn {}]\n", turn.id)),
         ContentBlockDelta {
@@ -106,14 +107,15 @@ pub(crate) fn format_session_event(event: &SessionEvent) -> Option<String> {
             }
         },
         TurnDone { .. } => None,
-        SessionDone { .. } => Some("[done]\n".to_string()),
+        Done => Some("[done]\n".to_string()),
         Error { message } => Some(format!("[error] {message}\n")),
+        ToolUseStart { .. } | ToolUseDone { .. } => None,
     }
 }
 
 pub(crate) fn print_session_event(event: &SessionEvent, to_stderr: bool) {
     use std::io::Write;
-    use types::SessionEvent::*;
+    use events::SessionEvent::*;
     match event {
         // Text deltas stream without a newline; flush so the terminal shows them immediately.
         ContentBlockDelta {

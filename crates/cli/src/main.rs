@@ -415,6 +415,7 @@ async fn main() {
 mod tests {
     use super::*;
     use types::*;
+    use events::SessionEvent;
     use uuid::Uuid;
     use crate::render::{
         format_issue_row, format_issue_show, format_session_event, format_sync_error,
@@ -505,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_error_event_produces_output() {
-        let event = types::SessionEvent::Error { message: "something went wrong".into() };
+        let event = SessionEvent::Error { message: "something went wrong".into() };
         let out = format_session_event(&event).unwrap();
         assert!(out.contains("something went wrong"));
     }

@@ -6,7 +6,8 @@ use crate::retry::{complete_with_retry, is_rate_limit, max_retries};
 use crate::HarnessConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use types::{ContentBlock, Role, SessionEvent, SessionStatus, Turn};
+use types::{ContentBlock, Role, SessionStatus, Turn};
+use events::SessionEvent;
 use uuid::Uuid;
 use chrono::Utc;
 
@@ -279,7 +280,7 @@ pub async fn run(
 
         // Mark session completed and emit done event
         db.update_session_status(config.session.id, SessionStatus::Completed).await?;
-        let _ = event_tx.send(SessionEvent::SessionDone { session_id: config.session.id });
+        let _ = event_tx.send(SessionEvent::Done);
 
         // Loop back to wait for next message
     }

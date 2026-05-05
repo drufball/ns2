@@ -71,7 +71,6 @@ pub enum SessionStatus {
     Cancelled,
 }
 
-
 impl std::fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -129,17 +128,6 @@ pub enum ContentBlock {
     Text { text: String },
     ToolUse { id: String, name: String, input: serde_json::Value },
     ToolResult { tool_use_id: String, content: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionEvent {
-    TurnStarted { turn: Turn },
-    ContentBlockDelta { turn_id: Uuid, index: u32, delta: ContentBlockDelta },
-    ContentBlockDone { turn_id: Uuid, index: u32, block: ContentBlock },
-    TurnDone { turn_id: Uuid },
-    SessionDone { session_id: Uuid },
-    Error { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,7 +248,6 @@ mod tests {
     fn content_block_text_serde_round_trip() {
         let block = ContentBlock::Text { text: "hello".into() };
         let json = serde_json::to_string(&block).expect("serialize");
-        // The serde tag should produce {"type":"text","text":"..."}
         let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(v["type"], "text");
         assert_eq!(v["text"], "hello");
@@ -303,90 +290,6 @@ mod tests {
         );
     }
 
-    // --- SessionEvent serde round-trip and tagged shape ---
-
-    #[test]
-    fn session_event_turn_started_serde_round_trip() {
-        let turn = Turn {
-            id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            token_count: None,
-            created_at: Utc::now(),
-        };
-        let event = SessionEvent::TurnStarted { turn: turn.clone() };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "turn_started");
-
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, SessionEvent::TurnStarted { turn: t } if t.id == turn.id));
-    }
-
-    #[test]
-    fn session_event_content_block_delta_serde_round_trip() {
-        let turn_id = Uuid::new_v4();
-        let event = SessionEvent::ContentBlockDelta {
-            turn_id,
-            index: 0,
-            delta: ContentBlockDelta::TextDelta { text: "hi".into() },
-        };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "content_block_delta");
-
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, SessionEvent::ContentBlockDelta { turn_id: tid, .. } if tid == turn_id));
-    }
-
-    #[test]
-    fn session_event_content_block_done_serde_round_trip() {
-        let turn_id = Uuid::new_v4();
-        let event = SessionEvent::ContentBlockDone {
-            turn_id,
-            index: 0,
-            block: ContentBlock::Text { text: "world".into() },
-        };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "content_block_done");
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, SessionEvent::ContentBlockDone { turn_id: tid, .. } if tid == turn_id));
-    }
-
-    #[test]
-    fn session_event_turn_done_serde_round_trip() {
-        let turn_id = Uuid::new_v4();
-        let event = SessionEvent::TurnDone { turn_id };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "turn_done");
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, SessionEvent::TurnDone { turn_id: tid } if tid == turn_id));
-    }
-
-    #[test]
-    fn session_event_session_done_serde_round_trip() {
-        let session_id = Uuid::new_v4();
-        let event = SessionEvent::SessionDone { session_id };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "session_done");
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(
-            matches!(decoded, SessionEvent::SessionDone { session_id: sid } if sid == session_id)
-        );
-    }
-
-    #[test]
-    fn session_event_error_serde_round_trip() {
-        let event = SessionEvent::Error { message: "oops".into() };
-        let json = serde_json::to_string(&event).expect("serialize");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(v["type"], "error");
-        let decoded: SessionEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, SessionEvent::Error { message } if message == "oops"));
-    }
-
     // --- ContentBlockDelta serde round-trip ---
 
     #[test]
@@ -408,7 +311,9 @@ mod tests {
         assert_eq!(v["type"], "input_json_delta");
         assert_eq!(v["partial_json"], "{\"k\":");
         let decoded: ContentBlockDelta = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, ContentBlockDelta::InputJsonDelta { partial_json } if partial_json == "{\"k\":"));
+        assert!(
+            matches!(decoded, ContentBlockDelta::InputJsonDelta { partial_json } if partial_json == "{\"k\":")
+        );
     }
 
     #[test]

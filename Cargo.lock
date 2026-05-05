@@ -430,6 +430,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "events",
  "futures",
  "predicates",
  "reqwest",
@@ -676,6 +677,19 @@ name = "event-listener"
 version = "2.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0206175f82b8d6bf6652ff7d71a1e27fd2e4efde587fd368662814d6ec1d9ce0"
+
+[[package]]
+name = "events"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "types",
+ "uuid",
+]
 
 [[package]]
 name = "fastrand"
@@ -943,6 +957,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "db",
+ "events",
  "mockall",
  "regex",
  "serde_json",
@@ -2221,6 +2236,7 @@ dependencies = [
  "bytes",
  "chrono",
  "db",
+ "events",
  "futures",
  "harness",
  "issues",
@@ -2232,6 +2248,7 @@ dependencies = [
  "tools",
  "tower 0.4.13",
  "tower-http 0.5.2",
+ "tracing",
  "types",
  "uuid",
 ]

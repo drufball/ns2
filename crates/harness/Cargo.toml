@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 types = { path = "../types" }
+events = { path = "../events" }
 db = { path = "../db" }
 anthropic = { path = "../anthropic" }
 tools = { path = "../tools" }
