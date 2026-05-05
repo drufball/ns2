@@ -9,6 +9,7 @@ members = [
     "crates/agents",
     "crates/harness",
     "crates/issues",
+    "crates/hooks",
     "crates/server",
     "crates/tui",
     "crates/cli",

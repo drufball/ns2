@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 use events::EventBus;
+use hooks::store::HookStore;
 use uuid::Uuid;
 
 /// Central application state shared across all request handlers.
@@ -25,4 +26,6 @@ pub(crate) struct AppState {
     pub(crate) model: String,
     /// Global event bus.  All session and issue events flow through this bus.
     pub(crate) event_bus: EventBus,
+    /// Hook store for CRUD operations on hooks.
+    pub(crate) hook_store: Arc<dyn HookStore>,
 }

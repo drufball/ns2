@@ -1,0 +1,23 @@
+[package]
+name = "hooks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types = { path = "../types" }
+events = { path = "../events" }
+db = { path = "../db" }
+issues = { path = "../issues" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+minijinja = "2"
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

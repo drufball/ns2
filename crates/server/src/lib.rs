@@ -1,5 +1,6 @@
-use axum::{routing::{get, post}, Router};
+use axum::{routing::{delete, get, patch, post}, Router};
 use db::SqliteDb;
+use hooks::store::SqliteHookStore;
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -11,7 +12,7 @@ pub use routes::{Error, Result};
 pub use routes::session::CreateSessionRequest;
 
 use state::AppState;
-use routes::{issue, session, events_route};
+use routes::{issue, session, events_route, hook as hook_route};
 
 use events::EventBus;
 
@@ -43,7 +44,55 @@ fn build_router(state: AppState) -> Router {
         .route("/issues/:id/cancel", post(issue::cancel_issue))
         .route("/issues/:id/reopen", post(issue::reopen_issue))
         .route("/issues/:id/status", axum::routing::patch(issue::update_issue_status))
+        // Hook CRUD
+        .route("/hooks", post(hook_route::create_hook))
+        .route("/hooks", get(hook_route::list_hooks))
+        .route("/hooks/:id", get(hook_route::get_hook))
+        .route("/hooks/:id", patch(hook_route::update_hook))
+        .route("/hooks/:id", delete(hook_route::delete_hook))
+        .route("/hooks/:id/executions", get(hook_route::list_executions))
         .with_state(state)
+}
+
+/// Spawn the hook evaluator background task for the given state.
+fn spawn_hook_evaluator(state: &AppState) {
+    let mut rx = state.event_bus.subscribe();
+    let hook_store_eval = Arc::clone(&state.hook_store);
+    let issue_svc_eval = state.issue_service.clone();
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let hooks = hook_store_eval
+                        .list_hooks(Some(true), None)
+                        .await
+                        .unwrap_or_default();
+                    for hook in hooks {
+                        if hooks::evaluate::matches_event(&hook, &event) {
+                            let event_clone = event.clone();
+                            let hook_clone = hook.clone();
+                            let issue_svc = issue_svc_eval.clone();
+                            let hook_store_clone = Arc::clone(&hook_store_eval);
+                            tokio::spawn(async move {
+                                hooks::execute::run_action(
+                                    &hook_clone,
+                                    &event_clone,
+                                    &issue_svc,
+                                    hook_store_clone.as_ref(),
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("Hook evaluator lagged {n} messages");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 pub async fn run(config: ServerConfig) -> Result<()> {
@@ -72,6 +121,13 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db: Arc<dyn db::Db> = Arc::new(db);
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
+
+    // Create the hook store using the same SQLite pool.
+    // SqliteDb::connect runs migrations which include the hooks tables.
+    let hook_pool = sqlx::SqlitePool::connect(&db_url).await
+        .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+    let hook_store: Arc<dyn hooks::store::HookStore> = Arc::new(SqliteHookStore::new(hook_pool));
+
     let state = AppState {
         db,
         issue_service,
@@ -81,7 +137,11 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         tools,
         model: config.model,
         event_bus,
+        hook_store,
     };
+
+    // Spawn the hook evaluator background task.
+    spawn_hook_evaluator(&state);
 
     // Recover orphaned sessions before accepting any connections.
     state.issue_service.orphan_sweep().await;
@@ -155,11 +215,24 @@ mod tests {
         }
     }
 
+    /// Helper to build an in-memory hook store suitable for tests.
+    async fn make_test_hook_store() -> Arc<dyn hooks::store::HookStore> {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        db::MIGRATOR.run(&pool).await.unwrap();
+        Arc::new(hooks::store::SqliteHookStore::new(pool))
+    }
+
     async fn test_state() -> AppState {
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
+        // Create an in-memory SQLite pool for the hook store in tests.
+        let hook_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        // Run all migrations on the test pool.
+        db::MIGRATOR.run(&hook_pool).await.unwrap();
+        let hook_store: Arc<dyn hooks::store::HookStore> =
+            Arc::new(hooks::store::SqliteHookStore::new(hook_pool));
         AppState {
             db,
             issue_service,
@@ -169,6 +242,7 @@ mod tests {
             tools: vec![],
             model: "claude-opus-4-5".into(),
             event_bus,
+            hook_store,
         }
     }
 
@@ -179,6 +253,7 @@ mod tests {
 
     async fn test_app_with_state() -> (Router, AppState) {
         let state = test_state().await;
+        spawn_hook_evaluator(&state);
         let app = build_router(state.clone());
         (app, state)
     }
@@ -2309,6 +2384,7 @@ mod tests {
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
+        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -2318,6 +2394,7 @@ mod tests {
             tools: vec![],
             model: "claude-opus-4-5".into(),
             event_bus,
+            hook_store,
         };
         let app = build_router(state.clone());
 
@@ -2404,6 +2481,7 @@ mod tests {
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
+        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -2413,6 +2491,7 @@ mod tests {
             tools: vec![],
             model: "claude-opus-4-5".into(),
             event_bus,
+            hook_store,
         };
         let app = build_router(state.clone());
 
@@ -2598,6 +2677,7 @@ mod tests {
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
+        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -2607,6 +2687,7 @@ mod tests {
             tools: vec![],
             model: "claude-opus-4-5".into(),
             event_bus,
+            hook_store,
         };
         let app = build_router(state.clone());
 
@@ -3240,4 +3321,402 @@ mod tests {
             fetched.comments
         );
     }
+
+    // ─── /hooks CRUD integration tests ───────────────────────────────────────
+
+    fn hook_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_hook_returns_201() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "test-hook",
+                "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "abc1" },
+                    "body": "Status changed"
+                }
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_hook_response_has_id_and_name() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "my-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "watcher" },
+                    "body": "Created"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["id"].is_string());
+        assert_eq!(v["id"].as_str().unwrap().len(), 4);
+        assert_eq!(v["name"], "my-hook");
+        assert_eq!(v["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_list_hooks_empty() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/hooks").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_list_hooks_after_create() {
+        let app = test_app().await;
+        app.clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "hook-one",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(Request::builder().uri("/hooks").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["name"], "hook-one");
+    }
+
+    #[tokio::test]
+    async fn test_get_hook_by_id() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "get-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let get_resp = app
+            .oneshot(Request::builder().uri(format!("/hooks/{id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(get_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"], id);
+        assert_eq!(v["name"], "get-hook");
+    }
+
+    #[tokio::test]
+    async fn test_get_hook_not_found() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(Request::builder().uri("/hooks/xxxx").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_update_hook_name() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "old-name",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let patch_resp = app
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+                "name": "new-name"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(patch_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["name"], "new-name");
+    }
+
+    #[tokio::test]
+    async fn test_update_hook_enable_disable() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "toggle-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Disable
+        let patch_resp = app
+            .clone()
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+                "enabled": false
+            })))
+            .await
+            .unwrap();
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(patch_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["enabled"], false);
+
+        // Re-enable
+        let patch_resp = app
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+                "enabled": true
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(patch_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_delete_hook() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "del-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Delete
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/hooks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+        // Now it should be gone
+        let get_resp = app
+            .oneshot(Request::builder().uri(format!("/hooks/{id}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_list_hooks_enabled_filter() {
+        let app = test_app().await;
+        // Create two hooks
+        app.clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "enabled-hook",
+                "enabled": true,
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
+            })))
+            .await.unwrap();
+
+        let create_resp2 = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "disabled-hook",
+                "enabled": false,
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
+            })))
+            .await.unwrap();
+        // Wait to ensure it was created
+        let _ = response_body_bytes(create_resp2).await;
+
+        let resp = app
+            .oneshot(Request::builder().uri("/hooks?enabled=true").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "enabled-hook");
+    }
+
+    #[tokio::test]
+    async fn test_list_hook_executions() {
+        let app = test_app().await;
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "exec-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "w" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Executions should be empty initially
+        let exec_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/hooks/{id}/executions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exec_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(exec_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_hook_evaluator_fires_send_message_on_status_changed() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a watcher issue
+        let watcher_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Watcher", "body": "watch"
+            })))
+            .await
+            .unwrap();
+        let watcher_body = response_body_bytes(watcher_resp).await;
+        let watcher: serde_json::Value = serde_json::from_slice(&watcher_body).unwrap();
+        let watcher_id = watcher["id"].as_str().unwrap().to_string();
+
+        // Create a hook that sends a message to the watcher on status_changed
+        app.clone()
+            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+                "name": "notify",
+                "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": watcher_id.clone() },
+                    "body": "status changed"
+                }
+            })))
+            .await
+            .unwrap();
+
+        // Create a work issue with an assignee
+        let work_resp = app
+            .clone()
+            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+                "title": "Work", "body": "do work", "assignee": "test-agent"
+            })))
+            .await
+            .unwrap();
+        let work_body = response_body_bytes(work_resp).await;
+        let work: serde_json::Value = serde_json::from_slice(&work_body).unwrap();
+        let work_id = work["id"].as_str().unwrap().to_string();
+
+        // Start the work issue (emits StatusChanged → Running)
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{work_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Wait a bit for the hook evaluator to fire
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let watcher_issue = state.db.get_issue(watcher_id.clone()).await.unwrap();
+            if !watcher_issue.comments.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("hook evaluator never fired a comment on watcher within 3s");
+            }
+        }
+
+        let watcher_issue = state.db.get_issue(watcher_id.clone()).await.unwrap();
+        assert!(!watcher_issue.comments.is_empty(), "watcher should have received a comment");
+        let comment = &watcher_issue.comments[0];
+        assert_eq!(comment.author, "ns2-hook");
+        assert!(comment.body.contains("status changed"));
+    }
 }
+

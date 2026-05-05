@@ -68,7 +68,7 @@ pub struct SqliteDb {
     pool: SqlitePool,
 }
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 impl SqliteDb {
     pub fn from_pool(pool: SqlitePool) -> Self {
