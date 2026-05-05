@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use types::{Issue, SessionStatus, ContentBlock, IssueStatus};
-use events::SessionEvent;
+use events::{IssueEvent, SessionEvent};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Spinner / animated progress helpers
@@ -143,6 +143,29 @@ pub(crate) fn print_session_event(event: &SessionEvent, to_stderr: bool) {
                     print!("{output}");
                 }
             }
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Issue event rendering (for `ns2 issue watch`)
+
+/// Render a single `IssueEvent` to a human-readable one-liner.
+///
+/// Format:
+/// - `[created]        open  – <title>`
+/// - `[status_changed] <from> → <to>`
+/// - `[comment_added]  <author>: "<body>"`
+pub(crate) fn format_issue_event(event: &IssueEvent) -> String {
+    match event {
+        IssueEvent::Created(issue) => {
+            format!("[created]        {}  – {}", issue.status, issue.title)
+        }
+        IssueEvent::StatusChanged { from, to, .. } => {
+            format!("[status_changed] {} → {}", from, to)
+        }
+        IssueEvent::CommentAdded { comment, .. } => {
+            format!("[comment_added]  {}: \"{}\"", comment.author, comment.body)
         }
     }
 }
@@ -317,4 +340,82 @@ pub(crate) fn render_session_line(
         _ => String::new(),
     };
     format!("[{id_prefix}] {display_name}: {snippet_part}{sym} {label}")
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tests for format_issue_event
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use events::{IssueEvent};
+    use types::{Issue, IssueStatus, IssueComment};
+
+    fn make_issue(id: &str, title: &str, status: IssueStatus) -> Issue {
+        Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: String::new(),
+            status,
+            branch: "main".into(),
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn format_issue_event_created_contains_created_tag_status_and_title() {
+        let issue = make_issue("ab12", "Add a greeting", IssueStatus::Open);
+        let line = format_issue_event(&IssueEvent::Created(issue));
+        assert!(line.contains("[created]"), "must contain [created] tag");
+        assert!(line.contains("open"), "must contain status");
+        assert!(line.contains("Add a greeting"), "must contain title");
+        assert!(line.contains('–'), "must contain em-dash separator");
+    }
+
+    #[test]
+    fn format_issue_event_status_changed_shows_arrow() {
+        let issue = make_issue("ab12", "Test", IssueStatus::Running);
+        let line = format_issue_event(&IssueEvent::StatusChanged {
+            issue,
+            from: IssueStatus::Open,
+            to: IssueStatus::Running,
+        });
+        assert!(line.contains("[status_changed]"), "must contain [status_changed] tag");
+        assert!(line.contains("open"), "must contain 'from' status");
+        assert!(line.contains("running"), "must contain 'to' status");
+        assert!(line.contains('→'), "must contain arrow");
+    }
+
+    #[test]
+    fn format_issue_event_status_changed_running_to_completed() {
+        let issue = make_issue("ab12", "Test", IssueStatus::Completed);
+        let line = format_issue_event(&IssueEvent::StatusChanged {
+            issue,
+            from: IssueStatus::Running,
+            to: IssueStatus::Completed,
+        });
+        assert!(line.contains("running → completed"), "should show running → completed");
+    }
+
+    #[test]
+    fn format_issue_event_comment_added_shows_author_and_body() {
+        let issue = make_issue("ab12", "Test", IssueStatus::Running);
+        let comment = IssueComment {
+            author: "swe".into(),
+            body: "Agent completed the task and created hello.txt.".into(),
+            created_at: Utc::now(),
+        };
+        let line = format_issue_event(&IssueEvent::CommentAdded { issue, comment });
+        assert!(line.contains("[comment_added]"), "must contain [comment_added] tag");
+        assert!(line.contains("swe"), "must contain author");
+        assert!(line.contains("Agent completed the task"), "must contain comment body");
+        assert!(line.contains('"'), "comment body must be quoted");
+    }
 }

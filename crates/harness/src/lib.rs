@@ -66,7 +66,11 @@ pub struct HarnessConfig {
 mod tests {
     use super::*;
     use mockall::mock;
+    use std::sync::Mutex;
     use tokio::sync::{broadcast, mpsc};
+
+    // Serialize tests that mutate NS2_MAX_RETRIES to prevent races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     mock! {
         pub TestDb {}
@@ -2480,6 +2484,7 @@ mod tests {
     /// test does not actually wait 10 s per retry.
     #[tokio::test(start_paused = true)]
     async fn test_429_retried_up_to_5_times_then_succeeds() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let session = make_session();
         let mock_db = permissive_mock_db();
 
@@ -2596,11 +2601,7 @@ mod tests {
     /// inside the retry loop so the env value is sampled at test time.
     #[tokio::test(start_paused = true)]
     async fn test_ns2_max_retries_env_override() {
-        // SAFETY: This test mutates a process-global env var.  We set it immediately
-        // before the call and restore it in a guard.  Parallel test execution might
-        // race this, but `start_paused = true` keeps execution single-threaded within
-        // the tokio runtime so the set→run→restore happens atomically from the
-        // scheduler's perspective.
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("NS2_MAX_RETRIES", "2");
 
         let session = make_session();

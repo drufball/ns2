@@ -332,6 +332,18 @@ enum IssueAction {
         #[arg(long, help = "Output as JSON instead of human-readable format.")]
         json: bool,
     },
+    #[command(about = "Stream live events for an issue to stdout.", long_about = "Connects to the server's SSE event stream filtered to issue <id> and prints each event as it arrives.\n\nOutput format (one line per event):\n  [created]        open  – <title>\n  [status_changed] open → running\n  [comment_added]  <author>: \"<body>\"\n\nExits on Ctrl-C or when the server closes the stream.")]
+    Watch {
+        #[arg(long, help = "The issue ID to watch. Required.")]
+        id: String,
+    },
+    #[command(about = "Subscribe to issue events and deliver notifications.", long_about = "Creates an internal hook that posts a comment notification to <deliver-to> whenever issue <id> has a status change or a new comment.\n\nThis is sugar for `ns2 hook new` with:\n  --source internal\n  --event-type issue.status_changed\n  --event-type issue.comment_added\n  --filter-field data.issue.id=<id>\n  --action send-message\n\nPrints the created hook ID to stdout.")]
+    Subscribe {
+        #[arg(long, help = "The issue ID to subscribe to. Required.")]
+        id: String,
+        #[arg(long = "deliver-to", help = "Notification target in the form 'issue:<id>' or 'session:<id>'. Required.")]
+        deliver_to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -459,6 +471,12 @@ async fn main() {
             }
             IssueAction::Cancel { id } => {
                 commands::issue::run_cancel(&cli.server, id).await;
+            }
+            IssueAction::Watch { id } => {
+                commands::issue::run_watch(&cli.server, id).await;
+            }
+            IssueAction::Subscribe { id, deliver_to } => {
+                commands::issue::run_subscribe(&cli.server, id, deliver_to).await;
             }
         },
         Command::Hook { action } => match action {
@@ -2130,5 +2148,69 @@ mod tests {
             }
             _ => panic!("expected hook logs command"),
         }
+    }
+
+    // ─── `ns2 issue watch` CLI parse tests ───────────────────────────────────
+
+    #[test]
+    fn issue_watch_parses_id_flag() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "watch", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Watch { id } } => {
+                assert_eq!(id, "ab12");
+            }
+            _ => panic!("expected issue watch command"),
+        }
+    }
+
+    #[test]
+    fn issue_watch_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "watch"]);
+        assert!(result.is_err(), "watch without --id should fail to parse");
+    }
+
+    // ─── `ns2 issue subscribe` CLI parse tests ────────────────────────────────
+
+    #[test]
+    fn issue_subscribe_parses_id_and_deliver_to_issue() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "subscribe", "--id", "ab12", "--deliver-to", "issue:watcher1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Subscribe { id, deliver_to } } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(deliver_to, "issue:watcher1");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_subscribe_parses_deliver_to_session() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "subscribe",
+            "--id", "ab12",
+            "--deliver-to", "session:550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue { action: IssueAction::Subscribe { deliver_to, .. } } => {
+                assert_eq!(deliver_to, "session:550e8400-e29b-41d4-a716-446655440000");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_subscribe_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "subscribe", "--deliver-to", "issue:w1"]);
+        assert!(result.is_err(), "subscribe without --id should fail to parse");
+    }
+
+    #[test]
+    fn issue_subscribe_missing_deliver_to_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "subscribe", "--id", "ab12"]);
+        assert!(result.is_err(), "subscribe without --deliver-to should fail to parse");
     }
 }

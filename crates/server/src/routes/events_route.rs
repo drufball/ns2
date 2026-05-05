@@ -352,4 +352,66 @@ mod tests {
         assert_eq!(received.len(), 1, "only 1 session event should pass");
         assert!(matches!(received[0], SystemEvent::Session { .. }));
     }
+
+    // ── issue_id filter: only emits events for the matching issue ─────────────
+
+    #[tokio::test]
+    async fn issue_id_filter_only_passes_matching_issue_events() {
+        let bus = EventBus::new(32);
+        let mut rx = bus.subscribe();
+
+        let target_id = "ab12";
+        let other_id = "cd34";
+
+        // Emit events for two different issues
+        bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue(target_id))));
+        bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: make_issue(other_id),
+            from: IssueStatus::Open,
+            to: IssueStatus::Running,
+        }));
+        bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: make_issue(target_id),
+            from: IssueStatus::Open,
+            to: IssueStatus::Running,
+        }));
+        // Also emit a session event (should be filtered out)
+        bus.send(SystemEvent::Session {
+            session_id: uuid::Uuid::new_v4(),
+            event: events::SessionEvent::Done,
+        });
+
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: Some(target_id.to_string()),
+            types: None,
+            last_turns: None,
+        };
+
+        let mut received = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if q.matches(&ev) {
+                received.push(ev);
+            }
+        }
+
+        assert_eq!(
+            received.len(),
+            2,
+            "only events for issue {target_id} should pass, got {received:?}"
+        );
+        for ev in &received {
+            match ev {
+                SystemEvent::Issue(ie) => {
+                    let issue_id = match ie {
+                        IssueEvent::Created(i) => &i.id,
+                        IssueEvent::StatusChanged { issue, .. } => &issue.id,
+                        IssueEvent::CommentAdded { issue, .. } => &issue.id,
+                    };
+                    assert_eq!(issue_id, target_id, "all received events must be for target issue");
+                }
+                _ => panic!("received non-issue event"),
+            }
+        }
+    }
 }

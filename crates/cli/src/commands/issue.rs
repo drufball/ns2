@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use serde_json::json;
 use types::{Issue, IssueStatus};
+use events::SystemEvent;
 use crate::client::{handle_connection_error, print_error_response};
-use crate::render::{format_issue_show, print_issue_row, render_issue_tree, IssueTreeNode};
+use crate::render::{format_issue_show, format_issue_event, print_issue_row, render_issue_tree, IssueTreeNode};
 
 pub(crate) fn issue_is_terminal(status: &IssueStatus) -> bool {
     matches!(status, IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled)
@@ -507,6 +508,130 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         eprintln!("One or more issues failed.");
         std::process::exit(1);
     }
+}
+
+/// `ns2 issue watch --id X`
+///
+/// Connects to `GET /events?issue_id=<id>` as an SSE stream and renders each
+/// `IssueEvent` to stdout, one line per event.  Exits on Ctrl-C (SIGINT) or
+/// when the server closes the stream.
+pub(crate) async fn run_watch(server: &str, id: String) {
+    use futures::StreamExt;
+    use std::io::Write;
+
+    let url = format!("{}/events?issue_id={}", server, id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(0)) // no timeout — long-lived SSE stream
+        .build()
+        .unwrap_or_default();
+
+    let resp = client.get(&url).send().await.unwrap_or_else(|e| {
+        handle_connection_error(&e);
+    });
+    if !resp.status().is_success() {
+        print_error_response(resp).await;
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+
+    // Install a simple Ctrl-C handler so the process exits cleanly.
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let running_clone = running.clone();
+    // Best-effort SIGINT handler — drop the JoinHandle intentionally (fire-and-forget).
+    let _ctrl_c = tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        running_clone.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let stdout = std::io::stdout();
+
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        match stream.next().await {
+            None => break, // server closed the stream
+            Some(Err(_)) => break,
+            Some(Ok(bytes)) => {
+                let chunk = String::from_utf8_lossy(&bytes).to_string();
+                let frames = crate::render::parse_sse_frames(&mut buf, &chunk);
+                for frame in frames {
+                    // Each SSE frame is one or more "field: value" lines.
+                    // We look for the `data:` line.
+                    for line in frame.lines() {
+                        let data = if let Some(rest) = line.strip_prefix("data: ") {
+                            rest
+                        } else {
+                            continue;
+                        };
+
+                        // Parse as SystemEvent, then extract IssueEvent.
+                        let Ok(ev) = serde_json::from_str::<SystemEvent>(data) else {
+                            continue;
+                        };
+                        if let SystemEvent::Issue(issue_event) = ev {
+                            let line = format_issue_event(&issue_event);
+                            let mut out = stdout.lock();
+                            writeln!(out, "{line}").ok();
+                            out.flush().ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `ns2 issue subscribe --id X --deliver-to issue:<id>|session:<id>`
+///
+/// Sugar for creating an internal hook that delivers a notification comment
+/// whenever issue X has a status change or a comment added.
+pub(crate) async fn run_subscribe(server: &str, id: String, deliver_to: String) {
+    let client = reqwest::Client::new();
+    let url = format!("{}/hooks", server);
+
+    // Parse "issue:<id>" or "session:<id>"
+    let (target_type, target_id) = if let Some(rest) = deliver_to.strip_prefix("issue:") {
+        ("issue", rest.to_string())
+    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
+        ("session", rest.to_string())
+    } else {
+        eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
+        std::process::exit(1);
+    };
+
+    let hook_name = format!("subscribe-{id}");
+    let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+
+    let req_body = json!({
+        "name": hook_name,
+        "source": {
+            "type": "internal",
+            "event_types": ["issue.status_changed", "issue.comment_added"],
+        },
+        "filter": {
+            "conditions": [
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]
+        },
+        "action": {
+            "type": "send_message",
+            "target": { "type": target_type, "content": target_id },
+            "body": body_template,
+        },
+    });
+
+    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
+        handle_connection_error(&e);
+    });
+    if !resp.status().is_success() {
+        print_error_response(resp).await;
+    }
+    let hook: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
+        eprintln!("Error parsing response: {e}");
+        std::process::exit(1);
+    });
+    let hook_id = hook["id"].as_str().unwrap_or("?");
+    eprintln!("Created hook: {} ({})", hook["name"].as_str().unwrap_or(""), hook_id);
+    println!("{hook_id}");
 }
 
 #[cfg(test)]
