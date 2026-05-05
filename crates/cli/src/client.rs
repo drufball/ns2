@@ -46,7 +46,20 @@ pub(crate) async fn stream_events(url: &str, to_stderr: bool) {
             let frames = parse_sse_frames(&mut buffer, s);
             for line in frames {
                 if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<events::SessionEvent>(data) {
+                    // Try to parse as SystemEvent first (new /events endpoint).
+                    // Fall back to SessionEvent (legacy, kept for backward compat).
+                    let session_event: Option<events::SessionEvent> =
+                        if let Ok(ev) = serde_json::from_str::<events::SystemEvent>(data) {
+                            match ev {
+                                events::SystemEvent::Session { event, .. } => Some(event),
+                                _ => None,
+                            }
+                        } else {
+                            // Fallback: try old SessionEvent format
+                            serde_json::from_str::<events::SessionEvent>(data).ok()
+                        };
+
+                    if let Some(event) = session_event {
                         print_session_event(&event, to_stderr);
                         if matches!(event, events::SessionEvent::Done) {
                             return;

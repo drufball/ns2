@@ -11,7 +11,7 @@ pub use routes::{Error, Result};
 pub use routes::session::CreateSessionRequest;
 
 use state::AppState;
-use routes::{issue, session};
+use routes::{issue, session, events_route};
 
 use events::EventBus;
 
@@ -25,10 +25,10 @@ pub struct ServerConfig {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(session::health))
+        .route("/events", get(events_route::events))
         .route("/sessions", post(session::create_session))
         .route("/sessions", get(session::list_sessions))
         .route("/sessions/:id", get(session::get_session))
-        .route("/sessions/:id/events", get(session::session_events))
         .route("/sessions/:id/messages", post(session::send_message))
         .route("/sessions/:id/cancel", post(session::cancel_session))
         .route("/sessions/:id/status", axum::routing::patch(session::update_session_status))
@@ -70,17 +70,17 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let db = SqliteDb::connect(&db_url).await?;
     let db: Arc<dyn db::Db> = Arc::new(db);
-    let issue_service = issues::IssueService::new(Arc::clone(&db));
+    let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+    let event_bus = issue_service.event_bus().clone();
     let state = AppState {
         db,
         issue_service,
-        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         client,
         tools,
         model: config.model,
-        event_bus: EventBus::new(1024),
+        event_bus,
     };
 
     // Recover orphaned sessions before accepting any connections.
@@ -131,6 +131,8 @@ mod tests {
     use events::SessionEvent;
     use routes::session::event_from;
     use routes::issue::slugify;
+    #[allow(unused_imports)]
+    use routes::events_route;
 
     /// A minimal stub AnthropicClient defined locally in server tests.
     /// Does NOT use harness::StubClient — server tests must not depend on harness internals.
@@ -156,17 +158,17 @@ mod tests {
     async fn test_state() -> AppState {
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
-        let issue_service = issues::IssueService::new(Arc::clone(&db));
+        let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+        let event_bus = issue_service.event_bus().clone();
         AppState {
             db,
             issue_service,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
-            event_bus: EventBus::new(1024),
+            event_bus,
         }
     }
 
@@ -460,7 +462,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{id}/events"))
+                    .uri(format!("/events?session_id={id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -485,7 +487,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{id}/events"))
+                    .uri(format!("/events?session_id={id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -631,11 +633,11 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let sessions = state.sessions.lock().await;
-        let sender_count = if sessions.contains_key(&session_id) { 1 } else { 0 };
+        let senders = state.msg_senders.lock().await;
+        let sender_count = if senders.contains_key(&session_id) { 1 } else { 0 };
         assert_eq!(
             sender_count, 1,
-            "expected exactly 1 broadcast sender in sessions map, got {sender_count}"
+            "expected exactly 1 msg sender in msg_senders map, got {sender_count}"
         );
     }
 
@@ -679,8 +681,8 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let sessions = state.sessions.lock().await;
-        assert!(sessions.is_empty(), "empty initial_message must not spawn a harness");
+        let senders = state.msg_senders.lock().await;
+        assert!(senders.is_empty(), "empty initial_message must not spawn a harness");
     }
 
     #[tokio::test]
@@ -700,9 +702,9 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let sessions = state.sessions.lock().await;
+        let senders = state.msg_senders.lock().await;
         assert!(
-            sessions.contains_key(&session_id),
+            senders.contains_key(&session_id),
             "non-empty initial_message must spawn a harness"
         );
     }
@@ -731,7 +733,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{}/events", session.id))
+                    .uri(format!("/events?session_id={}", session.id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -747,8 +749,8 @@ mod tests {
             .filter(|l| l.starts_with("data: "))
             .any(|l| {
                 let json = &l["data: ".len()..];
-                serde_json::from_str::<SessionEvent>(json)
-                    .map(|ev| matches!(ev, SessionEvent::Done))
+                serde_json::from_str::<events::SystemEvent>(json)
+                    .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
                     .unwrap_or(false)
             });
         assert!(has_session_done, "completed session events must include SessionDone");
@@ -799,7 +801,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{}/events?last_turns=0", session.id))
+                    .uri(format!("/events?session_id={}&last_turns=0", session.id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -812,16 +814,16 @@ mod tests {
 
         let has_turn_started = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
-            serde_json::from_str::<SessionEvent>(json)
-                .map(|ev| matches!(ev, SessionEvent::TurnStarted { .. }))
+            serde_json::from_str::<events::SystemEvent>(json)
+                .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
                 .unwrap_or(false)
         });
         assert!(!has_turn_started, "last_turns=0 should skip all history turns");
 
         let has_session_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
-            serde_json::from_str::<SessionEvent>(json)
-                .map(|ev| matches!(ev, SessionEvent::Done))
+            serde_json::from_str::<events::SystemEvent>(json)
+                .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
                 .unwrap_or(false)
         });
         assert!(has_session_done, "completed session should still emit SessionDone");
@@ -872,7 +874,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{}/events?last_turns=1", session.id))
+                    .uri(format!("/events?session_id={}&last_turns=1", session.id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -888,8 +890,8 @@ mod tests {
             .filter(|l| l.starts_with("data: "))
             .filter(|l| {
                 let json = &l["data: ".len()..];
-                serde_json::from_str::<SessionEvent>(json)
-                    .map(|ev| matches!(ev, SessionEvent::TurnStarted { .. }))
+                serde_json::from_str::<events::SystemEvent>(json)
+                    .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
                     .unwrap_or(false)
             })
             .count();
@@ -943,7 +945,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/sessions/{}/events", session.id))
+                    .uri(format!("/events?session_id={}", session.id))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -958,6 +960,173 @@ mod tests {
         assert!(raw.contains("turn-1"), "should contain second turn's content");
         assert!(raw.contains("turn-2"), "should contain last turn's content");
     }
+
+    // --- GET /events ---
+
+    #[tokio::test]
+    async fn test_get_events_returns_200() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_events_content_type_is_event_stream() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/event-stream"), "expected SSE content-type, got: {ct}");
+    }
+
+    #[tokio::test]
+    async fn test_get_events_session_id_returns_200_and_history() {
+        let (app, state) = test_app_with_state().await;
+
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "events-history-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        for i in 0..2 {
+            let turn = types::Turn {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                token_count: Some(10),
+                created_at: chrono::Utc::now(),
+            };
+            state.db.create_turn(&turn).await.unwrap();
+            state
+                .db
+                .create_content_block(
+                    turn.id,
+                    0,
+                    &types::Role::Assistant,
+                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                )
+                .await
+                .unwrap();
+        }
+
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events?session_id={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_body_bytes(resp).await;
+        let raw = std::str::from_utf8(&body).unwrap();
+
+        assert!(raw.contains("turn-0"), "history replay must include turn-0");
+        assert!(raw.contains("turn-1"), "history replay must include turn-1");
+
+        // Must include a SystemEvent::Session{...Done} event
+        let has_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<events::SystemEvent>(json)
+                .map(|ev| matches!(ev, events::SystemEvent::Session { event: events::SessionEvent::Done, .. }))
+                .unwrap_or(false)
+        });
+        assert!(has_done, "/events?session_id must include Done for completed session");
+    }
+
+    #[tokio::test]
+    async fn test_get_old_session_events_route_returns_404() {
+        let app = test_app().await;
+        let fake_id = Uuid::new_v4();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{fake_id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "old /sessions/:id/events route must return 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_events_types_session_filters_issue_events_live() {
+        let (_app, state) = test_app_with_state().await;
+
+        // First subscribe to the event bus
+        let mut rx = state.event_bus.subscribe();
+
+        // create_issue will emit IssueEvent::Created
+        state.issue_service.create_issue(issues::CreateIssueInput {
+            title: "Extra issue".into(),
+            body: "body".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: None,
+        }).await.unwrap();
+
+        // Emit a Session event
+        let sid = Uuid::new_v4();
+        state.event_bus.send(events::SystemEvent::Session {
+            session_id: sid,
+            event: events::SessionEvent::Done,
+        });
+
+        let q = routes::events_route::EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: Some("session".into()),
+            last_turns: None,
+        };
+
+        let mut received = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if q.matches(&ev) {
+                received.push(ev);
+            }
+        }
+
+        // Only the session event should be in received (not the issue event)
+        assert_eq!(received.len(), 1, "only 1 event should pass the types=session filter");
+        assert!(
+            matches!(received[0], events::SystemEvent::Session { session_id: s, .. } if s == sid),
+            "the received event must be the session event"
+        );
+    }
+
 
     #[tokio::test]
     async fn test_completed_session_sender_still_alive() {
@@ -2138,17 +2307,17 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
-        let issue_service = issues::IssueService::new(Arc::clone(&db));
+        let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+        let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
             issue_service,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
-            event_bus: EventBus::new(1024),
+            event_bus,
         };
         let app = build_router(state.clone());
 
@@ -2233,17 +2402,17 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
-        let issue_service = issues::IssueService::new(Arc::clone(&db));
+        let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+        let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
             issue_service,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
-            event_bus: EventBus::new(1024),
+            event_bus,
         };
         let app = build_router(state.clone());
 
@@ -2427,17 +2596,17 @@ mod tests {
 
         let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
-        let issue_service = issues::IssueService::new(Arc::clone(&db));
+        let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+        let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
             issue_service,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             client,
             tools: vec![],
             model: "claude-opus-4-5".into(),
-            event_bus: EventBus::new(1024),
+            event_bus,
         };
         let app = build_router(state.clone());
 
@@ -2564,7 +2733,7 @@ mod tests {
             }
         });
 
-        let session_id = Uuid::new_v4();
+        let _session_id = Uuid::new_v4();
         let turn_id1 = Uuid::new_v4();
         let turn_id2 = Uuid::new_v4();
 
@@ -3045,7 +3214,7 @@ mod tests {
             }
         });
 
-        let session_id = Uuid::new_v4();
+        let _session_id = Uuid::new_v4();
         let turn_id = Uuid::new_v4();
 
         tx.send(SessionEvent::TurnDone { turn_id }).unwrap();

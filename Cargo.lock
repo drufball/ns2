@@ -1356,6 +1356,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "db",
+ "events",
  "thiserror",
  "tokio",
  "tracing",

@@ -103,16 +103,16 @@ pub(crate) async fn run_new(
     if wait {
         // last_turns=1: show only the final turn, not full history.
         // Output goes to stderr so stdout stays UUID-only for scripting.
-        let events_url = format!("{}/sessions/{}/events?last_turns=1", server, session.id);
+        let events_url = format!("{}/events?session_id={}&last_turns=1", server, session.id);
         stream_events(&events_url, true).await;
     }
 }
 
 pub(crate) async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>, timeout: Option<u64>) {
     let session_id = resolve_session_id(server, id, name).await;
-    let mut url = format!("{}/sessions/{}/events", server, session_id);
+    let mut url = format!("{}/events?session_id={}", server, session_id);
     if let Some(n) = turns {
-        url = format!("{url}?last_turns={n}");
+        url = format!("{url}&last_turns={n}");
     }
     if let Some(secs) = timeout {
         let duration = tokio::time::Duration::from_secs(secs);

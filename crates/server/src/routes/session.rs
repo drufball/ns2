@@ -1,15 +1,10 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::sse::{Event, Sse},
     Json,
 };
-use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
 use types::{Session, SessionStatus};
-use events::SessionEvent;
 use uuid::Uuid;
 
 use crate::harness_spawn::spawn_harness_sync;
@@ -43,11 +38,6 @@ pub(crate) struct SendMessageRequest {
 #[derive(Deserialize)]
 pub(crate) struct UpdateSessionStatusRequest {
     pub(crate) status: String,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct SessionEventsQuery {
-    pub(crate) last_turns: Option<usize>,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -108,88 +98,11 @@ pub(crate) async fn get_session(
     Ok(Json(session))
 }
 
-pub(crate) fn event_from(ev: &SessionEvent) -> Event {
-    Event::default().data(serde_json::to_string(ev).unwrap_or_default())
-}
-
-pub(crate) async fn session_events(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Query(params): Query<SessionEventsQuery>,
-) -> Sse<impl futures::Stream<Item = std::result::Result<Event, Infallible>>> {
-    // Subscribe BEFORE reading history to avoid race
-    let live_rx = {
-        let map = state.sessions.lock().await;
-        map.get(&id).map(|tx| tx.subscribe())
-    };
-
-    // Fetch session to check status
-    let session = state.db.get_session(id).await;
-
-    // Build historical events
-    let mut history: Vec<SessionEvent> = Vec::new();
-
-    if let Ok(ref sess) = session {
-        if let Ok(turns) = state.db.list_turns(id).await {
-            // Apply last_turns filter: if last_turns=0, skip all; if last_turns=N, take last N; if absent, take all
-            let turns_to_replay: Vec<_> = match params.last_turns {
-                Some(0) => vec![],
-                Some(n) => turns.iter().rev().take(n).rev().cloned().collect(),
-                None => turns.clone(),
-            };
-
-            for turn in &turns_to_replay {
-                history.push(SessionEvent::TurnStarted { turn: turn.clone() });
-                if let Ok(blocks) = state.db.list_content_blocks(turn.id).await {
-                    for (i, (_role, block)) in blocks.into_iter().enumerate() {
-                        let index = i as u32;
-                        if let types::ContentBlock::Text { ref text } = block {
-                            history.push(SessionEvent::ContentBlockDelta {
-                                turn_id: turn.id,
-                                index,
-                                delta: types::ContentBlockDelta::TextDelta { text: text.clone() },
-                            });
-                        }
-                        history.push(SessionEvent::ContentBlockDone {
-                            turn_id: turn.id,
-                            index,
-                            block,
-                        });
-                    }
-                }
-                history.push(SessionEvent::TurnDone { turn_id: turn.id });
-            }
-        }
-
-        match sess.status {
-            SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
-                history.push(SessionEvent::Done);
-            }
-            _ => {}
-        }
-    }
-
-    let history_stream = stream::iter(history)
-        .map(|event| Ok::<Event, Infallible>(event_from(&event)));
-
-    let live_stream = if let Some(rx) = live_rx {
-        futures::future::Either::Left(
-            BroadcastStream::new(rx)
-                .filter_map(|result| async move {
-                    match result {
-                        Ok(event) => Some(event),
-                        Err(_lagged) => Some(SessionEvent::Error {
-                            message: "stream lagged".into(),
-                        }),
-                    }
-                })
-                .map(|event| Ok::<Event, Infallible>(event_from(&event))),
-        )
-    } else {
-        futures::future::Either::Right(stream::empty::<std::result::Result<Event, Infallible>>())
-    };
-
-    Sse::new(history_stream.chain(live_stream))
+/// Serialise a `SessionEvent` into an SSE `Event`.
+/// Used by tests in `server/src/lib.rs` that verify event serialisation.
+#[cfg(test)]
+pub(crate) fn event_from(ev: &events::SessionEvent) -> axum::response::sse::Event {
+    axum::response::sse::Event::default().data(serde_json::to_string(ev).unwrap_or_default())
 }
 
 /// Send a message to a session. Works on `created`, `running`, and `completed` sessions.

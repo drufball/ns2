@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use chrono::Utc;
+use events::{EventBus, IssueEvent, SystemEvent};
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
 
@@ -65,15 +66,30 @@ pub struct StartIssueOutcome {
 #[derive(Clone)]
 pub struct IssueService {
     db: Arc<dyn db::Db>,
+    event_bus: EventBus,
 }
 
 impl IssueService {
     pub fn new(db: Arc<dyn db::Db>) -> Self {
-        Self { db }
+        Self {
+            db,
+            event_bus: EventBus::new(1024),
+        }
+    }
+
+    /// Create an `IssueService` with an externally-provided `EventBus`.
+    /// Use this when you want issue events to flow into the same bus as
+    /// session events (i.e. the server's global bus).
+    pub fn with_event_bus(db: Arc<dyn db::Db>, event_bus: EventBus) -> Self {
+        Self { db, event_bus }
     }
 
     pub fn db(&self) -> &Arc<dyn db::Db> {
         &self.db
+    }
+
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
     }
 
     pub async fn create_issue(&self, input: CreateIssueInput) -> Result<Issue> {
@@ -104,6 +120,7 @@ impl IssueService {
             updated_at: now,
         };
         self.db.create_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::Created(issue.clone())));
         Ok(issue)
     }
 
@@ -134,44 +151,71 @@ impl IssueService {
 
     pub async fn add_comment(&self, id: String, author: String, body: String) -> Result<Issue> {
         let mut issue = self.db.get_issue(id).await?;
-        issue.comments.push(IssueComment {
+        let comment = IssueComment {
             author,
             created_at: Utc::now(),
             body,
-        });
+        };
+        issue.comments.push(comment.clone());
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+            issue: issue.clone(),
+            comment,
+        }));
         Ok(issue)
     }
 
     pub async fn finish_issue(&self, id: &str, summary: Option<String>) -> Result<()> {
         let mut issue = self.db.get_issue(id.to_string()).await?;
+        let from = issue.status.clone();
         if let Some(text) = summary {
             if !text.is_empty() {
                 let author = issue.assignee.clone().unwrap_or_else(|| "agent".to_string());
-                issue.comments.push(IssueComment {
+                let comment = IssueComment {
                     author,
                     created_at: Utc::now(),
                     body: text,
-                });
+                };
+                issue.comments.push(comment.clone());
+                self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                    issue: issue.clone(),
+                    comment,
+                }));
             }
         }
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Completed,
+        }));
         Ok(())
     }
 
     pub async fn fail_issue(&self, id: &str, error_message: String) -> Result<()> {
         let mut issue = self.db.get_issue(id.to_string()).await?;
-        issue.comments.push(IssueComment {
+        let from = issue.status.clone();
+        let comment = IssueComment {
             author: "system".to_string(),
             created_at: Utc::now(),
             body: error_message,
-        });
+        };
+        issue.comments.push(comment.clone());
         issue.status = IssueStatus::Failed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+            issue: issue.clone(),
+            comment,
+        }));
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Failed,
+        }));
         Ok(())
     }
 
@@ -185,6 +229,7 @@ impl IssueService {
             return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
         }
 
+        let from = issue.status.clone();
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
@@ -200,6 +245,12 @@ impl IssueService {
         issue.status = IssueStatus::Running;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Running,
+        }));
 
         let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
         if !issue.comments.is_empty() {
@@ -222,14 +273,25 @@ impl IssueService {
         if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
             return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
         }
-        issue.comments.push(IssueComment {
+        let from = issue.status.clone();
+        let new_comment = IssueComment {
             author: "user".into(),
             created_at: Utc::now(),
             body: comment,
-        });
+        };
+        issue.comments.push(new_comment.clone());
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+            issue: issue.clone(),
+            comment: new_comment,
+        }));
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Completed,
+        }));
         Ok(issue)
     }
 
@@ -246,14 +308,25 @@ impl IssueService {
             }
         }
 
-        issue.comments.push(IssueComment {
+        let from = issue.status.clone();
+        let comment = IssueComment {
             author: "system".to_string(),
             created_at: Utc::now(),
             body: "issue cancelled by user".to_string(),
-        });
+        };
+        issue.comments.push(comment.clone());
         issue.status = IssueStatus::Cancelled;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+            issue: issue.clone(),
+            comment,
+        }));
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Cancelled,
+        }));
         Ok(issue)
     }
 
@@ -272,14 +345,21 @@ impl IssueService {
             }
         };
 
+        let from = issue.status.clone();
+
         // Optionally append a user comment before the status transition
         if let Some(comment_text) = comment {
             if !comment_text.is_empty() {
-                issue.comments.push(IssueComment {
+                let new_comment = IssueComment {
                     author: "user".into(),
                     created_at: Utc::now(),
                     body: comment_text,
-                });
+                };
+                issue.comments.push(new_comment.clone());
+                self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                    issue: issue.clone(),
+                    comment: new_comment,
+                }));
             }
         }
 
@@ -289,6 +369,11 @@ impl IssueService {
         }
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: issue.clone(),
+            from,
+            to: IssueStatus::Open,
+        }));
         Ok(issue)
     }
 
@@ -1069,5 +1154,198 @@ mod tests {
     fn slugify_trims_leading_trailing_dashes() {
         assert_eq!(slugify("  leading"), "leading");
         assert_eq!(slugify("trailing  "), "trailing");
+    }
+
+    // --- event emission ---
+
+    fn make_service_with_bus(db: Arc<dyn db::Db>) -> (IssueService, events::EventBus) {
+        let bus = events::EventBus::new(32);
+        let svc = IssueService::with_event_bus(Arc::clone(&db), bus.clone());
+        (svc, bus)
+    }
+
+    #[tokio::test]
+    async fn create_issue_emits_created_event() {
+        let db = Arc::new(MemoryDb::new());
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.create_issue(CreateIssueInput {
+            title: "Test event".into(),
+            body: "body".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: None,
+        }).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(ev, events::SystemEvent::Issue(events::IssueEvent::Created(ref i)) if i.title == "Test event"),
+            "expected IssueEvent::Created, got: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_issue_emits_status_changed_event() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.start_issue("ab12".into()).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    from: IssueStatus::Open,
+                    to: IssueStatus::Running,
+                    ..
+                })
+            ),
+            "expected StatusChanged Open->Running, got: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_issue_emits_status_changed_and_comment_added() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.complete_issue("ab12".into(), "All done".into()).await.unwrap();
+
+        let ev1 = rx.try_recv().expect("should have received first event");
+        assert!(
+            matches!(ev1, events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })),
+            "first event should be CommentAdded, got: {ev1:?}"
+        );
+
+        let ev2 = rx.try_recv().expect("should have received second event");
+        assert!(
+            matches!(
+                ev2,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    to: IssueStatus::Completed,
+                    ..
+                })
+            ),
+            "second event should be StatusChanged->Completed, got: {ev2:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_comment_emits_comment_added_event() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.add_comment("ab12".into(), "tester".into(), "Great issue".into()).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::CommentAdded {
+                    ref comment, ..
+                }) if comment.author == "tester" && comment.body == "Great issue"
+            ),
+            "expected CommentAdded with author 'tester', got: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_issue_emits_status_changed_event() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12");
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.cancel_issue("ab12".into()).await.unwrap();
+
+        // Skip CommentAdded
+        let _comment_ev = rx.try_recv().expect("should have received CommentAdded");
+
+        let ev = rx.try_recv().expect("should have received StatusChanged");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    to: IssueStatus::Cancelled,
+                    ..
+                })
+            ),
+            "expected StatusChanged->Cancelled, got: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_issue_emits_status_changed_event() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Failed;
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.reopen_issue("ab12".into(), None).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    from: IssueStatus::Failed,
+                    to: IssueStatus::Open,
+                    ..
+                })
+            ),
+            "expected StatusChanged Failed->Open, got: {ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_issue_emits_comment_added_and_status_changed() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let mut rx = bus.subscribe();
+
+        svc.fail_issue("ab12", "timeout".into()).await.unwrap();
+
+        let ev1 = rx.try_recv().expect("should have received first event");
+        assert!(
+            matches!(ev1, events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })),
+            "first event should be CommentAdded, got: {ev1:?}"
+        );
+
+        let ev2 = rx.try_recv().expect("should have received second event");
+        assert!(
+            matches!(
+                ev2,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    to: IssueStatus::Failed,
+                    ..
+                })
+            ),
+            "second event should be StatusChanged->Failed, got: {ev2:?}"
+        );
     }
 }

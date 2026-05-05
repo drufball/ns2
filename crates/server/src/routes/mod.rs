@@ -1,5 +1,6 @@
 pub(crate) mod issue;
 pub(crate) mod session;
+pub(crate) mod events_route;
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 
