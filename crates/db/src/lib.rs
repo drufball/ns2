@@ -1442,4 +1442,226 @@ mod tests {
         let after_update = db.get_issue("br01".into()).await.unwrap();
         assert_eq!(after_update.branch, "fix/updated-branch");
     }
+
+    // ── SqliteHookStore tests ─────────────────────────────────────────────────
+
+    fn make_hook(id: &str) -> types::Hook {
+        types::Hook {
+            id: id.into(),
+            name: "test-hook".into(),
+            source: types::HookSource::Internal {
+                event_types: vec!["issue.created".into()],
+            },
+            filter: None,
+            action: types::HookAction::SendMessage {
+                target: types::MessageTarget::Issue("x".into()),
+                body: "hi".into(),
+            },
+            enabled: true,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // test: create_then_list_hooks_returns_correct_source_type
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_create_then_list_hooks_returns_correct_source_type(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-001");
+        store.create_hook(&hook).await.unwrap();
+
+        let hooks = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].id, "hook-001");
+        assert!(
+            matches!(
+                &hooks[0].source,
+                types::HookSource::Internal { event_types }
+                    if event_types == &["issue.created"]
+            ),
+            "source should be Internal with correct event_types"
+        );
+    }
+
+    // test: source_type_str filters correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_hooks_filter_by_source_type(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let internal_hook = make_hook("h-internal");
+        store.create_hook(&internal_hook).await.unwrap();
+
+        let mut external_hook = make_hook("h-external");
+        external_hook.source = types::HookSource::External { secret: None };
+        store.create_hook(&external_hook).await.unwrap();
+
+        let mut timer_hook = make_hook("h-timer");
+        timer_hook.source = types::HookSource::Timer {
+            schedule: "*/5 * * * *".into(),
+        };
+        store.create_hook(&timer_hook).await.unwrap();
+
+        // Filter by "internal" — should return only the internal hook
+        let internal_list = store.list_hooks(None, Some("internal")).await.unwrap();
+        assert_eq!(internal_list.len(), 1);
+        assert_eq!(internal_list[0].id, "h-internal");
+
+        // Filter by "external"
+        let external_list = store.list_hooks(None, Some("external")).await.unwrap();
+        assert_eq!(external_list.len(), 1);
+        assert_eq!(external_list[0].id, "h-external");
+
+        // Filter by "timer"
+        let timer_list = store.list_hooks(None, Some("timer")).await.unwrap();
+        assert_eq!(timer_list.len(), 1);
+        assert_eq!(timer_list[0].id, "h-timer");
+    }
+
+    // test: action_type_str_round_trips_correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_type_str_round_trips_correctly(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-action");
+        store.create_hook(&hook).await.unwrap();
+
+        let fetched = store.get_hook("hook-action").await.unwrap();
+        assert!(
+            matches!(
+                &fetched.action,
+                types::HookAction::SendMessage { target, body }
+                    if matches!(target, types::MessageTarget::Issue(s) if s == "x")
+                    && body == "hi"
+            ),
+            "action should be SendMessage with correct target and body"
+        );
+    }
+
+    // test: action_type CreateIssue round-trips
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_create_issue_round_trips(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let mut hook = make_hook("hook-ci");
+        hook.action = types::HookAction::CreateIssue {
+            title: "Auto issue".into(),
+            body: "Created by hook".into(),
+            assignee: Some("dev".into()),
+            parent: None,
+            start: false,
+        };
+        store.create_hook(&hook).await.unwrap();
+
+        let fetched = store.get_hook("hook-ci").await.unwrap();
+        assert!(
+            matches!(
+                &fetched.action,
+                types::HookAction::CreateIssue { title, assignee, .. }
+                    if title == "Auto issue" && assignee.as_deref() == Some("dev")
+            ),
+            "action should be CreateIssue with correct fields"
+        );
+    }
+
+    // test: enabled_flag_round_trips_correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_enabled_flag_round_trips_correctly(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        // Create a hook with enabled: false
+        let mut hook = make_hook("hook-disabled");
+        hook.enabled = false;
+        store.create_hook(&hook).await.unwrap();
+
+        // List hooks and assert enabled == false
+        let hooks = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert!(!hooks[0].enabled, "hook should be disabled after creation");
+
+        // Update the hook to enabled: true
+        let mut updated = hooks[0].clone();
+        updated.enabled = true;
+        updated.updated_at = Utc::now();
+        store.update_hook(&updated).await.unwrap();
+
+        // Get the hook and assert enabled == true
+        let fetched = store.get_hook("hook-disabled").await.unwrap();
+        assert!(fetched.enabled, "hook should be enabled after update");
+    }
+
+    // test: list_hooks filter by enabled flag
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_hooks_filter_by_enabled(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let enabled_hook = make_hook("h-enabled");
+        store.create_hook(&enabled_hook).await.unwrap();
+
+        let mut disabled_hook = make_hook("h-disabled");
+        disabled_hook.enabled = false;
+        store.create_hook(&disabled_hook).await.unwrap();
+
+        let enabled_only = store.list_hooks(Some(true), None).await.unwrap();
+        assert_eq!(enabled_only.len(), 1);
+        assert_eq!(enabled_only[0].id, "h-enabled");
+        assert!(enabled_only[0].enabled);
+
+        let disabled_only = store.list_hooks(Some(false), None).await.unwrap();
+        assert_eq!(disabled_only.len(), 1);
+        assert_eq!(disabled_only[0].id, "h-disabled");
+        assert!(!disabled_only[0].enabled);
+    }
+
+    // test: update_nonexistent_hook_returns_not_found
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_update_nonexistent_hook_returns_not_found(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("no-such-id");
+        let result = store.update_hook(&hook).await;
+        assert!(
+            matches!(result, Err(Error::NotFound)),
+            "updating a non-existent hook should return NotFound, got: {result:?}"
+        );
+    }
+
+    // test: delete_nonexistent_hook_returns_not_found
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_nonexistent_hook_returns_not_found(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let result = store.delete_hook("no-such-id").await;
+        assert!(
+            matches!(result, Err(Error::NotFound)),
+            "deleting a non-existent hook should return NotFound, got: {result:?}"
+        );
+    }
+
+    // test: delete an existing hook succeeds and it's no longer listable
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_hook_removes_it(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-to-delete");
+        store.create_hook(&hook).await.unwrap();
+
+        // Confirm it exists
+        let before = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Delete it
+        store.delete_hook("hook-to-delete").await.unwrap();
+
+        // Confirm it's gone
+        let after = store.list_hooks(None, None).await.unwrap();
+        assert!(after.is_empty());
+
+        // get_hook should return NotFound
+        let get_result = store.get_hook("hook-to-delete").await;
+        assert!(matches!(get_result, Err(Error::NotFound)));
+    }
+
+    // test: get_hook_not_found
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_hook_not_found(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let result = store.get_hook("no-such-hook").await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
 }
