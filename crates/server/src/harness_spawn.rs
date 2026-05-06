@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use events::{SessionEvent, SystemEvent};
+use std::sync::Arc;
 use types::SessionStatus;
 
 use crate::state::AppState;
@@ -50,10 +50,11 @@ pub fn spawn_harness_sync(
                 match event {
                     SystemEvent::Session {
                         session_id: sid,
-                        event: SessionEvent::ContentBlockDelta {
-                            delta: types::ContentBlockDelta::TextDelta { text },
-                            ..
-                        },
+                        event:
+                            SessionEvent::ContentBlockDelta {
+                                delta: types::ContentBlockDelta::TextDelta { text },
+                                ..
+                            },
                     } if sid == session_id => {
                         current_turn_text.push_str(&text);
                     }
@@ -339,6 +340,183 @@ mod tests {
             issue1_final.status,
             IssueStatus::Failed,
             "issue1 must be Failed after its own session's Error event"
+        );
+    }
+
+    /// `ContentBlockDelta` for session2 must NOT accumulate into issue1's turn
+    /// text.  `TurnDone` for session2 must NOT flush session2's text into
+    /// issue1's `last_turn_text`.  The completion comment for issue1 should
+    /// only contain text from session1's `ContentBlockDelta` events.
+    ///
+    /// This exercises the `sid == session_id` guard on `ContentBlockDelta` and
+    /// the `sid == session_id && !current_turn_text.is_empty()` guard on
+    /// `TurnDone`.
+    #[tokio::test]
+    async fn test_content_block_delta_and_turn_done_filtered_by_session() {
+        let state = crate::tests::test_state().await;
+
+        let session1 = make_session(&state).await;
+        let session2 = make_session(&state).await;
+        make_running_issue(&state, "cbd-i1", "Issue with delta").await;
+
+        // Spawn only a watcher for session1/issue1.
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("cbd-i1".into()));
+
+        // Give the watcher time to subscribe.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let turn_id = uuid::Uuid::new_v4();
+
+        // Emit ContentBlockDelta for session2 — issue1's watcher must ignore it.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "session2 text SHOULD NOT APPEAR".into(),
+                },
+            },
+        });
+
+        // Emit TurnDone for session2 — issue1's watcher must ignore it.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Now emit ContentBlockDelta for session1 — this SHOULD be accumulated.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "session1 summary text".into(),
+                },
+            },
+        });
+
+        // Emit TurnDone for session1 — this SHOULD flush current_turn_text into last_turn_text.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Emit Done for session1 — the watcher should use last_turn_text as the summary.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Done,
+        });
+
+        // Wait for issue1 to become Completed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("cbd-i1".into()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue cbd-i1 did not become Completed within 3s"
+            );
+        }
+
+        // The completion comment should contain session1's text, not session2's.
+        let issue1_final = state.db.get_issue("cbd-i1".into()).await.unwrap();
+        assert_eq!(issue1_final.status, IssueStatus::Completed);
+
+        // The summary comment is added by finish_issue — check the comments.
+        let has_session1_text = issue1_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("session1 summary text"));
+        let has_session2_text = issue1_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("session2 text SHOULD NOT APPEAR"));
+
+        assert!(
+            has_session1_text,
+            "expected completion comment to contain session1's text, got: {:?}",
+            issue1_final.comments
+        );
+        assert!(
+            !has_session2_text,
+            "completion comment must NOT contain session2's text, got: {:?}",
+            issue1_final.comments
+        );
+    }
+
+    /// When `TurnDone` fires but `current_turn_text` is empty (no
+    /// `ContentBlockDelta` was accumulated), `last_turn_text` must remain
+    /// unchanged — the `!current_turn_text.is_empty()` guard is exercised.
+    /// The subsequent `Done` should produce a completion with no summary.
+    #[tokio::test]
+    async fn test_turn_done_empty_text_does_not_overwrite_last_turn_text() {
+        let state = crate::tests::test_state().await;
+
+        let session1 = make_session(&state).await;
+        make_running_issue(&state, "cbd-i2", "Issue empty turn").await;
+
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("cbd-i2".into()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let turn_id = uuid::Uuid::new_v4();
+
+        // First turn: emit delta + TurnDone so last_turn_text = "first turn text"
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "first turn text".into(),
+                },
+            },
+        });
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Second turn: emit TurnDone with NO preceding delta — should NOT overwrite last_turn_text.
+        let turn_id2 = uuid::Uuid::new_v4();
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id: turn_id2 },
+        });
+
+        // Emit Done — the summary should still be "first turn text".
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Done,
+        });
+
+        // Wait for issue to become Completed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("cbd-i2".into()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue cbd-i2 did not become Completed within 3s"
+            );
+        }
+
+        let issue_final = state.db.get_issue("cbd-i2".into()).await.unwrap();
+        let has_first_turn = issue_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("first turn text"));
+        assert!(
+            has_first_turn,
+            "expected comment to contain 'first turn text', got: {:?}",
+            issue_final.comments
         );
     }
 }

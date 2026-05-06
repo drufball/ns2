@@ -8,7 +8,11 @@ use uuid::Uuid;
 /// Kills the process and returns `exit_code=1` on timeout.
 /// When `cwd` is `Some`, the subprocess is started with that working directory
 /// so hooks run inside the agent's worktree rather than the server's cwd.
-pub async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&Path>) -> (i32, String, String) {
+pub async fn run_hook(
+    cmd: &HookCommand,
+    stdin_json: &str,
+    cwd: Option<&Path>,
+) -> (i32, String, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     use tokio::time::{sleep, Duration};
@@ -23,8 +27,7 @@ pub async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&Path>) -
     if let Some(dir) = cwd {
         builder.current_dir(dir);
     }
-    let mut child = match builder.spawn()
-    {
+    let mut child = match builder.spawn() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("failed to spawn hook command '{}': {e}", cmd.command);
@@ -147,7 +150,11 @@ pub async fn run_post_tool_use_hooks(
 ///
 /// `cwd` sets the working directory for the hook subprocess so it runs inside the
 /// session's worktree rather than the server process's cwd.
-pub async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid, cwd: Option<&Path>) -> Option<String> {
+pub async fn run_stop_hooks(
+    hooks: &AgentHooks,
+    session_id: Uuid,
+    cwd: Option<&Path>,
+) -> Option<String> {
     let stdin = serde_json::json!({ "session_id": session_id.to_string() });
     let stdin_str = stdin.to_string();
 

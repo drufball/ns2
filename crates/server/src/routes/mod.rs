@@ -1,7 +1,7 @@
-pub mod issue;
-pub mod session;
 pub mod events_route;
 pub mod hook;
+pub mod issue;
+pub mod session;
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 

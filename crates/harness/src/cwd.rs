@@ -8,10 +8,7 @@ use uuid::Uuid;
 ///   reads `ns2.toml`, computes `<base>/<branch>`, ensures the worktree
 ///   exists, and returns the worktree path.
 /// - Otherwise: returns `None` (use git root as cwd).
-pub async fn resolve_session_cwd(
-    db: &Arc<dyn db::Db>,
-    session_id: Uuid,
-) -> Option<PathBuf> {
+pub async fn resolve_session_cwd(db: &Arc<dyn db::Db>, session_id: Uuid) -> Option<PathBuf> {
     resolve_session_cwd_with_root(db, session_id, workspace::git_root().await).await
 }
 
@@ -23,7 +20,11 @@ pub async fn resolve_session_cwd_with_root(
 ) -> Option<PathBuf> {
     let issues = db.list_issues_by_session_id(session_id).await.ok()?;
     let branch = issues.into_iter().find_map(|i| {
-        if i.branch.is_empty() { None } else { Some(i.branch) }
+        if i.branch.is_empty() {
+            None
+        } else {
+            Some(i.branch)
+        }
     })?;
 
     let git_root = git_root?;

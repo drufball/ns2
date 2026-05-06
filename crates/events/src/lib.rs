@@ -15,16 +15,40 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    TurnStarted { turn: Turn },
-    ContentBlockDelta { turn_id: Uuid, index: u32, delta: ContentBlockDelta },
-    ContentBlockDone { turn_id: Uuid, index: u32, block: ContentBlock },
-    TurnDone { turn_id: Uuid },
-    ToolUseStart { id: Uuid, turn_id: Uuid, name: String, input: serde_json::Value },
-    ToolUseDone { id: Uuid, turn_id: Uuid, name: String, output: String },
+    TurnStarted {
+        turn: Turn,
+    },
+    ContentBlockDelta {
+        turn_id: Uuid,
+        index: u32,
+        delta: ContentBlockDelta,
+    },
+    ContentBlockDone {
+        turn_id: Uuid,
+        index: u32,
+        block: ContentBlock,
+    },
+    TurnDone {
+        turn_id: Uuid,
+    },
+    ToolUseStart {
+        id: Uuid,
+        turn_id: Uuid,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolUseDone {
+        id: Uuid,
+        turn_id: Uuid,
+        name: String,
+        output: String,
+    },
     /// Emitted when the session finishes successfully.  The `session_id` is on
     /// the outer `SystemEvent::Session { session_id, .. }` wrapper.
     Done,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 // ── IssueEvent ────────────────────────────────────────────────────────────────
@@ -33,8 +57,15 @@ pub enum SessionEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IssueEvent {
     Created(Issue),
-    StatusChanged { issue: Issue, from: IssueStatus, to: IssueStatus },
-    CommentAdded { issue: Issue, comment: IssueComment },
+    StatusChanged {
+        issue: Issue,
+        from: IssueStatus,
+        to: IssueStatus,
+    },
+    CommentAdded {
+        issue: Issue,
+        comment: IssueComment,
+    },
 }
 
 // ── SystemEvent ───────────────────────────────────────────────────────────────
@@ -47,10 +78,19 @@ pub enum IssueEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SystemEvent {
-    Session { session_id: Uuid, event: SessionEvent },
+    Session {
+        session_id: Uuid,
+        event: SessionEvent,
+    },
     Issue(IssueEvent),
-    External { hook_id: String, payload: serde_json::Value },
-    TimerFired { hook_id: String, fired_at: DateTime<Utc> },
+    External {
+        hook_id: String,
+        payload: serde_json::Value,
+    },
+    TimerFired {
+        hook_id: String,
+        fired_at: DateTime<Utc>,
+    },
 }
 
 // ── EventBus ──────────────────────────────────────────────────────────────────
@@ -66,7 +106,7 @@ pub struct EventBus {
 
 impl EventBus {
     /// Create a new bus with the given channel capacity.
-    #[must_use] 
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
@@ -74,7 +114,7 @@ impl EventBus {
 
     /// Subscribe to the bus.  Returns a `Receiver` that will see all events
     /// sent *after* this call.
-    #[must_use] 
+    #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<SystemEvent> {
         self.tx.subscribe()
     }
@@ -255,9 +295,14 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: IssueEvent = serde_json::from_str(&json).unwrap();
-        assert!(
-            matches!(decoded, IssueEvent::StatusChanged { from: IssueStatus::Open, to: IssueStatus::Running, .. })
-        );
+        assert!(matches!(
+            decoded,
+            IssueEvent::StatusChanged {
+                from: IssueStatus::Open,
+                to: IssueStatus::Running,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -319,13 +364,14 @@ mod tests {
         let ev = SessionEvent::ContentBlockDone {
             turn_id,
             index: 0,
-            block: ContentBlock::Text { text: "world".into() },
+            block: ContentBlock::Text {
+                text: "world".into(),
+            },
         };
         let json = serde_json::to_string(&ev).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "content_block_done");
-        let decoded: SessionEvent =
-            serde_json::from_str(&json).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
         assert!(
             matches!(decoded, SessionEvent::ContentBlockDone { turn_id: tid, .. } if tid == turn_id)
         );
@@ -354,7 +400,9 @@ mod tests {
 
     #[test]
     fn session_event_error_serde_round_trip() {
-        let ev = SessionEvent::Error { message: "oops".into() };
+        let ev = SessionEvent::Error {
+            message: "oops".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "error");

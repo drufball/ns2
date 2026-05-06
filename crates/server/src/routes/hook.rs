@@ -112,10 +112,7 @@ pub async fn list_hooks(
     }
 }
 
-pub async fn get_hook(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_hook(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match state.hook_store.get_hook(&id).await {
         Ok(hook) => Json(hook).into_response(),
         Err(e) => HookApiError(e).into_response(),

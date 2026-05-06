@@ -33,7 +33,7 @@ pub async fn git_root() -> Option<PathBuf> {
 ///
 /// Prefer [`git_root`] in async contexts.  This function blocks the calling
 /// thread and must not be called from inside a Tokio worker thread.
-#[must_use] 
+#[must_use]
 pub fn git_root_sync() -> Option<PathBuf> {
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -50,7 +50,7 @@ pub fn git_root_sync() -> Option<PathBuf> {
 }
 
 /// Returns true if `root` is inside a git working tree.
-#[must_use] 
+#[must_use]
 pub fn is_git_repo(root: &Path) -> bool {
     std::process::Command::new("git")
         .current_dir(root)
@@ -61,7 +61,7 @@ pub fn is_git_repo(root: &Path) -> bool {
 
 /// Returns the commit hash of the last commit that touched `file` (relative to `root`),
 /// or None if the file has no commits.
-#[must_use] 
+#[must_use]
 pub fn git_last_commit_for_file(root: &Path, file: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .current_dir(root)
@@ -72,11 +72,15 @@ pub fn git_last_commit_for_file(root: &Path, file: &Path) -> Option<String> {
         return None;
     }
     let hash = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    if hash.is_empty() { None } else { Some(hash) }
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
 }
 
 /// Returns true if `older` is an ancestor of `newer`, or they are the same commit.
-#[must_use] 
+#[must_use]
 pub fn git_is_ancestor_or_equal(root: &Path, older: &str, newer: &str) -> bool {
     if older == newer {
         return true;
@@ -135,17 +139,14 @@ fn home_dir() -> Option<PathBuf> {
 /// Compute the default worktree base path: `~/.ns2/<repo-name>/worktrees/`.
 /// Falls back to `~/.ns2/worktrees/` if the repo name cannot be determined.
 fn default_worktree_base(root: &Path) -> PathBuf {
-    let repo_name = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
+    let repo_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
     let base = home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     base.join(".ns2").join(repo_name).join("worktrees")
 }
 
 /// Read `ns2.toml` from `root` and return an `Ns2Config`.
 /// Missing file or missing keys silently return defaults.
-#[must_use] 
+#[must_use]
 pub fn read_ns2_config(root: &Path) -> Ns2Config {
     let config_path = root.join("ns2.toml");
     let raw: RawNs2Config = std::fs::read_to_string(&config_path)
@@ -188,7 +189,13 @@ mod tests {
         for i in 0..n {
             std::fs::write(r.join("file.txt"), format!("v{i}")).unwrap();
             run(&["add", "file.txt"]);
-            run(&["-c", "commit.gpgsign=false", "commit", "-m", &format!("commit {i}")]);
+            run(&[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                &format!("commit {i}"),
+            ]);
         }
         tmp
     }
@@ -237,7 +244,11 @@ mod tests {
         let result = git_last_commit_for_file(tmp.path(), Path::new("file.txt"));
         assert!(result.is_some());
         let hash = result.unwrap();
-        assert_eq!(hash.len(), 40, "commit hash should be 40 hex chars, got: {hash}");
+        assert_eq!(
+            hash.len(),
+            40,
+            "commit hash should be 40 hex chars, got: {hash}"
+        );
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -254,8 +265,16 @@ mod tests {
         let tmp = make_git_repo_with_commits(2);
         let head_hash = git_rev_parse(tmp.path(), "HEAD");
         let parent_hash = git_rev_parse(tmp.path(), "HEAD~1");
-        assert!(git_is_ancestor_or_equal(tmp.path(), &parent_hash, &head_hash));
-        assert!(!git_is_ancestor_or_equal(tmp.path(), &head_hash, &parent_hash));
+        assert!(git_is_ancestor_or_equal(
+            tmp.path(),
+            &parent_hash,
+            &head_hash
+        ));
+        assert!(!git_is_ancestor_or_equal(
+            tmp.path(),
+            &head_hash,
+            &parent_hash
+        ));
     }
 
     // ── read_ns2_config tests ─────────────────────────────────────────────────
@@ -266,7 +285,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = read_ns2_config(tmp.path());
         // Default: ~/.ns2/<dir-name>/worktrees/
-        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let home = home_dir().expect("home dir must be known");
         let expected = home.join(".ns2").join(&dir_name).join("worktrees");
         assert_eq!(
@@ -316,20 +340,24 @@ path = "~/my-wt"
     #[test]
     fn read_ns2_config_whitespace_only_path_returns_default() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("ns2.toml"),
-            "[worktrees]\npath = \"   \"\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("ns2.toml"), "[worktrees]\npath = \"   \"\n").unwrap();
         let config = read_ns2_config(tmp.path());
-        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let home = PathBuf::from(
             std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .expect("HOME must be set"),
         );
         let expected = home.join(".ns2").join(&dir_name).join("worktrees");
-        assert_eq!(config.worktree_base, expected, "whitespace-only path should fall back to default");
+        assert_eq!(
+            config.worktree_base, expected,
+            "whitespace-only path should fall back to default"
+        );
     }
 
     /// Empty `ns2.toml` (no `[worktrees]` section) → returns default.
@@ -338,7 +366,12 @@ path = "~/my-wt"
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("ns2.toml"), "").unwrap();
         let config = read_ns2_config(tmp.path());
-        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let home = home_dir().expect("home dir must be known");
         let expected = home.join(".ns2").join(&dir_name).join("worktrees");
         assert_eq!(config.worktree_base, expected);
@@ -354,7 +387,12 @@ path = "~/my-wt"
         )
         .unwrap();
         let config = read_ns2_config(tmp.path());
-        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let home = home_dir().expect("home dir must be known");
         let expected = home.join(".ns2").join(&dir_name).join("worktrees");
         assert_eq!(config.worktree_base, expected);

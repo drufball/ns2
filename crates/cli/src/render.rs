@@ -1,7 +1,7 @@
+use events::{IssueEvent, SessionEvent};
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use types::{Issue, SessionStatus, ContentBlock, IssueStatus};
-use events::{IssueEvent, SessionEvent};
+use types::{ContentBlock, Issue, IssueStatus, SessionStatus};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Spinner / animated progress helpers
@@ -56,7 +56,12 @@ pub fn format_issue_show(issue: &Issue) -> String {
     writeln!(out, "id:         {}", issue.id).ok();
     writeln!(out, "title:      {}", issue.title).ok();
     writeln!(out, "status:     {}", issue.status).ok();
-    writeln!(out, "assignee:   {}", issue.assignee.as_deref().unwrap_or("-")).ok();
+    writeln!(
+        out,
+        "assignee:   {}",
+        issue.assignee.as_deref().unwrap_or("-")
+    )
+    .ok();
     writeln!(out, "branch:     {}", issue.branch).ok();
     if let Some(pid) = &issue.parent_id {
         writeln!(out, "parent:     {pid}").ok();
@@ -64,8 +69,18 @@ pub fn format_issue_show(issue: &Issue) -> String {
     if !issue.blocked_on.is_empty() {
         writeln!(out, "blocked-on: {}", issue.blocked_on.join(", ")).ok();
     }
-    writeln!(out, "created:    {}", issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")).ok();
-    writeln!(out, "updated:    {}", issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")).ok();
+    writeln!(
+        out,
+        "created:    {}",
+        issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    )
+    .ok();
+    writeln!(
+        out,
+        "updated:    {}",
+        issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+    )
+    .ok();
     out.push_str("\nbody:\n");
     out.push_str(&issue.body);
     out.push('\n');
@@ -78,7 +93,8 @@ pub fn format_issue_show(issue: &Issue) -> String {
                 comment.created_at.format("%Y-%m-%d %H:%M UTC"),
                 comment.author,
                 comment.body,
-            ).ok();
+            )
+            .ok();
         }
     }
     out
@@ -98,15 +114,14 @@ pub fn format_session_event(event: &SessionEvent) -> Option<String> {
         ContentBlockDelta {
             delta: types::ContentBlockDelta::InputJsonDelta { .. },
             ..
-        } | TurnDone { .. } | ToolUseStart { .. } | ToolUseDone { .. } => None,
+        }
+        | TurnDone { .. }
+        | ToolUseStart { .. }
+        | ToolUseDone { .. } => None,
         ContentBlockDone { block, .. } => match block {
             ContentBlock::Text { .. } => Some("\n".to_string()),
-            ContentBlock::ToolUse { name, input, .. } => {
-                Some(format!("[tool: {name}({input})]\n"))
-            }
-            ContentBlock::ToolResult { content, .. } => {
-                Some(format!("[result: {content}]\n"))
-            }
+            ContentBlock::ToolUse { name, input, .. } => Some(format!("[tool: {name}({input})]\n")),
+            ContentBlock::ToolResult { content, .. } => Some(format!("[result: {content}]\n")),
         },
         Done => Some("[done]\n".to_string()),
         Error { message } => Some(format!("[error] {message}\n")),
@@ -114,8 +129,8 @@ pub fn format_session_event(event: &SessionEvent) -> Option<String> {
 }
 
 pub fn print_session_event(event: &SessionEvent, to_stderr: bool) {
-    use std::io::Write;
     use events::SessionEvent::*;
+    use std::io::Write;
     match event {
         // Text deltas stream without a newline; flush so the terminal shows them immediately.
         ContentBlockDelta {
@@ -239,7 +254,10 @@ pub fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, is_root
         let snippet_part = node.snippet.as_ref().map_or_else(String::new, |snippet| {
             // Sanitize: replace newlines/carriage-returns with spaces so the
             // line-count assumption used for ANSI cursor-up redraw is not broken.
-            let clean: String = snippet.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+            let clean: String = snippet
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
             let s = truncate_str(&clean, 30);
             if s.is_empty() {
                 String::new()
@@ -259,7 +277,11 @@ pub fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
     for (ri, root) in roots.iter().enumerate() {
         let is_last_root = ri + 1 == roots.len();
         let root_prefix = if roots.len() > 1 {
-            if is_last_root { "└── " } else { "├── " }
+            if is_last_root {
+                "└── "
+            } else {
+                "├── "
+            }
         } else {
             ""
         };
@@ -272,7 +294,11 @@ pub fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
         //   └── Root B          <- root_prefix = "└── "
         //       └── Child 3     <- parent_indent = "    "
         let child_indent = if roots.len() > 1 {
-            if is_last_root { "    " } else { "│   " }
+            if is_last_root {
+                "    "
+            } else {
+                "│   "
+            }
         } else {
             ""
         };
@@ -281,7 +307,12 @@ pub fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
     lines
 }
 
-fn render_children(children: &[IssueTreeNode], parent_indent: &str, tick: usize, lines: &mut Vec<String>) {
+fn render_children(
+    children: &[IssueTreeNode],
+    parent_indent: &str,
+    tick: usize,
+    lines: &mut Vec<String>,
+) {
     for (i, child) in children.iter().enumerate() {
         let is_last = i + 1 == children.len();
         let connector = if is_last { "└── " } else { "├── " };
@@ -347,8 +378,8 @@ pub fn render_session_line(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use events::{IssueEvent};
-    use types::{Issue, IssueStatus, IssueComment};
+    use events::IssueEvent;
+    use types::{Issue, IssueComment, IssueStatus};
 
     fn make_issue(id: &str, title: &str, status: IssueStatus) -> Issue {
         Issue {
@@ -385,7 +416,10 @@ mod tests {
             from: IssueStatus::Open,
             to: IssueStatus::Running,
         });
-        assert!(line.contains("[status_changed]"), "must contain [status_changed] tag");
+        assert!(
+            line.contains("[status_changed]"),
+            "must contain [status_changed] tag"
+        );
         assert!(line.contains("open"), "must contain 'from' status");
         assert!(line.contains("running"), "must contain 'to' status");
         assert!(line.contains('→'), "must contain arrow");
@@ -399,7 +433,10 @@ mod tests {
             from: IssueStatus::Running,
             to: IssueStatus::Completed,
         });
-        assert!(line.contains("running → completed"), "should show running → completed");
+        assert!(
+            line.contains("running → completed"),
+            "should show running → completed"
+        );
     }
 
     #[test]
@@ -411,9 +448,15 @@ mod tests {
             created_at: Utc::now(),
         };
         let line = format_issue_event(&IssueEvent::CommentAdded { issue, comment });
-        assert!(line.contains("[comment_added]"), "must contain [comment_added] tag");
+        assert!(
+            line.contains("[comment_added]"),
+            "must contain [comment_added] tag"
+        );
         assert!(line.contains("swe"), "must contain author");
-        assert!(line.contains("Agent completed the task"), "must contain comment body");
+        assert!(
+            line.contains("Agent completed the task"),
+            "must contain comment body"
+        );
         assert!(line.contains('"'), "comment body must be quoted");
     }
 }

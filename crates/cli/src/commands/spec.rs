@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::render::{format_sync_error, format_sync_warning};
+use std::path::PathBuf;
 
 /// The result of verifying a batch of spec paths.
 pub struct VerifyResult {
@@ -45,7 +45,11 @@ pub fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) -> Verify
         stdout_lines.push(format!("Verified {path}"));
     }
 
-    VerifyResult { stdout_lines, stderr_lines, any_failed }
+    VerifyResult {
+        stdout_lines,
+        stderr_lines,
+        any_failed,
+    }
 }
 
 pub fn run_new(path: String, targets: Vec<String>, severity: &str) {
@@ -84,7 +88,12 @@ pub fn run_new(path: String, targets: Vec<String>, severity: &str) {
             }
         }
     }
-    let def = specs::SpecDef { targets, verified: None, severity, body: String::new() };
+    let def = specs::SpecDef {
+        targets,
+        verified: None,
+        severity,
+        body: String::new(),
+    };
     if let Err(e) = specs::write_spec(&path, &def) {
         eprintln!("Error writing spec file: {e}");
         std::process::exit(1);
@@ -114,8 +123,7 @@ pub fn run_sync(path: Option<String>, error_on_warnings: bool) {
                         .unwrap_or(spec_path)
                         .display()
                         .to_string();
-                    let is_error =
-                        def.severity == specs::Severity::Error || error_on_warnings;
+                    let is_error = def.severity == specs::Severity::Error || error_on_warnings;
                     if is_error {
                         eprint!("{}", format_sync_error(&display_path, &stale));
                         has_errors = true;
@@ -134,8 +142,7 @@ pub fn run_sync(path: Option<String>, error_on_warnings: bool) {
             });
             let stale = specs::stale_files(&git_root, &resolved, &def);
             if !stale.is_empty() {
-                let is_error =
-                    def.severity == specs::Severity::Error || error_on_warnings;
+                let is_error = def.severity == specs::Severity::Error || error_on_warnings;
                 if is_error {
                     eprint!("{}", format_sync_error(&p, &stale));
                     std::process::exit(1);
@@ -155,8 +162,7 @@ pub fn run_sync(path: Option<String>, error_on_warnings: bool) {
                     .unwrap_or(spec_path)
                     .display()
                     .to_string();
-                let is_error =
-                    def.severity == specs::Severity::Error || error_on_warnings;
+                let is_error = def.severity == specs::Severity::Error || error_on_warnings;
                 if is_error {
                     eprint!("{}", format_sync_error(&display_path, &stale));
                     has_errors = true;
@@ -210,9 +216,18 @@ mod tests {
     fn verify_spec_paths_valid_spec_absolute() {
         let dir = tempfile::tempdir().unwrap();
         write_valid_spec(dir.path(), "test.spec.md", "crates/foo/src/lib.rs");
-        let abs_path = dir.path().join("test.spec.md").to_str().unwrap().to_string();
+        let abs_path = dir
+            .path()
+            .join("test.spec.md")
+            .to_str()
+            .unwrap()
+            .to_string();
         let result = verify_spec_paths(dir.path(), &[abs_path]);
-        assert!(!result.any_failed, "expected success, got: {:?}", result.stderr_lines);
+        assert!(
+            !result.any_failed,
+            "expected success, got: {:?}",
+            result.stderr_lines
+        );
         assert_eq!(result.stdout_lines.len(), 1);
         assert!(result.stderr_lines.is_empty());
     }
@@ -222,7 +237,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_valid_spec(dir.path(), "my.spec.md", "src/lib.rs");
         let result = verify_spec_paths(dir.path(), &["my.spec.md".to_string()]);
-        assert!(!result.any_failed, "expected success, got: {:?}", result.stderr_lines);
+        assert!(
+            !result.any_failed,
+            "expected success, got: {:?}",
+            result.stderr_lines
+        );
         assert_eq!(result.stdout_lines.len(), 1);
     }
 
@@ -240,10 +259,10 @@ mod tests {
     fn verify_spec_paths_multiple_paths_some_failing() {
         let dir = tempfile::tempdir().unwrap();
         write_valid_spec(dir.path(), "ok.spec.md", "src/main.rs");
-        let result = verify_spec_paths(dir.path(), &[
-            "ok.spec.md".to_string(),
-            "missing.spec.md".to_string(),
-        ]);
+        let result = verify_spec_paths(
+            dir.path(),
+            &["ok.spec.md".to_string(), "missing.spec.md".to_string()],
+        );
         assert!(result.any_failed);
         assert_eq!(result.stdout_lines.len(), 1);
         assert_eq!(result.stderr_lines.len(), 1);

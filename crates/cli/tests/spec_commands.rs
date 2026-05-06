@@ -10,20 +10,23 @@ fn spec_new_creates_file_with_targets() {
     harness
         .ns2()
         .args([
-            "spec", "new", "my.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "my.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created spec at my.spec.md"));
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join("my.spec.md"),
-    )
-    .unwrap();
+    let content = std::fs::read_to_string(harness.repo_dir.path().join("my.spec.md")).unwrap();
     assert!(content.contains("targets:"));
     assert!(content.contains("crates/cli/src/**/*.rs"));
-    assert!(!content.contains("verified:"), "new spec must not have a verified field");
+    assert!(
+        !content.contains("verified:"),
+        "new spec must not have a verified field"
+    );
 }
 
 #[test]
@@ -32,17 +35,18 @@ fn spec_new_multiple_targets() {
     harness
         .ns2()
         .args([
-            "spec", "new", "multi.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
-            "--target", "crates/agents/src/**/*.rs",
+            "spec",
+            "new",
+            "multi.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
+            "--target",
+            "crates/agents/src/**/*.rs",
         ])
         .assert()
         .success();
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join("multi.spec.md"),
-    )
-    .unwrap();
+    let content = std::fs::read_to_string(harness.repo_dir.path().join("multi.spec.md")).unwrap();
     assert!(content.contains("crates/cli/src/**/*.rs"));
     assert!(content.contains("crates/agents/src/**/*.rs"));
 }
@@ -53,8 +57,11 @@ fn spec_new_on_existing_path_fails() {
     harness
         .ns2()
         .args([
-            "spec", "new", "dup.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "dup.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -62,8 +69,11 @@ fn spec_new_on_existing_path_fails() {
     harness
         .ns2()
         .args([
-            "spec", "new", "dup.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "dup.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .failure();
@@ -95,8 +105,11 @@ fn spec_sync_clean_exits_zero() {
     harness
         .ns2()
         .args([
-            "spec", "new", "cli.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "cli.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -134,8 +147,11 @@ fn spec_sync_stale_after_touch_exits_nonzero() {
     harness
         .ns2()
         .args([
-            "spec", "new", "cli.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "cli.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -171,8 +187,11 @@ fn spec_sync_no_path_finds_all_specs() {
     harness
         .ns2()
         .args([
-            "spec", "new", "cli.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "cli.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -201,8 +220,11 @@ fn spec_sync_unverified_spec_treats_all_files_stale() {
     harness
         .ns2()
         .args([
-            "spec", "new", "cli.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "cli.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -219,11 +241,7 @@ fn spec_sync_skips_specs_without_targets() {
     let harness = common::TestHarness::new();
     harness.setup_codebase_layout();
 
-    harness
-        .ns2()
-        .args(["spec", "sync"])
-        .assert()
-        .success();
+    harness.ns2().args(["spec", "sync"]).assert().success();
 }
 
 // ── Flow 12: spec verify ─────────────────────────────────────────────────────
@@ -234,8 +252,11 @@ fn spec_verify_writes_verified_timestamp() {
     harness
         .ns2()
         .args([
-            "spec", "new", "my.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "my.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -247,11 +268,11 @@ fn spec_verify_writes_verified_timestamp() {
         .success()
         .stdout(predicate::str::contains("Verified my.spec.md"));
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join("my.spec.md"),
-    )
-    .unwrap();
-    assert!(content.contains("verified:"), "verified field must be written to file");
+    let content = std::fs::read_to_string(harness.repo_dir.path().join("my.spec.md")).unwrap();
+    assert!(
+        content.contains("verified:"),
+        "verified field must be written to file"
+    );
 }
 
 #[test]
@@ -260,8 +281,11 @@ fn spec_verify_updates_existing_timestamp() {
     harness
         .ns2()
         .args([
-            "spec", "new", "my.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "my.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -272,10 +296,8 @@ fn spec_verify_updates_existing_timestamp() {
         .assert()
         .success();
 
-    let first_content = std::fs::read_to_string(
-        harness.repo_dir.path().join("my.spec.md"),
-    )
-    .unwrap();
+    let first_content =
+        std::fs::read_to_string(harness.repo_dir.path().join("my.spec.md")).unwrap();
     let first_verified = first_content
         .lines()
         .find(|l| l.starts_with("verified:"))
@@ -288,10 +310,8 @@ fn spec_verify_updates_existing_timestamp() {
         .assert()
         .success();
 
-    let second_content = std::fs::read_to_string(
-        harness.repo_dir.path().join("my.spec.md"),
-    )
-    .unwrap();
+    let second_content =
+        std::fs::read_to_string(harness.repo_dir.path().join("my.spec.md")).unwrap();
     let second_verified = second_content
         .lines()
         .find(|l| l.starts_with("verified:"))
@@ -311,14 +331,20 @@ fn spec_verify_preserves_body_and_targets() {
     harness
         .ns2()
         .args([
-            "spec", "new", "my.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "my.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
 
     let spec_path = harness.repo_dir.path().join("my.spec.md");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&spec_path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&spec_path)
+        .unwrap();
     writeln!(f, "\n# My Spec\n\nSome body.").unwrap();
 
     harness
@@ -328,9 +354,18 @@ fn spec_verify_preserves_body_and_targets() {
         .success();
 
     let content = std::fs::read_to_string(&spec_path).unwrap();
-    assert!(content.contains("crates/cli/src/**/*.rs"), "targets must be preserved");
-    assert!(content.contains("# My Spec"), "body heading must be preserved");
-    assert!(content.contains("Some body."), "body text must be preserved");
+    assert!(
+        content.contains("crates/cli/src/**/*.rs"),
+        "targets must be preserved"
+    );
+    assert!(
+        content.contains("# My Spec"),
+        "body heading must be preserved"
+    );
+    assert!(
+        content.contains("Some body."),
+        "body text must be preserved"
+    );
 }
 
 #[test]
@@ -339,10 +374,7 @@ fn spec_verify_multiple_paths_at_once() {
     for name in &["a.spec.md", "b.spec.md", "c.spec.md"] {
         harness
             .ns2()
-            .args([
-                "spec", "new", name,
-                "--target", "crates/cli/src/**/*.rs",
-            ])
+            .args(["spec", "new", name, "--target", "crates/cli/src/**/*.rs"])
             .assert()
             .success();
     }
@@ -355,7 +387,10 @@ fn spec_verify_multiple_paths_at_once() {
 
     for name in &["a.spec.md", "b.spec.md", "c.spec.md"] {
         let content = std::fs::read_to_string(harness.repo_dir.path().join(name)).unwrap();
-        assert!(content.contains("verified:"), "{name} must have a verified timestamp");
+        assert!(
+            content.contains("verified:"),
+            "{name} must have a verified timestamp"
+        );
     }
 }
 
@@ -365,16 +400,22 @@ fn spec_verify_partial_failure_still_verifies_valid() {
     harness
         .ns2()
         .args([
-            "spec", "new", "good1.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "good1.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
     harness
         .ns2()
         .args([
-            "spec", "new", "good2.spec.md",
-            "--target", "crates/cli/src/**/*.rs",
+            "spec",
+            "new",
+            "good2.spec.md",
+            "--target",
+            "crates/cli/src/**/*.rs",
         ])
         .assert()
         .success();
@@ -382,7 +423,8 @@ fn spec_verify_partial_failure_still_verifies_valid() {
     harness
         .ns2()
         .args([
-            "spec", "verify",
+            "spec",
+            "verify",
             "good1.spec.md",
             "does-not-exist.spec.md",
             "good2.spec.md",
@@ -392,7 +434,10 @@ fn spec_verify_partial_failure_still_verifies_valid() {
 
     for name in &["good1.spec.md", "good2.spec.md"] {
         let content = std::fs::read_to_string(harness.repo_dir.path().join(name)).unwrap();
-        assert!(content.contains("verified:"), "{name} must still be verified");
+        assert!(
+            content.contains("verified:"),
+            "{name} must still be verified"
+        );
     }
 }
 

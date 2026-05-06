@@ -26,26 +26,36 @@ pub fn build_system_prompt(
     let preamble: Option<String> = effective_root.map(build_preamble);
 
     // Load agent body (+ optional project config).
-    let agent_body_and_project: Option<String> = agent_name.and_then(|name| {
-        let dir = agents_dir?;
-        agents::load_agent(dir, name)
-    }).and_then(|def| {
-        let agent_body = def.body;
-        if def.include_project_config {
-            let project = effective_root
-                .and_then(agents::load_project_config)
-                .unwrap_or_default();
-            if project.is_empty() {
-                if agent_body.is_empty() { None } else { Some(agent_body) }
+    let agent_body_and_project: Option<String> = agent_name
+        .and_then(|name| {
+            let dir = agents_dir?;
+            agents::load_agent(dir, name)
+        })
+        .and_then(|def| {
+            let agent_body = def.body;
+            if def.include_project_config {
+                let project = effective_root
+                    .and_then(agents::load_project_config)
+                    .unwrap_or_default();
+                if project.is_empty() {
+                    if agent_body.is_empty() {
+                        None
+                    } else {
+                        Some(agent_body)
+                    }
+                } else {
+                    Some(format!("{agent_body}\n\n{project}"))
+                }
+            } else if agent_body.is_empty() {
+                None
             } else {
-                Some(format!("{agent_body}\n\n{project}"))
+                Some(agent_body)
             }
-        } else if agent_body.is_empty() { None } else { Some(agent_body) }
-    });
+        });
 
     match (preamble, agent_body_and_project) {
         (Some(pre), Some(body)) => Some(format!("{pre}{body}")),
-        (_,         None)       => None,   // no agent body → no system prompt, even with a preamble
-        (None,      body)       => body,
+        (_, None) => None, // no agent body → no system prompt, even with a preamble
+        (None, body) => body,
     }
 }

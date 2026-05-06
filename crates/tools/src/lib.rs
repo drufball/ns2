@@ -137,7 +137,10 @@ impl Tool for BashTool {
             Ok(formatted)
         } else {
             let code = output.status.code().unwrap_or(-1);
-            Err(Error::ExitError { code, output: formatted })
+            Err(Error::ExitError {
+                code,
+                output: formatted,
+            })
         }
     }
 }
@@ -189,7 +192,11 @@ impl Tool for WriteTool {
         let bytes = content.as_bytes();
         tokio::fs::write(&resolved, bytes).await?;
 
-        Ok(format!("Wrote {} bytes to {}", bytes.len(), resolved.display()))
+        Ok(format!(
+            "Wrote {} bytes to {}",
+            bytes.len(),
+            resolved.display()
+        ))
     }
 }
 
@@ -313,7 +320,9 @@ mod tests {
     async fn read_tool_relative_path_resolved_against_cwd() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let file_path = dir.path().join("foo.txt");
-        tokio::fs::write(&file_path, "relative content").await.unwrap();
+        tokio::fs::write(&file_path, "relative content")
+            .await
+            .unwrap();
 
         let result = ReadTool
             .execute(serde_json::json!({"path": "foo.txt"}), Some(dir.path()))
@@ -327,7 +336,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let abs_file = tempfile::NamedTempFile::new().unwrap();
         let abs_path = abs_file.path().to_str().unwrap().to_owned();
-        tokio::fs::write(&abs_path, "absolute content").await.unwrap();
+        tokio::fs::write(&abs_path, "absolute content")
+            .await
+            .unwrap();
 
         let result = ReadTool
             .execute(serde_json::json!({"path": abs_path}), Some(dir.path()))
@@ -340,11 +351,16 @@ mod tests {
     async fn write_tool_relative_path_resolved_against_cwd() {
         let dir = tempfile::tempdir().expect("create temp dir");
         WriteTool
-            .execute(serde_json::json!({"path": "out.txt", "content": "hi"}), Some(dir.path()))
+            .execute(
+                serde_json::json!({"path": "out.txt", "content": "hi"}),
+                Some(dir.path()),
+            )
             .await
             .expect("write should succeed");
 
-        let written = tokio::fs::read_to_string(dir.path().join("out.txt")).await.unwrap();
+        let written = tokio::fs::read_to_string(dir.path().join("out.txt"))
+            .await
+            .unwrap();
         assert_eq!(written, "hi");
     }
 
@@ -422,7 +438,9 @@ mod tests {
         write!(tmp, "hello from file").expect("write temp file");
         let path = tmp.path().to_str().unwrap().to_owned();
 
-        let result = ReadTool.execute(serde_json::json!({"path": path}), None).await;
+        let result = ReadTool
+            .execute(serde_json::json!({"path": path}), None)
+            .await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), "hello from file");
     }
@@ -430,7 +448,10 @@ mod tests {
     #[tokio::test]
     async fn read_tool_file_not_found() {
         let result = ReadTool
-            .execute(serde_json::json!({"path": "/nonexistent/path/that/does/not/exist.txt"}), None)
+            .execute(
+                serde_json::json!({"path": "/nonexistent/path/that/does/not/exist.txt"}),
+                None,
+            )
             .await;
         assert!(result.is_err(), "expected Err for missing file");
         assert!(matches!(result.unwrap_err(), Error::Io(_)));
@@ -471,14 +492,29 @@ mod tests {
     #[tokio::test]
     async fn bash_tool_stderr_labeled_in_output() {
         let result = BashTool
-            .execute(serde_json::json!({"command": "echo out; echo err >&2"}), None)
+            .execute(
+                serde_json::json!({"command": "echo out; echo err >&2"}),
+                None,
+            )
             .await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         let output = result.unwrap();
-        assert!(output.contains("stdout:\n"), "expected 'stdout:' label: {output}");
-        assert!(output.contains("stderr:\n"), "expected 'stderr:' label: {output}");
-        assert!(output.contains("out\n"), "expected stdout content: {output}");
-        assert!(output.contains("err\n"), "expected stderr content: {output}");
+        assert!(
+            output.contains("stdout:\n"),
+            "expected 'stdout:' label: {output}"
+        );
+        assert!(
+            output.contains("stderr:\n"),
+            "expected 'stderr:' label: {output}"
+        );
+        assert!(
+            output.contains("out\n"),
+            "expected stdout content: {output}"
+        );
+        assert!(
+            output.contains("err\n"),
+            "expected stderr content: {output}"
+        );
     }
 
     #[tokio::test]
@@ -496,7 +532,10 @@ mod tests {
     #[tokio::test]
     async fn bash_tool_timeout_returns_timeout_error() {
         let result = BashTool
-            .execute(serde_json::json!({"command": "sleep 60", "timeout_ms": 100}), None)
+            .execute(
+                serde_json::json!({"command": "sleep 60", "timeout_ms": 100}),
+                None,
+            )
             .await;
         assert!(result.is_err(), "expected Err for timeout");
         assert!(
@@ -537,7 +576,10 @@ mod tests {
         let path_str = path.to_str().unwrap().to_owned();
 
         let result = WriteTool
-            .execute(serde_json::json!({"path": path_str, "content": "hello write"}), None)
+            .execute(
+                serde_json::json!({"path": path_str, "content": "hello write"}),
+                None,
+            )
             .await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
@@ -552,7 +594,10 @@ mod tests {
         let path_str = path.to_str().unwrap().to_owned();
 
         let result = WriteTool
-            .execute(serde_json::json!({"path": path_str, "content": "nested content"}), None)
+            .execute(
+                serde_json::json!({"path": path_str, "content": "nested content"}),
+                None,
+            )
             .await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 

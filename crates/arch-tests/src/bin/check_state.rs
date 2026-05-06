@@ -29,22 +29,87 @@ struct Pattern {
 
 const PATTERNS: &[Pattern] = &[
     // Global state
-    Pattern { label: "static_mut",       regex: r"\bstatic\s+mut\b",                     category: "stateful", weight: 3 },
-    Pattern { label: "lazy_static",      regex: r"\blazy_static\s*!",                    category: "stateful", weight: 2 },
-    Pattern { label: "once_cell_lazy",   regex: r"\bonce_cell::sync::Lazy\b",            category: "stateful", weight: 2 },
-    Pattern { label: "std_oncelock",     regex: r"\bstd::sync::OnceLock\b",              category: "stateful", weight: 2 },
-    Pattern { label: "oncelock_bare",    regex: r"\bOnceLock\s*<",                       category: "stateful", weight: 2 },
-    Pattern { label: "thread_local",     regex: r"\bthread_local\s*!",                   category: "stateful", weight: 2 },
+    Pattern {
+        label: "static_mut",
+        regex: r"\bstatic\s+mut\b",
+        category: "stateful",
+        weight: 3,
+    },
+    Pattern {
+        label: "lazy_static",
+        regex: r"\blazy_static\s*!",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "once_cell_lazy",
+        regex: r"\bonce_cell::sync::Lazy\b",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "std_oncelock",
+        regex: r"\bstd::sync::OnceLock\b",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "oncelock_bare",
+        regex: r"\bOnceLock\s*<",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "thread_local",
+        regex: r"\bthread_local\s*!",
+        category: "stateful",
+        weight: 2,
+    },
     // Shared mutable state (std)
-    Pattern { label: "arc_mutex",        regex: r"\bArc\s*<\s*(?:std::sync::)?Mutex\b",  category: "stateful", weight: 2 },
-    Pattern { label: "arc_rwlock",       regex: r"\bArc\s*<\s*(?:std::sync::)?RwLock\b", category: "stateful", weight: 2 },
-    Pattern { label: "rc_refcell",       regex: r"\bRc\s*<\s*RefCell\b",                 category: "stateful", weight: 2 },
+    Pattern {
+        label: "arc_mutex",
+        regex: r"\bArc\s*<\s*(?:std::sync::)?Mutex\b",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "arc_rwlock",
+        regex: r"\bArc\s*<\s*(?:std::sync::)?RwLock\b",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "rc_refcell",
+        regex: r"\bRc\s*<\s*RefCell\b",
+        category: "stateful",
+        weight: 2,
+    },
     // Async shared state (tokio)
-    Pattern { label: "arc_tokio_mutex",  regex: r"\bArc\s*<\s*tokio::sync::Mutex\b",    category: "stateful", weight: 2 },
-    Pattern { label: "arc_tokio_rwlock", regex: r"\bArc\s*<\s*tokio::sync::RwLock\b",   category: "stateful", weight: 2 },
+    Pattern {
+        label: "arc_tokio_mutex",
+        regex: r"\bArc\s*<\s*tokio::sync::Mutex\b",
+        category: "stateful",
+        weight: 2,
+    },
+    Pattern {
+        label: "arc_tokio_rwlock",
+        regex: r"\bArc\s*<\s*tokio::sync::RwLock\b",
+        category: "stateful",
+        weight: 2,
+    },
     // Interior mutability
-    Pattern { label: "refcell_bare",     regex: r"\bRefCell\s*<",                        category: "stateful", weight: 1 },
-    Pattern { label: "cell_bare",        regex: r"\bCell\s*<",                           category: "stateful", weight: 1 },
+    Pattern {
+        label: "refcell_bare",
+        regex: r"\bRefCell\s*<",
+        category: "stateful",
+        weight: 1,
+    },
+    Pattern {
+        label: "cell_bare",
+        regex: r"\bCell\s*<",
+        category: "stateful",
+        weight: 1,
+    },
 ];
 
 // ── Test block detection ──────────────────────────────────────────────────────
@@ -57,9 +122,8 @@ fn find_test_line_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
     let mut i = 0usize;
     while i < lines.len() {
         let ln = lines[i].trim();
-        let is_test_mod = ln == "#[cfg(test)]"
-            || ln == "#[cfg(test)] mod tests {"
-            || test_mod_re.is_match(ln);
+        let is_test_mod =
+            ln == "#[cfg(test)]" || ln == "#[cfg(test)] mod tests {" || test_mod_re.is_match(ln);
         if is_test_mod {
             let start = i + 1; // 1-based
             let mut depth = ln.matches('{').count() as i32 - ln.matches('}').count() as i32;
@@ -167,10 +231,8 @@ fn analyze_content(path: &str, content: &str) -> FileResult {
     }
 
     // Mutable struct fields
-    let mut_field_re = Regex::new(
-        r"^\s{4,}(?:pub(?:\s*\([^)]*\))?\s+)?mut\s+[a-z_][a-z0-9_]*\s*:",
-    )
-    .unwrap();
+    let mut_field_re =
+        Regex::new(r"^\s{4,}(?:pub(?:\s*\([^)]*\))?\s+)?mut\s+[a-z_][a-z0-9_]*\s*:").unwrap();
     let mut mut_field_hits: Vec<usize> = Vec::new();
     for (i, ln) in lines.iter().enumerate() {
         if ln.trim_start().starts_with("//") {
@@ -325,8 +387,12 @@ fn print_detail(r: &FileResult, verbose: bool) {
         sorted_hits.sort_by_key(|h| Reverse(h.count));
         for hit in sorted_hits {
             if verbose {
-                let lines_str: Vec<String> =
-                    hit.lines.iter().take(10).map(std::string::ToString::to_string).collect();
+                let lines_str: Vec<String> = hit
+                    .lines
+                    .iter()
+                    .take(10)
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 let suffix = if hit.lines.len() > 10 {
                     format!(" … (+{} more)", hit.lines.len() - 10)
                 } else {
@@ -361,7 +427,11 @@ fn report(results: &[FileResult], threshold: f64, verbose: bool) -> bool {
     let mut over_threshold: Vec<&FileResult> = Vec::new();
 
     for r in results {
-        let marker = if r.total_score >= threshold { " !" } else { "  " };
+        let marker = if r.total_score >= threshold {
+            " !"
+        } else {
+            "  "
+        };
         let rel = &r.path;
         let display = if rel.len() <= 51 {
             rel.clone()
@@ -430,7 +500,9 @@ fn report(results: &[FileResult], threshold: f64, verbose: bool) -> bool {
 // ── File collection ───────────────────────────────────────────────────────────
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
@@ -510,7 +582,8 @@ fn main() {
     let files: Vec<PathBuf> = if paths.is_empty() {
         let git_root = find_git_root();
         let crates_dir = git_root
-            .as_ref().map_or_else(|| PathBuf::from("crates"), |r| r.join("crates"));
+            .as_ref()
+            .map_or_else(|| PathBuf::from("crates"), |r| r.join("crates"));
         let mut v = Vec::new();
         collect_recursive(&crates_dir, &mut v);
         v.sort();
@@ -594,7 +667,10 @@ fn sub(a: i32, b: i32) -> i32 { a - b }
 fn mul(a: i32, b: i32) -> i32 { a * b }
 ";
         let r = analyze(src);
-        assert_eq!(r.stateful_score, 0, "pure functions should have no stateful score");
+        assert_eq!(
+            r.stateful_score, 0,
+            "pure functions should have no stateful score"
+        );
     }
 
     // ── mixing_score ──────────────────────────────────────────────────────────
@@ -648,7 +724,10 @@ fn beta(y: i32) -> i32 { y }
 ";
         let r = analyze(src);
         assert_eq!(r.stateful_score, 0);
-        assert_eq!(r.mixing_score, 0.0, "mixing_score should be 0 with no stateful patterns");
+        assert_eq!(
+            r.mixing_score, 0.0,
+            "mixing_score should be 0 with no stateful patterns"
+        );
     }
 
     // ── local_mut_score ───────────────────────────────────────────────────────
@@ -656,21 +735,23 @@ fn beta(y: i32) -> i32 { y }
     #[test]
     fn let_mut_density_accumulates_local_mut_score() {
         // Ten `let mut` bindings outside test blocks → 10 / 5 = 2
-        let src = "fn f() {\n".to_string()
-            + &"    let mut x = 0;\n".repeat(10)
-            + "}\n";
+        let src = "fn f() {\n".to_string() + &"    let mut x = 0;\n".repeat(10) + "}\n";
         let r = analyze(&src);
-        assert_eq!(r.local_mut_score, 2, "10 let-mut lines should give local_mut_score=2");
+        assert_eq!(
+            r.local_mut_score, 2,
+            "10 let-mut lines should give local_mut_score=2"
+        );
     }
 
     #[test]
     fn let_mut_score_capped_at_10() {
         // 60 `let mut` → 60 / 5 = 12, but capped at 10
-        let src = "fn f() {\n".to_string()
-            + &"    let mut x = 0;\n".repeat(60)
-            + "}\n";
+        let src = "fn f() {\n".to_string() + &"    let mut x = 0;\n".repeat(60) + "}\n";
         let r = analyze(&src);
-        assert_eq!(r.local_mut_score, 10, "local_mut_score should be capped at 10");
+        assert_eq!(
+            r.local_mut_score, 10,
+            "local_mut_score should be capped at 10"
+        );
     }
 
     // ── test-block deweighting ────────────────────────────────────────────────
@@ -747,7 +828,10 @@ fn mutations() {
 }
 ";
         let r = analyze(src);
-        assert_eq!(r.stateful_score, 3, "stateful_score should be 3 for one static mut");
+        assert_eq!(
+            r.stateful_score, 3,
+            "stateful_score should be 3 for one static mut"
+        );
         assert_eq!(r.local_mut_score, 1, "5 let-mut → local_mut_score=1");
         // pure_fn_ratio may not be exactly 1.0 if mutations() is counted as a fn
         // total_score = stateful + mixing + local_mut

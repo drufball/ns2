@@ -3,7 +3,9 @@ use uuid::Uuid;
 
 pub fn handle_connection_error(err: &reqwest::Error) -> ! {
     if err.is_connect() {
-        eprintln!("Error: server is not running (connection refused). Start it with: ns2 server start");
+        eprintln!(
+            "Error: server is not running (connection refused). Start it with: ns2 server start"
+        );
     } else {
         eprintln!("Error: {err}");
     }
@@ -91,12 +93,13 @@ pub async fn resolve_session_id(server: &str, id: Option<String>, name: Option<S
             .json()
             .await
             .unwrap();
-        sessions
-            .into_iter()
-            .find(|s| s.name == name).map_or_else(|| {
+        sessions.into_iter().find(|s| s.name == name).map_or_else(
+            || {
                 eprintln!("Session not found: {name}");
                 std::process::exit(1);
-            }, |s| s.id)
+            },
+            |s| s.id,
+        )
     } else {
         eprintln!("Must provide --id or --name");
         std::process::exit(1);

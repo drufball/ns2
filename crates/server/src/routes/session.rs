@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use types::{Session, SessionStatus};
 use uuid::Uuid;
 
+use super::Error;
 use crate::harness_spawn::spawn_harness_sync;
 use crate::state::AppState;
-use super::Error;
 
 // ─── Request / Response types ─────────────────────────────────────────────────
 
@@ -234,10 +234,17 @@ pub async fn cancel_session(
         senders.remove(&id);
     }
 
-    state.db.update_session_status(id, SessionStatus::Cancelled).await?;
+    state
+        .db
+        .update_session_status(id, SessionStatus::Cancelled)
+        .await?;
 
     // Mark any linked issue as failed (the issue wasn't explicitly cancelled).
-    let linked_issues = state.db.list_issues_by_session_id(id).await.unwrap_or_default();
+    let linked_issues = state
+        .db
+        .list_issues_by_session_id(id)
+        .await
+        .unwrap_or_default();
     for mut issue in linked_issues {
         use types::{IssueComment, IssueStatus};
         if matches!(issue.status, IssueStatus::Running | IssueStatus::Open) {

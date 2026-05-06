@@ -17,8 +17,7 @@ pub async fn run_start(port: u16) {
         port,
         data_dir,
         pid_file,
-        model: std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
+        model: std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
     };
     if let Err(e) = server::run(config).await {
         eprintln!("Server error: {e}");
@@ -44,7 +43,9 @@ pub fn run_stop(port: u16) {
                 if stderr.contains("No such process") {
                     // Stale PID file — process already gone
                     let _ = std::fs::remove_file(&pid_file);
-                    eprintln!("Warning: server process {pid} was not running (stale PID file removed)");
+                    eprintln!(
+                        "Warning: server process {pid} was not running (stale PID file removed)"
+                    );
                 } else {
                     eprintln!("Failed to stop server: {stderr}");
                     std::process::exit(1);
