@@ -27,7 +27,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --tests -- -D warnings -W clippy::pedantic -W clippy::nursery
 
       - name: Coverage
         run: |
