@@ -38,10 +38,8 @@ graph TD
 
     server --> issues & db & anthropic & tools & harness & events & hooks
 
-    ns2-client
-
     tui --> types
-    cli --> agents & specs & workspace & server & types & ns2-client
+    cli --> agents & specs & workspace & server & types
 ```
 
 Arrows point from dependent to dependency.
@@ -80,10 +78,7 @@ _Known violation tracked in GH#98 (direct `issues` dep)._
 **`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
 _Doesn't own: issue business logic — delegate to `issues`._
 
-**`ns2-client`** — HTTP client for the ns2 server API. Owns `reqwest` for all outbound calls to the local ns2 server. Used by `cli` and eventually `tui`.
-_Doesn't own: Anthropic API HTTP — that's `anthropic`._
-
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 
-**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types.
+**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types. Uses `reqwest` directly for HTTP calls to the local ns2 server (health checks, issue/session/hook CRUD, SSE streaming).
 _Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._

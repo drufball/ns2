@@ -13,7 +13,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-ns2-client = { path = "../ns2-client" }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 types = { path = "../types" }
 events = { path = "../events" }
 workspace = { path = "../workspace" }

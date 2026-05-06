@@ -268,13 +268,12 @@ fn only_server_uses_axum_directly() {
     );
 }
 
-/// Only `anthropic` and `ns2-client` may depend directly on `reqwest`.
-/// `anthropic` owns reqwest for the Anthropic Messages API; `ns2-client` owns it for
-/// local ns2 server HTTP calls. All other HTTP must go through one of these two crates.
+/// Only `anthropic` (Anthropic API) and `cli` (local server HTTP) may depend directly
+/// on `reqwest`. All other crates must go through one of these two.
 #[test]
 fn only_designated_http_crates_use_reqwest_directly() {
     let users = direct_users_of("reqwest");
-    let allowed = ["anthropic", "ns2-client"];
+    let allowed = ["anthropic", "cli"];
     let violations: Vec<&String> = users
         .iter()
         .filter(|name| !allowed.contains(&name.as_str()))
@@ -282,7 +281,7 @@ fn only_designated_http_crates_use_reqwest_directly() {
     assert!(
         violations.is_empty(),
         "External crate ownership violation: only `anthropic` (Anthropic API) and \
-         `ns2-client` (local server API) may depend on reqwest directly.\n\
+         `cli` (local server HTTP) may depend on reqwest directly.\n\
          Violating crates:\n{}\n\
          See architecture.spec.md for the HTTP ownership rules.",
         violations

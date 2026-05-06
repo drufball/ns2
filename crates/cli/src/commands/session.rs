@@ -12,7 +12,7 @@ pub const fn session_is_terminal(status: &SessionStatus) -> bool {
 }
 
 pub async fn run_list(server: &str, status: Option<String>, id: Option<String>) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
 
     // If --id is provided, fetch the specific session
     if let Some(session_id) = id {
@@ -25,7 +25,7 @@ pub async fn run_list(server: &str, status: Option<String>, id: Option<String>) 
             handle_connection_error(&e);
         });
         if !resp.status().is_success() {
-            if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 eprintln!("Error: session not found: {session_uuid}");
             } else {
                 eprintln!("Error: {}", resp.status());
@@ -85,7 +85,7 @@ pub async fn run_new(
         "agent": agent,
         "initial_message": message,
     });
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let resp = client.post(&url).json(&body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
@@ -129,7 +129,7 @@ pub async fn run_send(server: &str, id: Option<String>, name: Option<String>, me
     let session_id = resolve_session_id(server, id, name).await;
     let url = format!("{server}/sessions/{session_id}/messages");
     let body = serde_json::json!({ "message": message });
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let resp = client.post(&url).json(&body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
@@ -143,12 +143,12 @@ pub async fn run_send(server: &str, id: Option<String>, name: Option<String>, me
 pub async fn run_stop(server: &str, id: Option<String>, name: Option<String>) {
     let session_id = resolve_session_id(server, id, name).await;
     let url = format!("{server}/sessions/{session_id}/cancel");
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: session not found: {session_id}");
             std::process::exit(1);
         }
@@ -165,7 +165,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
         eprintln!("Error: at least one --id is required");
         std::process::exit(1);
     }
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     // Validate that all session IDs parse as valid UUIDs up-front.
     for id in &ids {
         if id.parse::<Uuid>().is_err() {
@@ -203,7 +203,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
                 if lines_rendered > 0 {
                     eprint!("\x1b[{lines_rendered}A\x1b[J");
                 }
-                if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+                if resp.status() == reqwest::StatusCode::NOT_FOUND {
                     eprintln!("Error: session not found: {id}");
                 } else {
                     print_error_response(resp).await;

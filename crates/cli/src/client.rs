@@ -1,7 +1,7 @@
 use crate::render::{parse_sse_frames, print_session_event};
 use uuid::Uuid;
 
-pub fn handle_connection_error(err: &ns2_client::Error) -> ! {
+pub fn handle_connection_error(err: &reqwest::Error) -> ! {
     if err.is_connect() {
         eprintln!("Error: server is not running (connection refused). Start it with: ns2 server start");
     } else {
@@ -10,7 +10,7 @@ pub fn handle_connection_error(err: &ns2_client::Error) -> ! {
     std::process::exit(1);
 }
 
-pub async fn print_error_response(resp: ns2_client::Response) -> ! {
+pub async fn print_error_response(resp: reqwest::Response) -> ! {
     let status = resp.status();
     if let Ok(body) = resp.json::<serde_json::Value>().await {
         if let Some(msg) = body.get("error").and_then(|v| v.as_str()) {
@@ -26,7 +26,7 @@ pub async fn print_error_response(resp: ns2_client::Response) -> ! {
 
 pub async fn stream_events(url: &str, to_stderr: bool) {
     use futures::StreamExt;
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let resp = client
         .get(url)
         .header("Accept", "text/event-stream")
@@ -82,7 +82,7 @@ pub async fn resolve_session_id(server: &str, id: Option<String>, name: Option<S
             std::process::exit(1);
         })
     } else if let Some(name) = name {
-        let client = ns2_client::Client::new();
+        let client = reqwest::Client::new();
         let sessions: Vec<types::Session> = client
             .get(format!("{server}/sessions"))
             .send()

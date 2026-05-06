@@ -29,7 +29,7 @@ pub async fn run_new(
     start: bool,
     branch: Option<String>,
 ) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
 
     if start && assignee.is_none() {
         eprintln!("Error: --start requires --assignee (start needs an agent to run)");
@@ -71,7 +71,7 @@ pub async fn run_new(
             handle_connection_error(&e);
         });
         if !start_resp.status().is_success() {
-            if start_resp.status() == ns2_client::StatusCode::NOT_FOUND {
+            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
                 eprintln!("Error: issue not found: {}", issue.id);
                 std::process::exit(1);
             }
@@ -96,7 +96,7 @@ pub async fn run_edit(
     blocked_on: Option<Vec<String>>,
     branch: Option<String>,
 ) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}");
     let mut req_body = serde_json::Map::new();
     if let Some(t) = title {
@@ -138,7 +138,7 @@ pub async fn run_edit(
         .await
         .unwrap_or_else(|e| handle_connection_error(&e));
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
             std::process::exit(1);
         }
@@ -152,14 +152,14 @@ pub async fn run_edit(
 }
 
 pub async fn run_comment(server: &str, id: String, body: String, author: String) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/comments");
     let req_body = json!({ "author": author, "body": body });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
             std::process::exit(1);
         }
@@ -169,13 +169,13 @@ pub async fn run_comment(server: &str, id: String, body: String, author: String)
 }
 
 pub async fn run_start(server: &str, id: String) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/start");
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
             std::process::exit(1);
         }
@@ -189,14 +189,14 @@ pub async fn run_start(server: &str, id: String) {
 }
 
 pub async fn run_complete(server: &str, id: String, comment: String) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/complete");
     let req_body = json!({ "comment": comment });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
             std::process::exit(1);
         }
@@ -206,13 +206,13 @@ pub async fn run_complete(server: &str, id: String, comment: String) {
 }
 
 pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start: bool) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/reopen");
     let req_body = json!({ "comment": comment });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
-    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
         eprintln!("Error: issue not found: {id}");
         std::process::exit(1);
     }
@@ -227,7 +227,7 @@ pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start
             handle_connection_error(&e);
         });
         if !start_resp.status().is_success() {
-            if start_resp.status() == ns2_client::StatusCode::NOT_FOUND {
+            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
                 eprintln!("Error: issue not found: {id}");
                 std::process::exit(1);
             }
@@ -248,7 +248,7 @@ pub async fn run_list(
     parent: Option<String>,
     blocked_on: Option<String>,
 ) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let mut url = format!("{server}/issues");
     let mut params: Vec<String> = vec![];
     if let Some(s) = &status {
@@ -288,12 +288,12 @@ pub async fn run_list(
 }
 
 pub async fn run_show(server: &str, id: String, json: bool) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
-    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
         eprintln!("Error: issue not found: {id}");
         std::process::exit(1);
     }
@@ -316,13 +316,13 @@ pub async fn run_show(server: &str, id: String, json: bool) {
 }
 
 pub async fn run_cancel(server: &str, id: String) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/cancel");
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
     if !resp.status().is_success() {
-        if resp.status() == ns2_client::StatusCode::NOT_FOUND {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
             std::process::exit(1);
         }
@@ -338,7 +338,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 
     // Helper: fetch an issue tree rooted at `id` recursively.
     async fn fetch_issue_tree(
-        client: &ns2_client::Client,
+        client: &reqwest::Client,
         server: &str,
         id: &str,
     ) -> Option<IssueTreeNode> {
@@ -372,7 +372,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 
     // Helper: fetch last text snippet for a running issue with a session.
     async fn fetch_snippet(
-        client: &ns2_client::Client,
+        client: &reqwest::Client,
         server: &str,
         session_id: uuid::Uuid,
     ) -> Option<String> {
@@ -419,7 +419,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
         std::process::exit(1);
     }
 
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let deadline = timeout.map(|secs| {
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
     });
@@ -519,7 +519,7 @@ pub async fn run_watch(server: &str, id: String) {
     use std::io::Write;
 
     let url = format!("{server}/events?issue_id={id}");
-    let client = ns2_client::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(0)) // no timeout — long-lived SSE stream
         .build()
         .unwrap_or_default();
@@ -581,7 +581,7 @@ pub async fn run_watch(server: &str, id: String) {
 /// Sugar for creating an internal hook that delivers a notification comment
 /// whenever issue X has a status change or a comment added.
 pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
-    let client = ns2_client::Client::new();
+    let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
     // Parse "issue:<id>" or "session:<id>"

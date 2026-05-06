@@ -1,8 +1,0 @@
-[package]
-name = "ns2-client"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-reqwest = { version = "0.12", features = ["json", "stream"] }
-futures = "0.3"

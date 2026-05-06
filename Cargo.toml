@@ -13,7 +13,6 @@ members = [
     "crates/server",
     "crates/tui",
     "crates/cli",
-    "crates/ns2-client",
     "crates/arch-tests",
     "crates/specs",
 ]
