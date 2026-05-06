@@ -1,4 +1,4 @@
-use crate::cwd::resolve_session_cwd;
+use crate::cwd::resolve_session_cwd_with_root;
 use crate::history::{load_history, persist_user_message};
 use crate::hooks::{run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
 use crate::prompt::build_system_prompt;
@@ -190,7 +190,13 @@ pub async fn run(
     // Resolve the session's working directory once at startup.
     // If the session has an associated issue with a non-empty branch, create/reuse
     // a git worktree and set cwd to the worktree path.
-    let session_cwd = resolve_session_cwd(&db, config.session.id).await;
+    // Use config.git_root when provided (injected in tests); fall back to git_root().
+    let session_git_root = if let Some(root) = config.git_root.clone() {
+        Some(root)
+    } else {
+        workspace::git_root().await
+    };
+    let session_cwd = resolve_session_cwd_with_root(&db, config.session.id, session_git_root).await;
 
     // If we resolved a cwd, store it on config so it is passed to tool dispatch
     // and hook subprocesses at execution time.

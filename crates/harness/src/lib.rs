@@ -2770,6 +2770,191 @@ mod tests {
         );
     }
 
+    // ── Tool cwd tests ────────────────────────────────────────────────────────
+
+    /// Records the cwd it was called with and always succeeds.
+    struct CwdCapturingTool {
+        was_called: Arc<std::sync::atomic::AtomicBool>,
+        captured_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    }
+
+    impl CwdCapturingTool {
+        fn new() -> (Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<Option<std::path::PathBuf>>>, Arc<Self>) {
+            let was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let captured_cwd = Arc::new(Mutex::new(None));
+            let tool = Arc::new(Self {
+                was_called: Arc::clone(&was_called),
+                captured_cwd: Arc::clone(&captured_cwd),
+            });
+            (was_called, captured_cwd, tool)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tools::Tool for CwdCapturingTool {
+        fn definition(&self) -> types::ToolDefinition {
+            types::ToolDefinition {
+                name: "cwd-capture".into(),
+                description: "Captures the cwd it was called with".into(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn execute(&self, _input: serde_json::Value, cwd: Option<&std::path::Path>) -> tools::Result<String> {
+            self.was_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            *self.captured_cwd.lock().await = cwd.map(std::path::Path::to_path_buf);
+            Ok("captured".into())
+        }
+    }
+
+    /// A client that returns `tool_use` on first call (for `cwd-capture`), `end_turn` on second.
+    struct CwdCaptureClient {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl CwdCaptureClient {
+        fn new() -> Self {
+            Self { call_count: std::sync::atomic::AtomicU32::new(0) }
+        }
+    }
+
+    #[async_trait]
+    impl AnthropicClient for CwdCaptureClient {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_cwd".into(),
+                        name: "cwd-capture".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 5,
+                    output_tokens: 3,
+                })
+            } else {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 5,
+                    output_tokens: 2,
+                })
+            }
+        }
+    }
+
+    /// When `config.git_root` is injected and the mock DB returns an issue with a
+    /// non-empty branch, `run()` should resolve the worktree path via
+    /// `resolve_session_cwd_with_root(git_root)` and pass it as `cwd` to tool
+    /// dispatch — so the tool executes inside the worktree, not the server's cwd.
+    #[tokio::test]
+    async fn run_resolves_worktree_cwd_from_git_root_when_issue_has_branch() {
+        // Set up a real git repo so ensure_worktree can create a worktree.
+        let origin_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(origin_dir.path())
+            .status().unwrap();
+
+        let local_dir = tempfile::TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["clone", &origin_dir.path().to_string_lossy(), "."])
+            .current_dir(local_dir.path())
+            .status().unwrap();
+
+        for cmd in [["config", "user.email", "t@t"], ["config", "user.name", "test"]] {
+            std::process::Command::new("git")
+                .args(cmd)
+                .current_dir(local_dir.path())
+                .status().unwrap();
+        }
+        std::fs::write(local_dir.path().join("README.md"), "init").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(local_dir.path()).status().unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
+            .current_dir(local_dir.path())
+            .env("GIT_AUTHOR_NAME", "test").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test").env("GIT_COMMITTER_EMAIL", "t@t")
+            .status().unwrap();
+        std::process::Command::new("git").args(["push", "origin", "main"]).current_dir(local_dir.path()).status().unwrap();
+
+        // Write an ns2.toml in local_dir pointing worktrees to a known temp dir.
+        // This distinguishes local_dir's config from the ns2 repo's config so we
+        // can assert the tool ran from local_dir's worktree, not the ns2 repo's.
+        let worktrees_base = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            local_dir.path().join("ns2.toml"),
+            format!("[worktrees]\npath = \"{}\"\n", worktrees_base.path().display()),
+        ).unwrap();
+
+        let branch = "feat/worktree-cwd-test";
+        let session_id = Uuid::new_v4();
+
+        // Build the mock DB from scratch so list_issues_by_session_id returns our
+        // issue (not the empty-vec default from permissive_mock_db).
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
+        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db.expect_list_issues_by_session_id().returning(move |_| {
+            Ok(vec![types::Issue {
+                id: "wd01".into(),
+                title: "Worktree cwd test".into(),
+                body: "body".into(),
+                status: types::IssueStatus::Running,
+                branch: branch.into(),
+                assignee: None,
+                session_id: Some(session_id),
+                parent_id: None,
+                blocked_on: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }])
+        });
+
+        let (was_called, captured_cwd, cwd_tool) = CwdCapturingTool::new();
+
+        let mut session = make_session();
+        session.id = session_id;
+
+        let config = HarnessConfig {
+            session,
+            model: "claude-opus-4-5".into(),
+            tools: vec![cwd_tool],
+            git_root: Some(local_dir.path().to_owned()),
+            cwd: None,
+        };
+
+        let client = Arc::new(CwdCaptureClient::new());
+        let db = Arc::new(mock_db);
+        let (event_tx, _) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("go".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        assert!(was_called.load(std::sync::atomic::Ordering::SeqCst), "cwd-capture tool should have been called");
+        // Extract the path without holding the guard across subsequent code.
+        let tool_cwd = captured_cwd.lock().await
+            .as_ref()
+            .expect("tool should have received a non-None cwd")
+            .clone();
+        // The worktree must be inside worktrees_base (derived from local_dir's ns2.toml),
+        // not under the ns2 repo's worktrees directory.
+        assert!(
+            tool_cwd.starts_with(worktrees_base.path()),
+            "tool cwd should be inside worktrees_base (from local_dir/ns2.toml); \
+             expected prefix {}, got {}",
+            worktrees_base.path().display(),
+            tool_cwd.display()
+        );
+    }
+
     // ── Effective-root / system-prompt tests ──────────────────────────────────
 
     /// When `config.cwd` is set and `config.git_root` is absent, `run()` must use
