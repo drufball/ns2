@@ -12,6 +12,10 @@ cargo test
 cargo llvm-cov --summary-only
 ```
 
+## Finishing work
+
+Before stopping, always commit all changes and push to the remote branch. Do not create a PR unless explicitly asked, but always commit and push so that your work is not lost.
+
 ## Testing
 
 - Use red-green TDD for all development.

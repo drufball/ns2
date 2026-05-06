@@ -10,7 +10,7 @@ GIT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # 1. Check for uncommitted / untracked changes.
 STATUS=$(git -C "$GIT_DIR" status --short 2>/dev/null)
 if [ -n "$STATUS" ]; then
-  echo "You have uncommitted changes. Please commit all your work before stopping." >&2
+  echo "You have uncommitted changes. Commit all changes AND push to the remote branch before stopping." >&2
   exit 2
 fi
 
