@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-04-29T17:14:15Z
+verified: 2026-05-05T19:31:44Z
 ---
 
 # Architecture Spec
@@ -28,11 +28,15 @@ graph TD
     agents --> workspace
     specs --> workspace
 
-    harness --> db & anthropic & tools & agents & workspace
+    events --> types
 
-    issues --> db
+    harness --> db & anthropic & tools & agents & workspace & events
 
-    server --> issues & db & anthropic & tools & harness
+    issues --> db & events
+
+    hooks --> events & db & issues & types
+
+    server --> issues & db & anthropic & tools & harness & events & hooks
 
     tui --> types
     cli --> agents & specs & workspace & server & types
@@ -40,9 +44,11 @@ graph TD
 
 Arrows point from dependent to dependency.
 
+> **Known violations (tracked):** `hooks` depends on `issues` and directly uses sqlx — both reach across layer boundaries. These are tracked in GH#97 and GH#98 and will be resolved in follow-up work.
+
 ## Crates
 
-**`types`** — shared domain types: `Session`, `Turn`, `ContentBlock`, `Issue`, SSE events, tool shapes. No behavior.
+**`types`** — shared domain types: `Session`, `Turn`, `ContentBlock`, `Issue`, tool shapes. No behavior.
 
 **`db`** — SQLite access via sqlx. Owns schema, migrations, and every query.
 _Doesn't own: SQL written anywhere else._
@@ -58,14 +64,18 @@ _Doesn't own: session or turn state._
 
 **`specs`** — reads/writes `.spec.md` files; staleness checking.
 
-**`harness`** — agent turn loop. Context window construction, system prompt loading, tool dispatch, worktree resolution. Emits events to a broadcast channel; one instance per active session.
+**`events`** — global event bus. Defines `SystemEvent` (the top-level envelope), `SessionEvent` (turn-level harness events), and `IssueEvent` (issue lifecycle events). `EventBus` is a cheaply-cloneable `tokio::broadcast` wrapper; `send` is fire-and-forget.
+
+**`harness`** — agent turn loop. Context window construction, system prompt loading, tool dispatch, worktree resolution. Publishes `SystemEvent::Session` events to the `EventBus`; one instance per active session.
 _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP._
 
-**`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/cancelled), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Exposes `IssueService` and `StartIssueOutcome`.
+**`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/cancelled), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
-**Dependencies:** `types`, `db`.
 
-**`server`** — axum HTTP server. Routes, SSE fan-out, `ServerConfig`, session maps, harness spawning. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
+**`hooks`** — hook types, filter evaluation, and action dispatch. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). A hook evaluator subscribes to the `EventBus` and dispatches actions when filters match.
+_Known violations tracked in GH#97 (direct `issues` dep) and GH#98 (direct sqlx dep)._
+
+**`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
 _Doesn't own: issue business logic — delegate to `issues`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
