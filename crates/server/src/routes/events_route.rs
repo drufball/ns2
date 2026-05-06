@@ -351,6 +351,226 @@ mod tests {
         assert!(matches!(received[0], SystemEvent::Session { .. }));
     }
 
+    // ── Route-level integration tests ─────────────────────────────────────────
+
+    /// Builds an in-memory `AppState` wired to a real `EventBus` for route-level tests.
+    async fn make_route_state() -> crate::state::AppState {
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Arc;
+        use async_trait::async_trait;
+
+        struct StubClient;
+        #[async_trait]
+        impl anthropic::AnthropicClient for StubClient {
+            async fn complete(
+                &self,
+                _req: anthropic::MessageRequest,
+            ) -> anthropic::Result<anthropic::MessageResponse> {
+                Ok(anthropic::MessageResponse {
+                    content: vec![types::ContentBlock::Text { text: "stub".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+            }
+        }
+
+        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let client = Arc::new(StubClient) as Arc<dyn anthropic::AnthropicClient>;
+        let issue_service =
+            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+        let event_bus = issue_service.event_bus().clone();
+        crate::state::AppState {
+            db,
+            issue_service,
+            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            client,
+            tools: vec![],
+            model: "claude-opus-4-5".into(),
+            event_bus,
+            hook_store,
+        }
+    }
+
+    /// Helper: collect SSE body chunks with a deadline, returning all raw bytes received.
+    ///
+    /// Stops collecting when `deadline` elapses, returning whatever bytes arrived.
+    async fn collect_sse_body_with_timeout(
+        body: axum::body::Body,
+        timeout: std::time::Duration,
+    ) -> String {
+        use http_body_util::BodyExt;
+        use std::pin::pin;
+
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut body = pin!(body);
+        let mut collected = String::new();
+
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut deadline => break,
+                frame = body.frame() => {
+                    match frame {
+                        Some(Ok(f)) => {
+                            if let Ok(data) = f.into_data() {
+                                collected.push_str(&String::from_utf8_lossy(&data));
+                            }
+                        }
+                        Some(Err(_)) | None => break,
+                    }
+                }
+            }
+        }
+
+        collected
+    }
+
+    /// Route-level test: `GET /events?issue_id=ab12` must block events for cd34.
+    ///
+    /// This verifies that `params.matches(&ev)` is actually wired into the
+    /// live-stream branch of the `events` handler (not just unit-tested in
+    /// isolation).  A subscription to `issue_id=ab12` must only see events whose
+    /// `issue.id` matches; an event for `cd34` must be silently dropped.
+    #[tokio::test]
+    async fn route_live_stream_filter_blocks_events_for_different_issue_id() {
+        use axum::http::Request;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Send the SSE request; the handler subscribes to the bus during this call.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events?issue_id=ab12")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Now pump the bus: one matching event and one non-matching event.
+        // These go into the broadcast channel, ready for the stream to consume.
+        state.event_bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue("ab12"))));
+        state.event_bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue("cd34"))));
+
+        // Collect whatever arrives within a short window (the two events should be
+        // immediately available since they're already in the broadcast queue).
+        let raw = collect_sse_body_with_timeout(
+            resp.into_body(),
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+
+        // Parse the data: lines from the SSE output
+        let data_lines: Vec<&str> = raw
+            .lines()
+            .filter(|l| l.starts_with("data: "))
+            .collect();
+
+        // Exactly one event should have arrived: the ab12 one.
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "only 1 data line expected (issue_id=ab12 filter); got: {data_lines:?}\nraw={raw:?}"
+        );
+
+        // Verify it is the ab12 event, not cd34.
+        let json = &data_lines[0]["data: ".len()..];
+        let ev: SystemEvent = serde_json::from_str(json)
+            .expect("SSE data must be valid SystemEvent JSON");
+        match ev {
+            SystemEvent::Issue(IssueEvent::Created(ref issue)) => {
+                assert_eq!(
+                    issue.id, "ab12",
+                    "received event must be for issue ab12, not cd34"
+                );
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    /// Route-level test: a terminal session returns historical events + Done and
+    /// then the stream closes (does NOT hang open).
+    ///
+    /// This verifies that the `session_already_done` path in the `events` handler
+    /// actually sets `session_already_done = true`, emits `SessionEvent::Done`,
+    /// and then attaches an empty stream so the response body finishes.
+    #[tokio::test]
+    async fn route_terminal_session_returns_done_event_and_stream_closes() {
+        use axum::http::Request;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Pre-populate a completed session in the DB.
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "done-route-test".into(),
+            status: types::SessionStatus::Completed,
+            agent: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, types::SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Open the SSE stream for the completed session.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events?session_id={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // For a terminal session the stream must close on its own (history +
+        // Done then empty live-stream).  We use to_bytes with a generous timeout
+        // to confirm it terminates rather than hanging.
+        let body_bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .expect("SSE stream for completed session must close within 2 s")
+        .expect("body read error");
+
+        let raw = std::str::from_utf8(&body_bytes).unwrap();
+
+        // Assert: a Done event is present in the SSE output.
+        let has_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<SystemEvent>(json).is_ok_and(|ev| {
+                matches!(
+                    ev,
+                    SystemEvent::Session {
+                        event: SessionEvent::Done,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            has_done,
+            "completed session SSE stream must contain a Done event; raw={raw:?}"
+        );
+    }
+
     // ── issue_id filter: only emits events for the matching issue ─────────────
 
     #[tokio::test]

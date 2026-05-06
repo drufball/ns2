@@ -2276,6 +2276,7 @@ dependencies = [
  "futures",
  "harness",
  "hooks",
+ "http-body-util",
  "issues",
  "serde",
  "serde_json",
