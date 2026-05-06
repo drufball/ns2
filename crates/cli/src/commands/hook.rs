@@ -31,7 +31,7 @@ pub async fn run_new(
     title: Option<String>,
     assignee: Option<String>,
 ) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let url = format!("{server}/hooks");
 
     // Build source JSON
@@ -154,7 +154,7 @@ pub async fn run_list(
     enabled_only: bool,
     source_type: Option<String>,
 ) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let mut params: Vec<String> = vec![];
     if enabled_only {
         params.push("enabled=true".into());
@@ -196,12 +196,12 @@ pub async fn run_list(
 // ── run_show ──────────────────────────────────────────────────────────────────
 
 pub async fn run_show(server: &str, id: String) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let url = format!("{server}/hooks/{id}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
         eprintln!("Error: hook not found: {id}");
         std::process::exit(1);
     }
@@ -230,7 +230,7 @@ pub async fn run_disable(server: &str, id: String) {
 }
 
 async fn set_enabled(server: &str, id: String, enabled: bool) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let url = format!("{server}/hooks/{id}");
     let resp = client
         .patch(&url)
@@ -238,7 +238,7 @@ async fn set_enabled(server: &str, id: String, enabled: bool) {
         .send()
         .await
         .unwrap_or_else(|e| handle_connection_error(&e));
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
         eprintln!("Error: hook not found: {id}");
         std::process::exit(1);
     }
@@ -252,12 +252,12 @@ async fn set_enabled(server: &str, id: String, enabled: bool) {
 // ── run_delete ────────────────────────────────────────────────────────────────
 
 pub async fn run_delete(server: &str, id: String) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let url = format!("{server}/hooks/{id}");
     let resp = client.delete(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
         eprintln!("Error: hook not found: {id}");
         std::process::exit(1);
     }
@@ -270,12 +270,12 @@ pub async fn run_delete(server: &str, id: String) {
 // ── run_logs ──────────────────────────────────────────────────────────────────
 
 pub async fn run_logs(server: &str, id: String, limit: usize) {
-    let client = reqwest::Client::new();
+    let client = ns2_client::Client::new();
     let url = format!("{server}/hooks/{id}/executions?limit={limit}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    if resp.status() == ns2_client::StatusCode::NOT_FOUND {
         eprintln!("Error: hook not found: {id}");
         std::process::exit(1);
     }

@@ -144,6 +144,125 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+// ── Hook domain types ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hook {
+    pub id: String,
+    pub name: String,
+    pub source: HookSource,
+    pub filter: Option<HookFilter>,
+    pub action: HookAction,
+    pub enabled: bool,
+    pub created_by: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookSource {
+    Internal { event_types: Vec<String> },
+    External { secret: Option<String> },
+    Timer { schedule: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookAction {
+    SendMessage {
+        target: MessageTarget,
+        body: String,
+    },
+    CreateIssue {
+        title: String,
+        body: String,
+        assignee: Option<String>,
+        parent: Option<String>,
+        start: bool,
+    },
+    RunShell {
+        command: String,
+        timeout_secs: u64,
+        blocking: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum MessageTarget {
+    Session(String),
+    Issue(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookFilter {
+    #[serde(default)]
+    pub conditions: Vec<FieldCondition>,
+    pub expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldCondition {
+    pub field: String,
+    pub op: Op,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Op {
+    Eq,
+    NotEq,
+    Contains,
+    Matches,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookExecution {
+    pub id: String,
+    pub hook_id: String,
+    pub triggered_at: chrono::DateTime<chrono::Utc>,
+    pub event_payload: serde_json::Value,
+    pub status: ExecutionStatus,
+    pub result: Option<String>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for ExecutionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for ExecutionStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!("unknown execution status: {other}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,13 +38,15 @@ graph TD
 
     server --> issues & db & anthropic & tools & harness & events & hooks
 
+    ns2-client
+
     tui --> types
-    cli --> agents & specs & workspace & server & types
+    cli --> agents & specs & workspace & server & types & ns2-client
 ```
 
 Arrows point from dependent to dependency.
 
-> **Known violations (tracked):** `hooks` depends on `issues` and directly uses sqlx — both reach across layer boundaries. These are tracked in GH#97 and GH#98 and will be resolved in follow-up work.
+> **Known violations (tracked):** `hooks` depends on `issues` — reaches across layer boundaries. Tracked in GH#98.
 
 ## Crates
 
@@ -73,10 +75,13 @@ _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
 
 **`hooks`** — hook types, filter evaluation, and action dispatch. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). A hook evaluator subscribes to the `EventBus` and dispatches actions when filters match.
-_Known violations tracked in GH#97 (direct `issues` dep) and GH#98 (direct sqlx dep)._
+_Known violation tracked in GH#98 (direct `issues` dep)._
 
 **`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
 _Doesn't own: issue business logic — delegate to `issues`._
+
+**`ns2-client`** — HTTP client for the ns2 server API. Owns `reqwest` for all outbound calls to the local ns2 server. Used by `cli` and eventually `tui`.
+_Doesn't own: Anthropic API HTTP — that's `anthropic`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 

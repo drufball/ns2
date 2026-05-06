@@ -46,7 +46,7 @@ enum Command {
     #[command(about = "Manage event-driven hooks.", long_about = "Hooks react to system events (issue status changes, session completions, etc.) and fire actions like sending comments to issues.\n\nLifecycle:\n  enabled    hook is active and will fire when events match\n  disabled   hook exists but will not fire\n\nTypical workflow:\n  WATCHER=$(ns2 issue new --title \"Watcher\" --body \"\")\n  ns2 hook new --name notify --source internal --event-type issue.status_changed \\\n    --action send-message --target \"issue:$WATCHER\" \\\n    --body \"Issue {{ event.data.issue.id }} is now {{ event.data.to }}\"\n  ns2 hook list\n  ns2 hook logs --id <hook-id>")]
     Hook {
         #[command(subcommand)]
-        action: HookAction,
+        action: HookSubcommand,
     },
     #[command(about = "Manage git worktrees for branches.", long_about = "Worktrees let multiple branches be checked out simultaneously into separate directories.\nEach worktree maps a branch to a directory under the configured worktree base path.\n\nThe base path is read from ns2.toml ([worktrees] path = ...) or defaults to\n~/.ns2/<repo-name>/worktrees/.\n\nSubcommands:\n  list    Print all worktrees under the base path\n  create  Create a worktree for a branch (idempotent)\n  delete  Remove a worktree and its branch")]
     Worktree {
@@ -56,7 +56,7 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum HookAction {
+enum HookSubcommand {
     #[command(about = "Create a new hook.", long_about = "Create a new hook that reacts to system events.\n\nExamples:\n  ns2 hook new --name notify --source internal --event-type issue.status_changed \\\n    --action send-message --target issue:<id> --body \"Status: {{ event.data.to }}\"\n\n  ns2 hook new --name alert --source internal --event-type issue.created \\\n    --action send-message --target issue:<watcher-id> --body \"New issue created\"")]
     New {
         #[arg(long, help = "Hook name. Required.")]
@@ -481,25 +481,25 @@ async fn main() {
             }
         },
         Command::Hook { action } => match action {
-            HookAction::New { name, source, event_types, filter_fields, action, target, body, title, assignee } => {
+            HookSubcommand::New { name, source, event_types, filter_fields, action, target, body, title, assignee } => {
                 commands::hook::run_new(&cli.server, name, source, event_types, filter_fields, action, target, body, title, assignee).await;
             }
-            HookAction::List { enabled, source_type } => {
+            HookSubcommand::List { enabled, source_type } => {
                 commands::hook::run_list(&cli.server, enabled, source_type).await;
             }
-            HookAction::Show { id } => {
+            HookSubcommand::Show { id } => {
                 commands::hook::run_show(&cli.server, id).await;
             }
-            HookAction::Enable { id } => {
+            HookSubcommand::Enable { id } => {
                 commands::hook::run_enable(&cli.server, id).await;
             }
-            HookAction::Disable { id } => {
+            HookSubcommand::Disable { id } => {
                 commands::hook::run_disable(&cli.server, id).await;
             }
-            HookAction::Delete { id } => {
+            HookSubcommand::Delete { id } => {
                 commands::hook::run_delete(&cli.server, id).await;
             }
-            HookAction::Logs { id, limit } => {
+            HookSubcommand::Logs { id, limit } => {
                 commands::hook::run_logs(&cli.server, id, limit).await;
             }
         },
@@ -2000,7 +2000,7 @@ mod tests {
             "--body", "Status changed",
         ]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::New { name, source, event_types, action, target, body, .. } } => {
+            Command::Hook { action: HookSubcommand::New { name, source, event_types, action, target, body, .. } } => {
                 assert_eq!(name, "notify");
                 assert_eq!(source, "internal");
                 assert_eq!(event_types, vec!["issue.status_changed"]);
@@ -2025,7 +2025,7 @@ mod tests {
             "--body", "hi",
         ]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::New { event_types, .. } } => {
+            Command::Hook { action: HookSubcommand::New { event_types, .. } } => {
                 assert_eq!(event_types.len(), 2);
                 assert!(event_types.contains(&"issue.created".to_string()));
                 assert!(event_types.contains(&"issue.status_changed".to_string()));
@@ -2047,7 +2047,7 @@ mod tests {
             "--body", "hi",
         ]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::New { filter_fields, .. } } => {
+            Command::Hook { action: HookSubcommand::New { filter_fields, .. } } => {
                 assert_eq!(filter_fields.len(), 1);
                 assert_eq!(filter_fields[0], "data.issue.status=running");
             }
@@ -2059,7 +2059,7 @@ mod tests {
     fn hook_list_parses_enabled_flag() {
         let cli = Cli::try_parse_from(["ns2", "hook", "list", "--enabled"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::List { enabled, source_type } } => {
+            Command::Hook { action: HookSubcommand::List { enabled, source_type } } => {
                 assert!(enabled);
                 assert!(source_type.is_none());
             }
@@ -2071,7 +2071,7 @@ mod tests {
     fn hook_list_no_flags() {
         let cli = Cli::try_parse_from(["ns2", "hook", "list"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::List { enabled, source_type } } => {
+            Command::Hook { action: HookSubcommand::List { enabled, source_type } } => {
                 assert!(!enabled);
                 assert!(source_type.is_none());
             }
@@ -2083,7 +2083,7 @@ mod tests {
     fn hook_show_parses_id() {
         let cli = Cli::try_parse_from(["ns2", "hook", "show", "--id", "h001"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Show { id } } => {
+            Command::Hook { action: HookSubcommand::Show { id } } => {
                 assert_eq!(id, "h001");
             }
             _ => panic!("expected hook show command"),
@@ -2094,7 +2094,7 @@ mod tests {
     fn hook_enable_parses_id() {
         let cli = Cli::try_parse_from(["ns2", "hook", "enable", "--id", "h001"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Enable { id } } => {
+            Command::Hook { action: HookSubcommand::Enable { id } } => {
                 assert_eq!(id, "h001");
             }
             _ => panic!("expected hook enable command"),
@@ -2105,7 +2105,7 @@ mod tests {
     fn hook_disable_parses_id() {
         let cli = Cli::try_parse_from(["ns2", "hook", "disable", "--id", "h001"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Disable { id } } => {
+            Command::Hook { action: HookSubcommand::Disable { id } } => {
                 assert_eq!(id, "h001");
             }
             _ => panic!("expected hook disable command"),
@@ -2116,7 +2116,7 @@ mod tests {
     fn hook_delete_parses_id() {
         let cli = Cli::try_parse_from(["ns2", "hook", "delete", "--id", "h001"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Delete { id } } => {
+            Command::Hook { action: HookSubcommand::Delete { id } } => {
                 assert_eq!(id, "h001");
             }
             _ => panic!("expected hook delete command"),
@@ -2129,7 +2129,7 @@ mod tests {
             "ns2", "hook", "logs", "--id", "h001", "--limit", "5",
         ]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Logs { id, limit } } => {
+            Command::Hook { action: HookSubcommand::Logs { id, limit } } => {
                 assert_eq!(id, "h001");
                 assert_eq!(limit, 5);
             }
@@ -2141,7 +2141,7 @@ mod tests {
     fn hook_logs_default_limit_is_20() {
         let cli = Cli::try_parse_from(["ns2", "hook", "logs", "--id", "h001"]).unwrap();
         match cli.command {
-            Command::Hook { action: HookAction::Logs { limit, .. } } => {
+            Command::Hook { action: HookSubcommand::Logs { limit, .. } } => {
                 assert_eq!(limit, 20);
             }
             _ => panic!("expected hook logs command"),

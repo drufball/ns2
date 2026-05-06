@@ -1,6 +1,6 @@
 use axum::{routing::{delete, get, patch, post}, Router};
 use db::SqliteDb;
-use hooks::store::SqliteHookStore;
+use db::SqliteHookStore;
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -118,16 +118,12 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let db = SqliteDb::connect(&db_url).await?;
-    let db: Arc<dyn db::Db> = Arc::new(db);
+    let sqlite_db = SqliteDb::connect(&db_url).await?;
+    let hook_store: Arc<dyn db::HookStore> =
+        Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let db: Arc<dyn db::Db> = Arc::new(sqlite_db);
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
-
-    // Create the hook store using the same SQLite pool.
-    // SqliteDb::connect runs migrations which include the hooks tables.
-    let hook_pool = sqlx::SqlitePool::connect(&db_url).await
-        .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
-    let hook_store: Arc<dyn hooks::store::HookStore> = Arc::new(SqliteHookStore::new(hook_pool));
 
     let state = AppState {
         db,
@@ -217,23 +213,19 @@ mod tests {
     }
 
     /// Helper to build an in-memory hook store suitable for tests.
-    async fn make_test_hook_store() -> Arc<dyn hooks::store::HookStore> {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        db::MIGRATOR.run(&pool).await.unwrap();
-        Arc::new(hooks::store::SqliteHookStore::new(pool))
+    async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
+        let sqlite_db = SqliteDb::connect("sqlite::memory:").await.unwrap();
+        Arc::new(db::SqliteHookStore::new(sqlite_db.pool().clone()))
     }
 
     async fn test_state() -> AppState {
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let sqlite_db = SqliteDb::connect("sqlite::memory:").await.unwrap();
+        let hook_store: Arc<dyn db::HookStore> =
+            Arc::new(db::SqliteHookStore::new(sqlite_db.pool().clone()));
+        let db = Arc::new(sqlite_db) as Arc<dyn db::Db>;
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
-        // Create an in-memory SQLite pool for the hook store in tests.
-        let hook_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        // Run all migrations on the test pool.
-        db::MIGRATOR.run(&hook_pool).await.unwrap();
-        let hook_store: Arc<dyn hooks::store::HookStore> =
-            Arc::new(hooks::store::SqliteHookStore::new(hook_pool));
         AppState {
             db,
             issue_service,
