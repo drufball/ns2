@@ -470,7 +470,6 @@ impl IssueService {
 }
 
 #[cfg(test)]
-#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -515,11 +514,12 @@ mod tests {
 
         async fn list_sessions(&self, status: Option<SessionStatus>) -> db::Result<Vec<Session>> {
             let sessions = self.sessions.lock().unwrap();
-            let result = sessions
+            let result: Vec<Session> = sessions
                 .values()
                 .filter(|s| status.as_ref().is_none_or(|st| &s.status == st))
                 .cloned()
                 .collect();
+            drop(sessions);
             Ok(result)
         }
 
@@ -527,6 +527,7 @@ mod tests {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions.get_mut(&id).ok_or(db::Error::NotFound)?;
             session.status = status;
+            drop(sessions);
             Ok(())
         }
     }
@@ -590,11 +591,12 @@ mod tests {
 
         async fn list_issues_by_session_id(&self, session_id: Uuid) -> db::Result<Vec<Issue>> {
             let issues = self.issues.lock().unwrap();
-            let result = issues
+            let result: Vec<Issue> = issues
                 .values()
                 .filter(|i| i.session_id == Some(session_id))
                 .cloned()
                 .collect();
+            drop(issues);
             Ok(result)
         }
 
@@ -604,6 +606,7 @@ mod tests {
                 return Err(db::Error::NotFound);
             }
             issues.insert(issue.id.clone(), issue.clone());
+            drop(issues);
             Ok(())
         }
     }

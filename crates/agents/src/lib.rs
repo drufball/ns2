@@ -245,7 +245,8 @@ pub fn load_agent(dir: &std::path::Path, name: &str) -> Option<AgentDef> {
     parse_agent_content(&content)
 }
 
-#[must_use] 
+#[must_use]
+#[allow(clippy::option_if_let_else, clippy::single_match_else)]
 pub fn list_agents(dir: &std::path::Path) -> Vec<AgentDef> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut agents: Vec<AgentDef> = entries
@@ -255,10 +256,13 @@ pub fn list_agents(dir: &std::path::Path) -> Vec<AgentDef> {
                 return None;
             }
             let content = std::fs::read_to_string(&path).ok()?;
-            parse_agent_content(&content).map_or_else(|| {
-                tracing::warn!("skipping {}: invalid frontmatter", path.display());
-                None
-            }, Some)
+            match parse_agent_content(&content) {
+                Some(def) => Some(def),
+                None => {
+                    tracing::warn!("skipping {}: invalid frontmatter", path.display());
+                    None
+                }
+            }
         })
         .collect();
     agents.sort_by(|a, b| a.name.cmp(&b.name));
@@ -284,7 +288,8 @@ pub fn write_agent(dir: &std::path::Path, def: &AgentDef) -> std::io::Result<()>
 ///   reads `{git_root}/{path}`. On failure, prints a warning and skips.
 /// - Returns concatenation: CLAUDE.md content + `\n\n` + each imported file's content,
 ///   separated by `\n\n`.
-#[must_use] 
+#[must_use]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
     let claude_path = git_root.join("CLAUDE.md");
     let Ok(claude_content) = std::fs::read_to_string(&claude_path) else {
@@ -302,9 +307,7 @@ pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
             // Extract the path: non-whitespace characters ending with `.md`
             let path_candidate: String =
                 after_at.chars().take_while(|c| !c.is_whitespace()).collect();
-            if std::path::Path::new(&path_candidate)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            if path_candidate.ends_with(".md")
                     && !path_candidate.is_empty()
                     && seen.insert(path_candidate.clone())
                 {

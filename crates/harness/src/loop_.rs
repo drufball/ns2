@@ -73,8 +73,7 @@ pub async fn run_tool_dispatch_loop(
 
         // Store and emit content blocks
         for (index, block) in response.content.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = index as u32;
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
             if let ContentBlock::Text { text } = block {
                 let _ = event_tx.send(SessionEvent::ContentBlockDelta {
                     turn_id: turn.id,
@@ -158,8 +157,7 @@ pub async fn run_tool_dispatch_loop(
         let _ = event_tx.send(SessionEvent::TurnStarted { turn: tool_result_turn.clone() });
 
         for (index, block) in tool_result_blocks.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = index as u32;
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
             db.create_content_block(tool_result_turn.id, i64::from(index), &Role::User, block)
                 .await?;
             let _ = event_tx.send(SessionEvent::ContentBlockDone {

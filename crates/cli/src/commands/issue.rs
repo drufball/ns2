@@ -585,18 +585,15 @@ pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
     let url = format!("{server}/hooks");
 
     // Parse "issue:<id>" or "session:<id>"
-    let (target_type, target_id) = deliver_to.strip_prefix("issue:").map_or_else(
-        || {
-            deliver_to.strip_prefix("session:").map_or_else(
-                || {
-                    eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
-                    std::process::exit(1);
-                },
-                |rest| ("session", rest.to_string()),
-            )
-        },
-        |rest| ("issue", rest.to_string()),
-    );
+    #[allow(clippy::option_if_let_else)]
+    let (target_type, target_id) = if let Some(rest) = deliver_to.strip_prefix("issue:") {
+        ("issue", rest.to_string())
+    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
+        ("session", rest.to_string())
+    } else {
+        eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
+        std::process::exit(1);
+    };
 
     let hook_name = format!("subscribe-{id}");
     let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();

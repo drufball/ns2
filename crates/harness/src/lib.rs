@@ -63,11 +63,10 @@ pub struct HarnessConfig {
 mod tests {
     use super::*;
     use mockall::mock;
-    use std::sync::Mutex;
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, Mutex};
 
     // Serialize tests that mutate NS2_MAX_RETRIES to prevent races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
     mock! {
         pub TestDb {}
@@ -2487,9 +2486,8 @@ mod tests {
     /// `start_paused = true` makes `tokio::time::sleep` return immediately, so the
     /// test does not actually wait 10 s per retry.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::await_holding_lock)]
     async fn test_429_retried_up_to_5_times_then_succeeds() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         let session = make_session();
         let mock_db = permissive_mock_db();
 
@@ -2605,9 +2603,8 @@ mod tests {
     /// real sleep, keeping it fast.  We still guard with a unique env-var read
     /// inside the retry loop so the env value is sampled at test time.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::await_holding_lock)]
     async fn test_ns2_max_retries_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("NS2_MAX_RETRIES", "2");
 
         let session = make_session();

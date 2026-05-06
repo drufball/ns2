@@ -156,6 +156,7 @@ fn compute_fanout(path: &Path) -> (usize, HashSet<String>) {
 
 // ── Module names ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) -> Vec<String> {
     let src_dir = crate_root.join("src");
     let Ok(rel) = rs_path.strip_prefix(&src_dir) else { return vec![] };
@@ -172,10 +173,7 @@ fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) ->
     let mut parts = parts;
     // Strip .rs extension from last element
     if let Some(last) = parts.last_mut() {
-        if std::path::Path::new(last.as_str())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-        {
+        if last.ends_with(".rs") {
             *last = last[..last.len() - 3].to_string();
         }
     }
