@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-04-29T17:14:16Z
+verified: 2026-05-06T18:51:49Z
 ---
 
 # Data Model Spec
@@ -74,6 +74,38 @@ Work items that can be assigned to agents and tracked through a lifecycle.
 
 **`blocked_on` and `comments` as JSON TEXT.** Both fields are stored as JSON strings in TEXT columns rather than join tables. The access pattern for both is always "read/write the whole list at once" — there are no queries that filter by individual blocked-on IDs or comment authors. A join table would add schema complexity (cascade deletes, extra migrations, multi-row inserts) with no query benefit. SQLite's JSON support is available if needed in the future.
 
+### `hooks`
+
+Event-driven hooks that fire when a `SystemEvent` matches their filter.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | TEXT PK | 4-character random alphanumeric |
+| `name` | TEXT | human-readable label |
+| `source_type` | TEXT | `internal`, `external`, or `timer` |
+| `source` | TEXT | JSON; shape varies by `source_type` |
+| `filter` | TEXT | optional JSON; field conditions that must match for the hook to fire |
+| `action_type` | TEXT | `send_message`, `create_issue`, or `run_shell` |
+| `action` | TEXT | JSON; shape varies by `action_type` |
+| `enabled` | INTEGER | `1` = active, `0` = disabled |
+| `created_by` | TEXT | optional; who created the hook |
+| `created_at` | TEXT | ISO-8601 timestamp |
+| `updated_at` | TEXT | ISO-8601 timestamp |
+
+### `hook_executions`
+
+One row per hook firing attempt, recording the lifecycle from trigger to outcome.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | TEXT PK | UUID |
+| `hook_id` | TEXT FK | → `hooks.id` |
+| `triggered_at` | TEXT | ISO-8601 timestamp when the event was received |
+| `event_payload` | TEXT | JSON snapshot of the `SystemEvent` that triggered the hook |
+| `status` | TEXT | `running`, `completed`, or `failed` |
+| `result` | TEXT | optional; success message or error string |
+| `completed_at` | TEXT | optional; ISO-8601 timestamp when the action finished |
+
 ## Types (types crate)
 
 The `types` crate mirrors the DB schema in Rust:
@@ -82,3 +114,5 @@ The `types` crate mirrors the DB schema in Rust:
 - `Turn` — maps to the `turns` table
 - `ContentBlock`, `Role` — maps to `content_blocks`
 - `Issue`, `IssueStatus`, `IssueComment` — maps to the `issues` table
+- `Hook`, `HookSource`, `HookAction`, `HookFilter` — maps to the `hooks` table
+- `HookExecution`, `ExecutionStatus` — maps to the `hook_executions` table
