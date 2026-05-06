@@ -3677,5 +3677,58 @@ mod tests {
         assert_eq!(comment.author, "ns2-hook");
         assert!(comment.body.contains("status changed"));
     }
+
+    #[tokio::test]
+    async fn test_get_hook_executions_default_limit_is_20() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a hook
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
+                "name": "limit-test-hook",
+                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "action": {
+                    "type": "send_message",
+                    "target": { "type": "issue", "content": "some-issue-id" },
+                    "body": "hi"
+                }
+            })))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let hook_id = created["id"].as_str().unwrap().to_string();
+
+        // Insert 25 HookExecution records directly via the hook_store
+        for _ in 0..25 {
+            let exec = types::HookExecution {
+                id: Uuid::new_v4().to_string(),
+                hook_id: hook_id.clone(),
+                triggered_at: chrono::Utc::now(),
+                event_payload: serde_json::json!({}),
+                status: types::ExecutionStatus::Completed,
+                result: Some("ok".to_string()),
+                completed_at: Some(chrono::Utc::now()),
+            };
+            state.hook_store.create_execution(&exec).await.unwrap();
+        }
+
+        // GET /hooks/:id/executions — should return exactly 20 (the default limit)
+        let exec_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/hooks/{hook_id}/executions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exec_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(exec_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().expect("response should be a JSON array");
+        assert_eq!(arr.len(), 20, "default limit should be 20, got {}", arr.len());
+    }
 }
 
