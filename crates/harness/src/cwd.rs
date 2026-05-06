@@ -16,7 +16,7 @@ pub async fn resolve_session_cwd(
 }
 
 /// Inner implementation that accepts an explicit `git_root` — injectable for tests.
-pub(crate) async fn resolve_session_cwd_with_root(
+pub async fn resolve_session_cwd_with_root(
     db: &Arc<dyn db::Db>,
     session_id: Uuid,
     git_root: Option<PathBuf>,

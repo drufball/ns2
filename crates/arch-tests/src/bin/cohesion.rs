@@ -12,8 +12,8 @@
 //!
 //! The compound "concern score" used for flagging combines LCOM4 with file
 //! size so that tiny files with a few standalone utilities aren't penalized:
-//!   concern_score = components * sqrt(total_lines / 100)
-//! Files with concern_score > 10 (empirically tuned) are flagged.
+//!   `concern_score` = components * `sqrt(total_lines` / 100)
+//! Files with `concern_score` > 10 (empirically tuned) are flagged.
 //!
 //! Usage: cohesion <path/to/file.rs> [path2.rs ...]
 
@@ -166,10 +166,10 @@ fn extract(file: &File) -> (Vec<FnInfo>, FileLocals) {
                             .collect();
                         // All methods on the same impl share their self-type name
                         if let Some(ref n) = type_name { refs.insert(n.clone()); }
-                        let display = match &type_name {
-                            Some(n) => format!("{}::{}", n, m.sig.ident),
-                            None    => format!("impl::{}", m.sig.ident),
-                        };
+                        let display = type_name.as_ref().map_or_else(
+                            || format!("impl::{}", m.sig.ident),
+                            |n| format!("{}::{}", n, m.sig.ident),
+                        );
                         functions.push(FnInfo {
                             display_name: display,
                             refs,
@@ -191,7 +191,7 @@ struct UnionFind { parent: Vec<usize>, rank: Vec<usize> }
 
 impl UnionFind {
     fn new(n: usize) -> Self {
-        UnionFind { parent: (0..n).collect(), rank: vec![0; n] }
+        Self { parent: (0..n).collect(), rank: vec![0; n] }
     }
     fn find(&mut self, x: usize) -> usize {
         if self.parent[x] != x { self.parent[x] = self.find(self.parent[x]); }
@@ -248,6 +248,7 @@ struct Metrics {
 }
 
 impl Metrics {
+    #[allow(clippy::cast_precision_loss)]
     fn compute(n_fns: usize, n_lines: usize, components: &[Vec<usize>], threshold: f64) -> Self {
         let n_components = components.len();
         let cohesion_score = if n_fns <= 1 {
@@ -266,7 +267,7 @@ impl Metrics {
         // agents/src/lib.rs ≈ 20.7 is flagged, and the three target files all score > 30)
         let flagged = concern_score > threshold;
 
-        Metrics { n_fns, n_lines, n_components, cohesion_score, orphan_ratio, concern_score, flagged }
+        Self { n_fns, n_lines, n_components, cohesion_score, orphan_ratio, concern_score, flagged }
     }
 }
 
@@ -275,7 +276,7 @@ impl Metrics {
 fn print_report(path: &str, functions: &[FnInfo], components: &[Vec<usize>], m: &Metrics) {
     let verdict = if m.flagged { "FLAG" } else { "OK  " };
     println!("═══════════════════════════════════════════════════════════════");
-    println!("File: {}  [{}]", path, verdict);
+    println!("File: {path}  [{verdict}]");
     println!("═══════════════════════════════════════════════════════════════");
     println!("  Lines of code      : {}", m.n_lines);
     println!("  Functions/methods  : {}", m.n_fns);
@@ -304,6 +305,95 @@ fn print_report(path: &str, functions: &[FnInfo], components: &[Vec<usize>], m: 
             println!("    line {:>5}  {}", f.line, f.display_name);
         }
         println!();
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+struct Row {
+    short_name: String,
+    m: Metrics,
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    // Parse optional --threshold <value> flag
+    let mut threshold = 12.0f64;
+    let mut file_args: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--threshold" {
+            i += 1;
+            if i < args.len() {
+                threshold = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid threshold value: {}", args[i]);
+                    std::process::exit(1);
+                });
+            }
+        } else {
+            file_args.push(&args[i]);
+        }
+        i += 1;
+    }
+
+    if file_args.is_empty() {
+        eprintln!("Usage: cohesion [--threshold <f64>] <file.rs> [file2.rs ...]");
+        eprintln!("  --threshold  Concern score threshold for flagging (default: 12.0)");
+        eprintln!("               concern_score = LCOM4_components × sqrt(lines/100)");
+        std::process::exit(1);
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+
+    for path_str in &file_args {
+        let content = match fs::read_to_string(path_str) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("Error reading {path_str}: {e}"); continue; }
+        };
+        let n_lines = content.lines().count();
+
+        let file: File = match syn::parse_str(&content) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("Parse error in {path_str}: {e}"); continue; }
+        };
+
+        let (functions, locals) = extract(&file);
+        let components = lcom4(&functions, &locals);
+        let m = Metrics::compute(functions.len(), n_lines, &components, threshold);
+
+        print_report(path_str, &functions, &components, &m);
+
+        let short_name = Path::new(*path_str)
+            .components()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        rows.push(Row { short_name, m });
+    }
+
+    if rows.len() > 1 {
+        println!("═══════════════════════════════════════════════════════════════");
+        println!("SUMMARY  (flag threshold: concern_score > {threshold:.1})");
+        println!("═══════════════════════════════════════════════════════════════");
+        println!(
+            "{:<45} {:>6} {:>6} {:>6} {:>8} {:>8} {:>12}",
+            "File", "Lines", "Fns", "LCOM4", "Cohesion", "Orphans", "ConcernScore"
+        );
+        println!("{}", "─".repeat(100));
+        for r in &rows {
+            let flag = if r.m.flagged { " ← FLAGGED" } else { "" };
+            println!(
+                "{:<45} {:>6} {:>6} {:>6} {:>8.3} {:>8.3} {:>12.1}{}",
+                r.short_name, r.m.n_lines, r.m.n_fns, r.m.n_components,
+                r.m.cohesion_score, r.m.orphan_ratio, r.m.concern_score, flag
+            );
+        }
     }
 }
 
@@ -351,7 +441,7 @@ mod tests {
         let comps = uf.components(3);
         assert_eq!(comps.len(), 1);
         let mut only = comps.into_iter().next().unwrap();
-        only.sort();
+        only.sort_unstable();
         assert_eq!(only, vec![0, 1, 2]);
     }
 
@@ -375,9 +465,9 @@ mod tests {
         assert_eq!(comps.len(), 3);
         let mut large: Vec<usize> = comps
             .into_iter()
-            .max_by_key(|c| c.len())
+            .max_by_key(std::vec::Vec::len)
             .unwrap();
-        large.sort();
+        large.sort_unstable();
         assert_eq!(large, vec![0, 2, 4]);
     }
 
@@ -386,14 +476,14 @@ mod tests {
     fn make_fn(name: &str, refs: &[&str]) -> FnInfo {
         FnInfo {
             display_name: name.to_string(),
-            refs: refs.iter().map(|s| s.to_string()).collect(),
+            refs: refs.iter().map(|s| (*s).to_string()).collect(),
             line: 1,
         }
     }
 
     fn make_locals(names: &[&str]) -> FileLocals {
         FileLocals {
-            defined: names.iter().map(|s| s.to_string()).collect(),
+            defined: names.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
@@ -469,8 +559,8 @@ mod tests {
         let locals = make_locals(&["Alpha", "Beta"]);
         let comps = lcom4(&fns, &locals);
         assert_eq!(comps.len(), 2);
-        let mut sizes: Vec<usize> = comps.iter().map(|c| c.len()).collect();
-        sizes.sort();
+        let mut sizes: Vec<usize> = comps.iter().map(std::vec::Vec::len).collect();
+        sizes.sort_unstable();
         assert_eq!(sizes, vec![1, 2]);
     }
 
@@ -498,6 +588,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn metrics_two_functions_two_components_zero_cohesion() {
         let comps = vec![vec![0usize], vec![1]];
         let m = Metrics::compute(2, 100, &comps, 12.0);
@@ -579,8 +670,8 @@ mod tests {
         let file = parse("struct Foo; impl Foo { fn new() -> Foo { Foo } fn run(&self) {} }");
         let (fns, locals) = extract(&file);
         let names: Vec<&str> = fns.iter().map(|f| f.display_name.as_str()).collect();
-        assert!(names.iter().any(|n| n.contains("new")), "expected new method: {:?}", names);
-        assert!(names.iter().any(|n| n.contains("run")), "expected run method: {:?}", names);
+        assert!(names.iter().any(|n| n.contains("new")), "expected new method: {names:?}");
+        assert!(names.iter().any(|n| n.contains("run")), "expected run method: {names:?}");
         assert!(locals.defined.contains("Foo"));
     }
 
@@ -604,93 +695,5 @@ mod tests {
             }
         }
         panic!("no impl block found");
-    }
-}
-
-// ── Entry point ───────────────────────────────────────────────────────────────
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    // Parse optional --threshold <value> flag
-    let mut threshold = 12.0f64;
-    let mut file_args: Vec<&str> = Vec::new();
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--threshold" {
-            i += 1;
-            if i < args.len() {
-                threshold = args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid threshold value: {}", args[i]);
-                    std::process::exit(1);
-                });
-            }
-        } else {
-            file_args.push(&args[i]);
-        }
-        i += 1;
-    }
-
-    if file_args.is_empty() {
-        eprintln!("Usage: cohesion [--threshold <f64>] <file.rs> [file2.rs ...]");
-        eprintln!("  --threshold  Concern score threshold for flagging (default: 12.0)");
-        eprintln!("               concern_score = LCOM4_components × sqrt(lines/100)");
-        std::process::exit(1);
-    }
-
-    struct Row {
-        short_name: String,
-        m: Metrics,
-    }
-    let mut rows: Vec<Row> = Vec::new();
-
-    for path_str in &file_args {
-        let content = match fs::read_to_string(path_str) {
-            Ok(c) => c,
-            Err(e) => { eprintln!("Error reading {}: {}", path_str, e); continue; }
-        };
-        let n_lines = content.lines().count();
-
-        let file: File = match syn::parse_str(&content) {
-            Ok(f) => f,
-            Err(e) => { eprintln!("Parse error in {}: {}", path_str, e); continue; }
-        };
-
-        let (functions, locals) = extract(&file);
-        let components = lcom4(&functions, &locals);
-        let m = Metrics::compute(functions.len(), n_lines, &components, threshold);
-
-        print_report(path_str, &functions, &components, &m);
-
-        let short_name = Path::new(*path_str)
-            .components()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .iter()
-            .rev()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        rows.push(Row { short_name, m });
-    }
-
-    if rows.len() > 1 {
-        println!("═══════════════════════════════════════════════════════════════");
-        println!("SUMMARY  (flag threshold: concern_score > {:.1})", threshold);
-        println!("═══════════════════════════════════════════════════════════════");
-        println!(
-            "{:<45} {:>6} {:>6} {:>6} {:>8} {:>8} {:>12}",
-            "File", "Lines", "Fns", "LCOM4", "Cohesion", "Orphans", "ConcernScore"
-        );
-        println!("{}", "─".repeat(100));
-        for r in &rows {
-            let flag = if r.m.flagged { " ← FLAGGED" } else { "" };
-            println!(
-                "{:<45} {:>6} {:>6} {:>6} {:>8.3} {:>8.3} {:>12.1}{}",
-                r.short_name, r.m.n_lines, r.m.n_fns, r.m.n_components,
-                r.m.cohesion_score, r.m.orphan_ratio, r.m.concern_score, flag
-            );
-        }
     }
 }

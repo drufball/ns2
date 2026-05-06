@@ -3,7 +3,7 @@ use std::path::Path;
 /// Build the preamble block that is prepended to every agent system prompt when
 /// the git root is known. Returns `None` when the root cannot be determined so
 /// callers can omit the preamble without failing.
-pub(crate) fn build_preamble(root: &Path) -> String {
+pub fn build_preamble(root: &Path) -> String {
     let repo_name = root.file_name().unwrap_or_default().to_string_lossy();
     format!(
         "You are running in the ns2 agent harness.\nWorking directory / git root: {}\nRepository: {}\n",
@@ -17,7 +17,7 @@ pub(crate) fn build_preamble(root: &Path) -> String {
 /// used for project config loading.
 ///
 /// Returns `None` when there is nothing useful to send (no preamble, no agent body).
-pub(crate) fn build_system_prompt(
+pub fn build_system_prompt(
     effective_root: Option<&Path>,
     agents_dir: Option<&Path>,
     agent_name: Option<&str>,
@@ -40,9 +40,7 @@ pub(crate) fn build_system_prompt(
             } else {
                 Some(format!("{agent_body}\n\n{project}"))
             }
-        } else {
-            if agent_body.is_empty() { None } else { Some(agent_body) }
-        }
+        } else if agent_body.is_empty() { None } else { Some(agent_body) }
     });
 
     match (preamble, agent_body_and_project) {

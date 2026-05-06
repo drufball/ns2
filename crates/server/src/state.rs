@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// the single source of truth for all maps; no other module may hold a mutable
 /// reference to them.
 #[derive(Clone)]
-pub(crate) struct AppState {
+pub struct AppState {
     pub(crate) db: Arc<dyn db::Db>,
     pub(crate) issue_service: issues::IssueService,
     /// Maps session id → mpsc sender for delivering messages to the live harness.

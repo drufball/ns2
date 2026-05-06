@@ -13,7 +13,7 @@ fn write_agent(h: &TestHarness, name: &str) {
 }
 
 fn extract_json_str(json: &str, key: &str) -> String {
-    let pattern = format!("\"{}\":\"", key);
+    let pattern = format!("\"{key}\":\"");
     let start = json.find(&pattern).expect("key not found") + pattern.len();
     let end = json[start..].find('"').expect("closing quote not found") + start;
     json[start..end].to_string()
@@ -194,7 +194,7 @@ fn issue_start_creates_worktree_for_issue_with_branch() {
         "--assignee", "swe",
     ]);
 
-    let json = h.http_get(&format!("/issues/{}", id));
+    let json = h.http_get(&format!("/issues/{id}"));
     let branch = extract_json_str(&json, "branch");
 
     h.ns2().args(["issue", "start", "--id", &id]).assert().success();
@@ -263,7 +263,7 @@ fn worktree_not_deleted_after_session_completes() {
         "--assignee", "swe",
     ]);
 
-    let json = h.http_get(&format!("/issues/{}", id));
+    let json = h.http_get(&format!("/issues/{id}"));
     let branch = extract_json_str(&json, "branch");
 
     h.ns2().args(["issue", "start", "--id", &id]).assert().success();

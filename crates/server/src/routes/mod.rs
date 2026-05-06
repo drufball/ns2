@@ -1,7 +1,7 @@
-pub(crate) mod issue;
-pub(crate) mod session;
-pub(crate) mod events_route;
-pub(crate) mod hook;
+pub mod issue;
+pub mod session;
+pub mod events_route;
+pub mod hook;
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 
@@ -23,8 +23,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<issues::Error> for Error {
     fn from(e: issues::Error) -> Self {
         match e {
-            issues::Error::Db(db_err) => Error::Db(db_err),
-            issues::Error::BadRequest(msg) => Error::BadRequest(msg),
+            issues::Error::Db(db_err) => Self::Db(db_err),
+            issues::Error::BadRequest(msg) => Self::BadRequest(msg),
         }
     }
 }
@@ -32,10 +32,10 @@ impl From<issues::Error> for Error {
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
-            Error::NotFound | Error::Db(db::Error::NotFound) => {
+            Self::NotFound | Self::Db(db::Error::NotFound) => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
-            Error::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
         (status, Json(serde_json::json!({ "error": message }))).into_response()

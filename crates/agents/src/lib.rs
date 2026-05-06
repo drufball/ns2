@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use serde::Deserialize;
 
 // ── Hook types ───────────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ struct RawHookCommand {
     timeout: u64,
 }
 
-fn default_timeout() -> u64 {
+const fn default_timeout() -> u64 {
     60
 }
 
@@ -133,10 +134,12 @@ pub struct AgentDef {
     pub hooks: AgentHooks,
 }
 
+#[must_use] 
 pub fn agents_dir() -> Option<std::path::PathBuf> {
     workspace::git_root_sync().map(|root| root.join(".ns2").join("agents"))
 }
 
+#[must_use] 
 pub fn parse_agent_content(content: &str) -> Option<AgentDef> {
     let content = content.trim_start();
     let rest = content.strip_prefix("---\n")?;
@@ -177,9 +180,11 @@ pub fn parse_agent_content(content: &str) -> Option<AgentDef> {
 }
 
 /// Format an agent definition as a frontmatter `.md` file.
+///
 /// Note: `name` and `description` are written verbatim. Newlines or colons in those
 /// fields will produce malformed frontmatter. Callers (e.g. CLI flags) are responsible
 /// for ensuring single-line values.
+#[must_use] 
 pub fn format_agent_file(def: &AgentDef) -> String {
     let mut frontmatter = format!("---\nname: {}\ndescription: {}", def.name, def.description);
     if def.include_project_config {
@@ -207,20 +212,20 @@ fn format_hooks(hooks: &AgentHooks) -> String {
         if entries.is_empty() {
             return;
         }
-        out.push_str(&format!("\n  {event}:"));
+        let _ = write!(out, "\n  {event}:");
         for entry in entries {
             out.push_str("\n    - ");
             if let Some(ref m) = entry.matcher {
-                out.push_str(&format!("matcher: \"{m}\""));
+                let _ = write!(out, "matcher: \"{m}\"");
                 out.push_str("\n      hooks:");
             } else {
                 out.push_str("hooks:");
             }
             for cmd in &entry.hooks {
                 out.push_str("\n        - type: command");
-                out.push_str(&format!("\n          command: {}", cmd.command));
+                let _ = write!(out, "\n          command: {}", cmd.command);
                 if cmd.timeout != 60 {
-                    out.push_str(&format!("\n          timeout: {}", cmd.timeout));
+                    let _ = write!(out, "\n          timeout: {}", cmd.timeout);
                 }
             }
         }
@@ -233,17 +238,17 @@ fn format_hooks(hooks: &AgentHooks) -> String {
     out
 }
 
+#[must_use] 
 pub fn load_agent(dir: &std::path::Path, name: &str) -> Option<AgentDef> {
     let path = dir.join(format!("{name}.md"));
     let content = std::fs::read_to_string(path).ok()?;
     parse_agent_content(&content)
 }
 
+#[must_use]
+#[allow(clippy::option_if_let_else, clippy::single_match_else)]
 pub fn list_agents(dir: &std::path::Path) -> Vec<AgentDef> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut agents: Vec<AgentDef> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
@@ -265,8 +270,13 @@ pub fn list_agents(dir: &std::path::Path) -> Vec<AgentDef> {
 }
 
 /// Write an agent definition to `{dir}/{name}.md`.
+///
 /// Overwrites the file if it already exists. Callers are responsible for checking
 /// existence before calling if overwrite should be prevented (e.g. `agent new`).
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the file cannot be written.
 pub fn write_agent(dir: &std::path::Path, def: &AgentDef) -> std::io::Result<()> {
     std::fs::write(dir.join(format!("{}.md", def.name)), format_agent_file(def))
 }
@@ -278,14 +288,13 @@ pub fn write_agent(dir: &std::path::Path, def: &AgentDef) -> std::io::Result<()>
 ///   reads `{git_root}/{path}`. On failure, prints a warning and skips.
 /// - Returns concatenation: CLAUDE.md content + `\n\n` + each imported file's content,
 ///   separated by `\n\n`.
+#[must_use]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
     let claude_path = git_root.join("CLAUDE.md");
-    let claude_content = match std::fs::read_to_string(&claude_path) {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("warning: CLAUDE.md not found at {}", claude_path.display());
-            return None;
-        }
+    let Ok(claude_content) = std::fs::read_to_string(&claude_path) else {
+        eprintln!("warning: CLAUDE.md not found at {}", claude_path.display());
+        return None;
     };
 
     // Collect @-imports: find all `@<something>.md` patterns, deduped in order.
@@ -343,13 +352,11 @@ pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
 ///
 /// Returns `AgentHooks::default()` if the file is absent, unreadable, or has no `hooks` key.
 /// Any parse error is logged as a warning to stderr and returns default.
+#[must_use] 
 pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
     let path = git_root.join(".claude").join("settings.json");
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return AgentHooks::default(),
-    };
+    let Ok(content) = std::fs::read_to_string(&path) else { return AgentHooks::default() };
 
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -359,10 +366,7 @@ pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
         }
     };
 
-    let hooks_value = match value.get("hooks") {
-        Some(h) => h,
-        None => return AgentHooks::default(),
-    };
+    let Some(hooks_value) = value.get("hooks") else { return AgentHooks::default() };
 
     // Deserialise via the same RawHooks shape used for YAML frontmatter.
     let raw: RawHooks = match serde_json::from_value(hooks_value.clone()) {
@@ -396,10 +400,11 @@ pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
 
 /// Merge `agent` hooks with `project` hooks.
 ///
-/// Strategy for each event type (pre_tool_use, post_tool_use, stop):
+/// Strategy for each event type (`pre_tool_use`, `post_tool_use`, stop):
 /// 1. Start with all agent entries as-is.
 /// 2. For each project entry, append it only if no agent entry has the same matcher value.
 ///    (Agent entries always win for matching matchers.)
+#[must_use] 
 pub fn merge_hooks(agent: AgentHooks, project: AgentHooks) -> AgentHooks {
     let merge_entries = |mut base: Vec<HookEntry>, additions: Vec<HookEntry>| -> Vec<HookEntry> {
         for proj_entry in additions {
@@ -553,10 +558,7 @@ mod tests {
 
     #[test]
     fn agents_dir_returns_absolute_path() {
-        let dir = match agents_dir() {
-            Some(d) => d,
-            None => return,
-        };
+        let Some(dir) = agents_dir() else { return };
         assert!(dir.is_absolute(), "agents_dir() must return an absolute path, got: {}", dir.display());
     }
 
@@ -756,7 +758,7 @@ mod tests {
         assert!(hooks.stop.is_empty(), "stop must be empty");
     }
 
-    /// Parses PreToolUse entries from .claude/settings.json correctly.
+    /// Parses `PreToolUse` entries from .claude/settings.json correctly.
     #[test]
     fn load_project_hooks_parses_pre_tool_use() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -788,7 +790,7 @@ mod tests {
         assert!(hooks.stop.is_empty());
     }
 
-    /// Parses PostToolUse entries correctly; timeout defaults to 60 when absent.
+    /// Parses `PostToolUse` entries correctly; timeout defaults to 60 when absent.
     #[test]
     fn load_project_hooks_parses_post_tool_use_with_default_timeout() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -983,7 +985,7 @@ mod tests {
         assert_eq!(merged.stop[0].hooks[0].command, "/agent-stop.sh");
     }
 
-    /// merge_hooks with empty agent and empty project returns empty.
+    /// `merge_hooks` with empty agent and empty project returns empty.
     #[test]
     fn merge_hooks_both_empty_returns_empty() {
         let merged = merge_hooks(AgentHooks::default(), AgentHooks::default());
@@ -1004,7 +1006,7 @@ mod tests {
         assert!(def.hooks.stop.is_empty(), "stop must be empty");
     }
 
-    /// PreToolUse hook with matcher parses correctly.
+    /// `PreToolUse` hook with matcher parses correctly.
     #[test]
     fn parse_agent_content_pre_tool_use_with_matcher() {
         let content = "\
@@ -1031,7 +1033,7 @@ Body.
         assert_eq!(entry.hooks[0].timeout, 10);
     }
 
-    /// PostToolUse hook with matcher parses correctly.
+    /// `PostToolUse` hook with matcher parses correctly.
     #[test]
     fn parse_agent_content_post_tool_use_with_matcher() {
         let content = "\
@@ -1134,7 +1136,7 @@ Body.
         assert_eq!(reparsed.hooks.stop[0].hooks[0].timeout, 30);
     }
 
-    /// format_agent_file omits the `hooks:` section entirely when hooks are empty.
+    /// `format_agent_file` omits the `hooks:` section entirely when hooks are empty.
     #[test]
     fn format_agent_file_omits_hooks_when_empty() {
         let def = make_def_no_hooks("agent");

@@ -19,7 +19,7 @@ fn parse_filter_field(s: &str) -> (String, serde_json::Value) {
 // ── run_new ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_new(
+pub async fn run_new(
     server: &str,
     name: String,
     source: String,
@@ -47,7 +47,7 @@ pub(crate) async fn run_new(
             // For timer we'd need a schedule, but keep minimal for now
             json!({
                 "type": "timer",
-                "schedule": event_types.first().map(|s| s.as_str()).unwrap_or(""),
+                "schedule": event_types.first().map_or("", std::string::String::as_str),
             })
         }
         other => {
@@ -149,7 +149,7 @@ fn parse_target(target: Option<&str>) -> (&'static str, String) {
 
 // ── run_list ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn run_list(
+pub async fn run_list(
     server: &str,
     enabled_only: bool,
     source_type: Option<String>,
@@ -195,7 +195,7 @@ pub(crate) async fn run_list(
 
 // ── run_show ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn run_show(server: &str, id: String) {
+pub async fn run_show(server: &str, id: String) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks/{id}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
@@ -221,11 +221,11 @@ pub(crate) async fn run_show(server: &str, id: String) {
 
 // ── run_enable / run_disable ──────────────────────────────────────────────────
 
-pub(crate) async fn run_enable(server: &str, id: String) {
+pub async fn run_enable(server: &str, id: String) {
     set_enabled(server, id, true).await;
 }
 
-pub(crate) async fn run_disable(server: &str, id: String) {
+pub async fn run_disable(server: &str, id: String) {
     set_enabled(server, id, false).await;
 }
 
@@ -251,7 +251,7 @@ async fn set_enabled(server: &str, id: String, enabled: bool) {
 
 // ── run_delete ────────────────────────────────────────────────────────────────
 
-pub(crate) async fn run_delete(server: &str, id: String) {
+pub async fn run_delete(server: &str, id: String) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks/{id}");
     let resp = client.delete(&url).send().await.unwrap_or_else(|e| {
@@ -269,7 +269,7 @@ pub(crate) async fn run_delete(server: &str, id: String) {
 
 // ── run_logs ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn run_logs(server: &str, id: String, limit: usize) {
+pub async fn run_logs(server: &str, id: String, limit: usize) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks/{id}/executions?limit={limit}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {

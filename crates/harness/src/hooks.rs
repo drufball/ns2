@@ -5,10 +5,10 @@ use uuid::Uuid;
 
 /// Run a single hook command with JSON on stdin.
 /// Returns `(exit_code, stdout, stderr)`.
-/// Kills the process and returns exit_code=1 on timeout.
+/// Kills the process and returns `exit_code=1` on timeout.
 /// When `cwd` is `Some`, the subprocess is started with that working directory
 /// so hooks run inside the agent's worktree rather than the server's cwd.
-pub(crate) async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&Path>) -> (i32, String, String) {
+pub async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&Path>) -> (i32, String, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     use tokio::time::{sleep, Duration};
@@ -62,7 +62,7 @@ pub(crate) async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&P
             let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
             (exit_code, stdout, stderr)
         }
-        _ = sleep(duration) => {
+        () = sleep(duration) => {
             tracing::warn!("hook command '{}' timed out after {}s", cmd.command, cmd.timeout);
             let _ = child.kill().await;
             (1, String::new(), format!("hook timed out after {}s", cmd.timeout))
@@ -71,23 +71,22 @@ pub(crate) async fn run_hook(cmd: &HookCommand, stdin_json: &str, cwd: Option<&P
 }
 
 /// Find all `HookEntry`s whose matcher regex matches `tool_name`.
-pub(crate) fn matching_hook_entries<'a>(entries: &'a [HookEntry], tool_name: &str) -> Vec<&'a HookEntry> {
+pub fn matching_hook_entries<'a>(entries: &'a [HookEntry], tool_name: &str) -> Vec<&'a HookEntry> {
     entries
         .iter()
         .filter(|e| {
             e.matcher
                 .as_deref()
-                .map(|pat| Regex::new(pat).map(|re| re.is_match(tool_name)).unwrap_or(false))
-                .unwrap_or(false)
+                .is_some_and(|pat| Regex::new(pat).is_ok_and(|re| re.is_match(tool_name)))
         })
         .collect()
 }
 
-/// Run PreToolUse hooks for `tool_name`.
+/// Run `PreToolUse` hooks for `tool_name`.
 /// Returns `Some(blocked_message)` if any hook exits non-zero (tool should be skipped),
 /// or `None` if all hooks pass.
 /// `cwd` is forwarded to the hook subprocess so it runs in the session's worktree.
-pub(crate) async fn run_pre_tool_use_hooks(
+pub async fn run_pre_tool_use_hooks(
     hooks: &AgentHooks,
     tool_name: &str,
     tool_input: &serde_json::Value,
@@ -114,9 +113,9 @@ pub(crate) async fn run_pre_tool_use_hooks(
     None
 }
 
-/// Run PostToolUse hooks for `tool_name`. Exit code is always ignored.
+/// Run `PostToolUse` hooks for `tool_name`. Exit code is always ignored.
 /// `cwd` is forwarded to the hook subprocess so it runs in the session's worktree.
-pub(crate) async fn run_post_tool_use_hooks(
+pub async fn run_post_tool_use_hooks(
     hooks: &AgentHooks,
     tool_name: &str,
     tool_input: &serde_json::Value,
@@ -148,7 +147,7 @@ pub(crate) async fn run_post_tool_use_hooks(
 ///
 /// `cwd` sets the working directory for the hook subprocess so it runs inside the
 /// session's worktree rather than the server process's cwd.
-pub(crate) async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid, cwd: Option<&Path>) -> Option<String> {
+pub async fn run_stop_hooks(hooks: &AgentHooks, session_id: Uuid, cwd: Option<&Path>) -> Option<String> {
     let stdin = serde_json::json!({ "session_id": session_id.to_string() });
     let stdin_str = stdin.to_string();
 

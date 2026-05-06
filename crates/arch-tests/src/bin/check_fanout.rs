@@ -55,10 +55,7 @@ const KEYWORD_EXCLUSIONS: &[&str] = &[
 
 fn get_workspace_crates(root: &Path) -> HashSet<String> {
     let cargo_toml = root.join("Cargo.toml");
-    let text = match fs::read_to_string(&cargo_toml) {
-        Ok(t) => t,
-        Err(_) => return HashSet::new(),
-    };
+    let Ok(text) = fs::read_to_string(&cargo_toml) else { return HashSet::new() };
     let mut names = HashSet::new();
     let mut in_members = false;
     let member_re = Regex::new(r#""crates/([^"]+)""#).unwrap();
@@ -83,10 +80,7 @@ fn get_workspace_crates(root: &Path) -> HashSet<String> {
 
 fn get_crate_cargo_deps(crate_root: &Path) -> HashSet<String> {
     let cargo_toml = crate_root.join("Cargo.toml");
-    let text = match fs::read_to_string(&cargo_toml) {
-        Ok(t) => t,
-        Err(_) => return HashSet::new(),
-    };
+    let Ok(text) = fs::read_to_string(&cargo_toml) else { return HashSet::new() };
     let mut deps = HashSet::new();
     let mut in_deps = false;
     let deps_header_re = Regex::new(r"^\[(dependencies|dev-dependencies|build-dependencies)\]").unwrap();
@@ -156,21 +150,16 @@ fn fanout_from_str(text: &str) -> (usize, HashSet<String>) {
 }
 
 fn compute_fanout(path: &Path) -> (usize, HashSet<String>) {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return (0, HashSet::new()),
-    };
+    let Ok(text) = fs::read_to_string(path) else { return (0, HashSet::new()) };
     fanout_from_str(&text)
 }
 
 // ── Module names ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) -> Vec<String> {
     let src_dir = crate_root.join("src");
-    let rel = match rs_path.strip_prefix(&src_dir) {
-        Ok(r) => r,
-        Err(_) => return vec![],
-    };
+    let Ok(rel) = rs_path.strip_prefix(&src_dir) else { return vec![] };
 
     let parts: Vec<String> = rel
         .components()
@@ -189,7 +178,7 @@ fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) ->
         }
     }
     // mod.rs is referenced by its parent dir name
-    if parts.last().map(|s| s.as_str()) == Some("mod") {
+    if parts.last().map(std::string::String::as_str) == Some("mod") {
         parts.pop();
     }
 
@@ -250,10 +239,7 @@ fn compute_fanin(
         if other.as_path() == target {
             continue;
         }
-        let text = match fs::read_to_string(other) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        let Ok(text) = fs::read_to_string(other) else { continue };
         let text_bytes = text.as_bytes();
 
         for (pi, pat) in rs_patterns.iter().enumerate() {
@@ -263,9 +249,9 @@ fn compute_fanin(
                 // Find the module name this pattern corresponds to
                 // Pattern index 1 -> module_names[0], 4 -> module_names[1], etc.
                 let mod_idx = (pi - 1) / 3;
-                let mod_name = qualified_names.get(mod_idx).map(|s| s.as_str()).unwrap_or("");
+                let mod_name = qualified_names.get(mod_idx).map_or("", std::string::String::as_str);
 
-                let search_str = format!("{}::", mod_name);
+                let search_str = format!("{mod_name}::");
                 // Manual scan for `mod_name::` not preceded by `:` or word char
                 let mut pos = 0;
                 while pos < text.len() {
@@ -287,12 +273,10 @@ fn compute_fanin(
                         break;
                     }
                 }
-            } else {
-                if pat.is_match(&text) {
-                    counted_paths.insert(other.to_string_lossy().to_string());
-                    count += 1;
-                    continue 'outer;
-                }
+            } else if pat.is_match(&text) {
+                counted_paths.insert(other.to_string_lossy().to_string());
+                count += 1;
+                continue 'outer;
             }
         }
     }
@@ -336,10 +320,7 @@ fn compute_fanin(
 // ── Git churn ─────────────────────────────────────────────────────────────────
 
 fn git_churn(path: &Path, root: &Path) -> usize {
-    let rel = match path.strip_prefix(root) {
-        Ok(r) => r,
-        Err(_) => return 0,
-    };
+    let Ok(rel) = path.strip_prefix(root) else { return 0 };
     let output = Command::new("git")
         .args(["log", "--since=90 days ago", "--oneline", "--", &rel.to_string_lossy()])
         .current_dir(root)
@@ -356,17 +337,14 @@ fn git_churn(path: &Path, root: &Path) -> usize {
 // ── File collection helpers ───────────────────────────────────────────────────
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Ok(entries) = fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|e| e.path());
+    entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
             collect_recursive(&path, out);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+        } else if path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
     }
@@ -391,6 +369,7 @@ struct FileMetrics {
 }
 
 impl FileMetrics {
+    #[allow(clippy::cast_precision_loss)]
     fn compute(
         path: String,
         lines: usize,
@@ -399,7 +378,7 @@ impl FileMetrics {
         churn: usize,
     ) -> Self {
         let score_v2 = ((fanin + fanout) as f64) * (churn as f64);
-        FileMetrics { path, lines, fanout, fanin, churn, score_v2 }
+        Self { path, lines, fanout, fanin, churn, score_v2 }
     }
 }
 
@@ -410,11 +389,12 @@ fn usage() -> ! {
     process::exit(2);
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let mut root = cwd.clone();
+    let mut root = cwd;
     let mut top: usize = 10;
     let mut threshold: f64 = 300.0;
 
@@ -441,7 +421,7 @@ fn main() {
             }
             "-h" | "--help" => usage(),
             other => {
-                eprintln!("Unknown option: {}", other);
+                eprintln!("Unknown option: {other}");
                 usage();
             }
         }
@@ -473,16 +453,16 @@ fn main() {
     let mut crate_name_map: HashMap<PathBuf, String> = HashMap::new();
 
     for f in &all_rs {
-        // parts: ["crates", "<crate-dir>", ...]
+        // parts: ["crates", "<crate-dir-name>", ...]
         let rel = f.strip_prefix(&root).unwrap_or(f.as_path());
         let parts: Vec<_> = rel.components().collect();
-        let crate_dir = if parts.len() > 1 {
+        let crate_dir_name = if parts.len() > 1 {
             parts[1].as_os_str().to_string_lossy().to_string()
         } else {
             "unknown".to_string()
         };
-        let crate_name = crate_dir.replace('-', "_");
-        let crate_root = root.join("crates").join(&crate_dir);
+        let crate_name = crate_dir_name.replace('-', "_");
+        let crate_root = root.join("crates").join(&crate_dir_name);
         let src_dir = crate_root.join("src");
 
         let mod_names = module_names_for_file(f, &crate_root, &crate_name);
@@ -508,14 +488,13 @@ fn main() {
             .to_string_lossy()
             .to_string();
         let lines = fs::read_to_string(f)
-            .map(|t| t.lines().count())
-            .unwrap_or(0);
+            .map_or(0, |t| t.lines().count());
         let (fanout, _) = compute_fanout(f);
         let fanin = compute_fanin(
             f,
             &all_rs,
-            module_map.get(f).map(|v| v.as_slice()).unwrap_or(&[]),
-            crate_name_map.get(f).map(|s| s.as_str()).unwrap_or(""),
+            module_map.get(f).map_or(&[] as &[String], std::vec::Vec::as_slice),
+            crate_name_map.get(f).map_or("", std::string::String::as_str),
             *is_crate_root_map.get(f).unwrap_or(&false),
             &root,
         );
@@ -527,12 +506,12 @@ fn main() {
 
     // Full table
     let sep = "=".repeat(110);
-    println!("{}", sep);
+    println!("{sep}");
     println!(
         "{:<55} {:>6} {:>5} {:>5} {:>7} {:>13}",
         "File", "Lines", "FOut", "FIn", "Churn90", "V2(fi+fo)*ch"
     );
-    println!("{}", sep);
+    println!("{sep}");
 
     let mut violations: Vec<&FileMetrics> = Vec::new();
 
@@ -549,7 +528,7 @@ fn main() {
 
     // Top-N
     println!("\n{}", "=".repeat(60));
-    println!("TOP {} by V2 score", top);
+    println!("TOP {top} by V2 score");
     println!("{}", "=".repeat(60));
     for (i, r) in results.iter().take(top).enumerate() {
         println!("{:>2}. [{:>7.1}] {}", i + 1, r.score_v2, r.path);
@@ -557,7 +536,7 @@ fn main() {
 
     println!();
     if violations.is_empty() {
-        println!("Fan-out check passed (threshold: {}).", threshold);
+        println!("Fan-out check passed (threshold: {threshold}).");
         process::exit(0);
     } else {
         println!(
@@ -582,11 +561,11 @@ mod tests {
 
     #[test]
     fn fanout_counts_use_imports() {
-        let src = r#"
+        let src = r"
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-"#;
+";
         let (count, crates) = fanout_from_str(src);
         assert_eq!(count, 3, "expected tokio, serde, uuid");
         assert!(crates.contains("tokio"));
@@ -602,18 +581,18 @@ use std::path::PathBuf;
 let x = std::env::var("HOME");
 "#;
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "std should be excluded, got: {:?}", crates);
+        assert_eq!(count, 0, "std should be excluded, got: {crates:?}");
     }
 
     #[test]
     fn fanout_does_not_count_crate_super_self() {
-        let src = r#"
+        let src = r"
 use crate::model::Foo;
 use super::helper;
 use self::inner::Bar;
-"#;
+";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "self-references must not count, got: {:?}", crates);
+        assert_eq!(count, 0, "self-references must not count, got: {crates:?}");
     }
 
     #[test]
@@ -621,7 +600,7 @@ use self::inner::Bar;
         // `tokio` is the crate; `sync` is a sub-module and is in KEYWORD_EXCLUSIONS.
         let src = "use tokio::sync::Mutex;";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 1, "only tokio should count, got: {:?}", crates);
+        assert_eq!(count, 1, "only tokio should count, got: {crates:?}");
         assert!(crates.contains("tokio"));
         assert!(!crates.contains("sync"));
     }
@@ -629,11 +608,11 @@ use self::inner::Bar;
     #[test]
     fn fanout_excludes_std_submodules_via_exclusion_list() {
         // `collections` appears as a path segment but is excluded
-        let src = r#"
+        let src = r"
 let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-"#;
+";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "std and collections should both be excluded, got: {:?}", crates);
+        assert_eq!(count, 0, "std and collections should both be excluded, got: {crates:?}");
     }
 
     #[test]
@@ -641,7 +620,7 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         // `regex::Regex` — `regex` is an external crate
         let src = r#"let re = regex::Regex::new(r"\d+").unwrap();"#;
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 1, "regex should count, got: {:?}", crates);
+        assert_eq!(count, 1, "regex should count, got: {crates:?}");
         assert!(crates.contains("regex"));
     }
 
@@ -652,8 +631,8 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         let src = "use serde_json::value::Value;";
         let (_, crates) = fanout_from_str(src);
         // serde_json is the crate; `value` is excluded by KEYWORD_EXCLUSIONS
-        assert!(crates.contains("serde_json"), "serde_json should count, got: {:?}", crates);
-        assert!(!crates.contains("value"), "sub-module value must not count: {:?}", crates);
+        assert!(crates.contains("serde_json"), "serde_json should count, got: {crates:?}");
+        assert!(!crates.contains("value"), "sub-module value must not count: {crates:?}");
     }
 
     #[test]
@@ -665,7 +644,7 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         // the lookbehind check and `foo` won't be added.
         let src = "Afoo::bar();"; // `foo` is preceded by `A` (alphanumeric)
         let (_, crates) = fanout_from_str(src);
-        assert!(!crates.contains("foo"), "should be skipped due to preceding alphanumeric: {:?}", crates);
+        assert!(!crates.contains("foo"), "should be skipped due to preceding alphanumeric: {crates:?}");
     }
 
     // ── keyword exclusion list completeness ───────────────────────────────────
@@ -683,8 +662,7 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         for kw in &["crate", "super", "self", "mod", "use", "pub", "fn", "impl"] {
             assert!(
                 KEYWORD_EXCLUSIONS.contains(kw),
-                "Rust keyword '{}' must be in KEYWORD_EXCLUSIONS",
-                kw
+                "Rust keyword '{kw}' must be in KEYWORD_EXCLUSIONS"
             );
         }
     }
@@ -700,22 +678,22 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
 
     #[test]
     fn fanout_multiple_uses_of_same_crate_count_once() {
-        let src = r#"
+        let src = r"
 use tokio::runtime::Runtime;
 use tokio::task;
 let _rt = tokio::runtime::Runtime::new();
-"#;
+";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 1, "tokio should count exactly once, got: {:?}", crates);
+        assert_eq!(count, 1, "tokio should count exactly once, got: {crates:?}");
         assert!(crates.contains("tokio"));
     }
 
     #[test]
     fn fanout_does_not_count_numeric_turbofish() {
         // `u64` in turbofish context
-        let src = r#"let x = value.parse::<u64>().unwrap();"#;
+        let src = r"let x = value.parse::<u64>().unwrap();";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "numeric type turbofish must not count, got: {:?}", crates);
+        assert_eq!(count, 0, "numeric type turbofish must not count, got: {crates:?}");
     }
 
     // ── module_names_for_file ─────────────────────────────────────────────────

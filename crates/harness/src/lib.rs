@@ -25,15 +25,11 @@ use uuid::Uuid;
 #[cfg(test)]
 use cwd::resolve_session_cwd_with_root;
 #[cfg(test)]
-use history::{load_history, persist_user_message};
-#[cfg(test)]
 use loop_::run_tool_dispatch_loop;
-#[cfg(test)]
-use retry::{is_rate_limit, max_retries};
 #[cfg(test)]
 use prompt::build_system_prompt;
 #[cfg(test)]
-use hooks::{matching_hook_entries, run_hook, run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
+use hooks::{run_hook, run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,14 +59,14 @@ pub struct HarnessConfig {
 
 
 #[cfg(test)]
+#[allow(clippy::struct_field_names)]
 mod tests {
     use super::*;
     use mockall::mock;
-    use std::sync::Mutex;
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, Mutex};
 
     // Serialize tests that mutate NS2_MAX_RETRIES to prevent races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
     mock! {
         pub TestDb {}
@@ -435,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_session_done_carries_correct_session_id() {
         let session = make_session();
-        let session_id = session.id;
+        let _ = session.id;
         let mock_db = permissive_mock_db();
 
         let config = HarnessConfig {
@@ -464,7 +460,7 @@ mod tests {
             .find(|e| matches!(e, SessionEvent::Done))
             .expect("no SessionDone event");
 
-        // The session_id is tracked by the broadcast channel subscription;
+        // The _session_id is tracked by the broadcast channel subscription;
         // the Done variant itself no longer carries it (it's on the outer SystemEvent wrapper).
         assert!(
             matches!(done_event, SessionEvent::Done),
@@ -554,12 +550,12 @@ mod tests {
             events.push(ev);
         }
 
-        let done_blocks: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, SessionEvent::ContentBlockDone { .. }))
-            .collect();
         // 1 user block + 2 assistant blocks = 3 ContentBlockDone events
-        assert_eq!(done_blocks.len(), 3, "expected 3 ContentBlockDone events (1 user + 2 assistant)");
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, SessionEvent::ContentBlockDone { .. })).count(),
+            3,
+            "expected 3 ContentBlockDone events (1 user + 2 assistant)"
+        );
     }
 
     #[tokio::test]
@@ -586,7 +582,7 @@ mod tests {
 
     // --- Tool dispatch tests ---
 
-    /// A mock client that first returns tool_use, then end_turn on the second call.
+    /// A mock client that first returns `tool_use`, then `end_turn` on the second call.
     struct ToolUseClient {
         call_count: std::sync::atomic::AtomicU32,
     }
@@ -790,8 +786,8 @@ mod tests {
     // --- Multi-turn tests ---
 
     /// A client that tracks call count and returns different responses per call.
-    /// Call 0: end_turn with "First response."
-    /// Call 1: end_turn with "Second response with context."
+    /// Call 0: `end_turn` with "First response."
+    /// Call 1: `end_turn` with "Second response with context."
     struct TwoTurnClient {
         call_count: std::sync::atomic::AtomicU32,
         /// Captures messages passed to the second call for later inspection
@@ -822,6 +818,7 @@ mod tests {
                 // Capture the messages for later assertion
                 let mut guard = self.second_call_messages.lock().unwrap();
                 *guard = request.messages;
+                drop(guard);
                 Ok(MessageResponse {
                     content: vec![ContentBlock::Text {
                         text: "Second response with context.".into(),
@@ -834,57 +831,57 @@ mod tests {
         }
     }
 
+    // Client: call 0 → tool_use, call 1 → tool_use, call 2 → end_turn
+    struct TwoToolClient {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl AnthropicClient for TwoToolClient {
+        async fn complete(
+            &self,
+            _request: MessageRequest,
+        ) -> anthropic::Result<MessageResponse> {
+            let count =
+                self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match count {
+                0 => Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_01".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "/tmp/a.txt"}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                }),
+                1 => Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_02".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "/tmp/b.txt"}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 12,
+                    output_tokens: 5,
+                }),
+                _ => Ok(MessageResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "All done.".into(),
+                    }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 20,
+                    output_tokens: 6,
+                }),
+            }
+        }
+    }
+
     /// Test: two sequential tool calls in one run both resolved before final response.
     #[tokio::test]
     async fn test_two_sequential_tool_calls_in_one_run() {
         let session = make_session();
         let mock_db = permissive_mock_db();
-
-        // Client: call 0 → tool_use, call 1 → tool_use, call 2 → end_turn
-        struct TwoToolClient {
-            call_count: std::sync::atomic::AtomicU32,
-        }
-
-        #[async_trait]
-        impl AnthropicClient for TwoToolClient {
-            async fn complete(
-                &self,
-                _request: MessageRequest,
-            ) -> anthropic::Result<MessageResponse> {
-                let count =
-                    self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                match count {
-                    0 => Ok(MessageResponse {
-                        content: vec![ContentBlock::ToolUse {
-                            id: "toolu_01".into(),
-                            name: "read".into(),
-                            input: serde_json::json!({"path": "/tmp/a.txt"}),
-                        }],
-                        stop_reason: "tool_use".into(),
-                        input_tokens: 10,
-                        output_tokens: 5,
-                    }),
-                    1 => Ok(MessageResponse {
-                        content: vec![ContentBlock::ToolUse {
-                            id: "toolu_02".into(),
-                            name: "read".into(),
-                            input: serde_json::json!({"path": "/tmp/b.txt"}),
-                        }],
-                        stop_reason: "tool_use".into(),
-                        input_tokens: 12,
-                        output_tokens: 5,
-                    }),
-                    _ => Ok(MessageResponse {
-                        content: vec![ContentBlock::Text {
-                            text: "All done.".into(),
-                        }],
-                        stop_reason: "end_turn".into(),
-                        input_tokens: 20,
-                        output_tokens: 6,
-                    }),
-                }
-            }
-        }
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -908,27 +905,22 @@ mod tests {
         }
 
         // Should have two ToolUse blocks and two ToolResult blocks
-        let tool_use_blocks: Vec<_> = events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    SessionEvent::ContentBlockDone { block: ContentBlock::ToolUse { .. }, .. }
-                )
-            })
-            .collect();
-        assert_eq!(tool_use_blocks.len(), 2, "expected 2 ToolUse blocks");
-
-        let tool_result_blocks: Vec<_> = events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. }
-                )
-            })
-            .collect();
-        assert_eq!(tool_result_blocks.len(), 2, "expected 2 ToolResult blocks");
+        assert_eq!(
+            events.iter().filter(|e| matches!(
+                e,
+                SessionEvent::ContentBlockDone { block: ContentBlock::ToolUse { .. }, .. }
+            )).count(),
+            2,
+            "expected 2 ToolUse blocks"
+        );
+        assert_eq!(
+            events.iter().filter(|e| matches!(
+                e,
+                SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. }
+            )).count(),
+            2,
+            "expected 2 ToolResult blocks"
+        );
 
         // SessionDone should be present
         assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
@@ -937,13 +929,14 @@ mod tests {
     /// Test: second user message is processed with all prior turns in context.
     #[tokio::test]
     async fn test_second_message_includes_prior_history() {
+        use std::sync::Mutex;
+
         let session = make_session();
         let session_id = session.id;
 
         // We need a DB that returns real turn/block data on the second call.
         // Strategy: use a mutex-wrapped Vec to accumulate created turns/blocks,
         // and return them on list_turns/list_content_blocks calls.
-        use std::sync::Mutex;
 
         // Shared state for the mock DB
         let turns_store: Arc<Mutex<Vec<types::Turn>>> = Arc::new(Mutex::new(vec![]));
@@ -1052,7 +1045,7 @@ mod tests {
 
     // --- Fix 1: stop_reason tests ---
 
-    /// Client that always returns max_tokens stop reason.
+    /// Client that always returns `max_tokens` stop reason.
     struct MaxTokensClient;
 
     #[async_trait]
@@ -1111,7 +1104,7 @@ mod tests {
 
     // --- Fix 2a: unknown tool name returns error tool result ---
 
-    /// Client: call 0 returns tool_use for a nonexistent tool, call 1 returns end_turn.
+    /// Client: call 0 returns `tool_use` for a nonexistent tool, call 1 returns `end_turn`.
     struct UnknownToolClient {
         call_count: std::sync::atomic::AtomicU32,
     }
@@ -1150,10 +1143,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_tool_name_returns_error_tool_result() {
+        use std::sync::Mutex;
+
         let session = make_session();
 
         // We need a DB that captures stored content blocks so we can inspect them.
-        use std::sync::Mutex;
         let blocks_store: Arc<Mutex<Vec<(Uuid, types::Role, types::ContentBlock)>>> =
             Arc::new(Mutex::new(vec![]));
         let blocks_store_c = Arc::clone(&blocks_store);
@@ -1199,16 +1193,17 @@ mod tests {
 
         // A ToolResult block should have been stored with content containing "unknown tool"
         let stored = blocks_store.lock().unwrap();
-        let tool_result_with_error = stored.iter().find(|(_, _, block)| {
+        let tool_result_found = stored.iter().any(|(_, _, block)| {
             matches!(block, ContentBlock::ToolResult { content, .. } if {
                 let lower = content.to_lowercase();
                 lower.contains("unknown tool") || lower.contains("unknown")
             })
         });
+        let stored_debug = stored.iter().map(|(_, _, b)| format!("{b:?}")).collect::<Vec<_>>();
+        drop(stored);
         assert!(
-            tool_result_with_error.is_some(),
-            "expected a ToolResult block with 'unknown tool' error in DB; stored blocks: {:?}",
-            stored.iter().map(|(_, _, b)| b).collect::<Vec<_>>()
+            tool_result_found,
+            "expected a ToolResult block with 'unknown tool' error in DB; stored blocks: {stored_debug:?}",
         );
     }
 
@@ -1256,9 +1251,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_result_stored_with_user_role() {
+        use std::sync::Mutex;
+
         let session = make_session();
 
-        use std::sync::Mutex;
         // Capture stored blocks with their roles
         let blocks_store: Arc<Mutex<Vec<(Uuid, types::Role, types::ContentBlock)>>> =
             Arc::new(Mutex::new(vec![]));
@@ -1314,53 +1310,52 @@ mod tests {
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         let stored = blocks_store.lock().unwrap();
-        let tool_result_entry = stored.iter().find(|(_, _, block)| {
-            matches!(block, ContentBlock::ToolResult { .. })
+        let tool_result_role = stored.iter().find_map(|(_, role, block)| {
+            matches!(block, ContentBlock::ToolResult { .. }).then(|| role.clone())
         });
-        assert!(tool_result_entry.is_some(), "expected a ToolResult block in DB");
-
-        let (_, role, _) = tool_result_entry.unwrap();
-        assert_eq!(*role, types::Role::User, "ToolResult block should be stored with Role::User");
+        drop(stored);
+        assert!(tool_result_role.is_some(), "expected a ToolResult block in DB");
+        assert_eq!(tool_result_role.unwrap(), types::Role::User, "ToolResult block should be stored with Role::User");
     }
 
     // --- Fix 2d: sequential tool calls correct ordering ---
+
+    struct TwoToolOrderingClient {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl AnthropicClient for TwoToolOrderingClient {
+        async fn complete(
+            &self,
+            _request: MessageRequest,
+        ) -> anthropic::Result<MessageResponse> {
+            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match count {
+                0 => Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_01".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "/tmp/a.txt"}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                }),
+                _ => Ok(MessageResponse {
+                    content: vec![ContentBlock::Text { text: "All done.".into() }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 20,
+                    output_tokens: 6,
+                }),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_sequential_tool_calls_correct_ordering() {
         let session = make_session();
         let mock_db = permissive_mock_db();
-
-        struct TwoToolOrderingClient {
-            call_count: std::sync::atomic::AtomicU32,
-        }
-
-        #[async_trait]
-        impl AnthropicClient for TwoToolOrderingClient {
-            async fn complete(
-                &self,
-                _request: MessageRequest,
-            ) -> anthropic::Result<MessageResponse> {
-                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                match count {
-                    0 => Ok(MessageResponse {
-                        content: vec![ContentBlock::ToolUse {
-                            id: "toolu_01".into(),
-                            name: "read".into(),
-                            input: serde_json::json!({"path": "/tmp/a.txt"}),
-                        }],
-                        stop_reason: "tool_use".into(),
-                        input_tokens: 10,
-                        output_tokens: 5,
-                    }),
-                    _ => Ok(MessageResponse {
-                        content: vec![ContentBlock::Text { text: "All done.".into() }],
-                        stop_reason: "end_turn".into(),
-                        input_tokens: 20,
-                        output_tokens: 6,
-                    }),
-                }
-            }
-        }
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -1419,8 +1414,7 @@ mod tests {
 
         assert_eq!(
             labels, expected,
-            "event ordering mismatch.\nGot:      {:?}\nExpected: {:?}",
-            labels, expected
+            "event ordering mismatch.\nGot:      {labels:?}\nExpected: {expected:?}"
         );
     }
 
@@ -1442,9 +1436,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_turn_token_count_equals_input_plus_output() {
-        let session = make_session();
-
         use std::sync::Mutex;
+
+        let session = make_session();
         let turns_store: Arc<Mutex<Vec<types::Turn>>> = Arc::new(Mutex::new(vec![]));
         let turns_store_c = Arc::clone(&turns_store);
 
@@ -1476,10 +1470,11 @@ mod tests {
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
         let stored = turns_store.lock().unwrap();
-        let assistant_turn = stored.iter().find(|t| t.token_count.is_some());
-        assert!(assistant_turn.is_some(), "expected an assistant turn with token_count set");
+        let assistant_token_count = stored.iter().find_map(|t| t.token_count);
+        drop(stored);
+        assert!(assistant_token_count.is_some(), "expected an assistant turn with token_count set");
         assert_eq!(
-            assistant_turn.unwrap().token_count,
+            assistant_token_count,
             Some(150),
             "token_count should be input_tokens (100) + output_tokens (50) = 150"
         );
@@ -1505,6 +1500,7 @@ mod tests {
             if guard.is_empty() {
                 *guard = request.messages;
             }
+            drop(guard);
             Ok(MessageResponse {
                 content: vec![ContentBlock::Text { text: "ok".into() }],
                 stop_reason: "end_turn".into(),
@@ -1515,7 +1511,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_history_reconstructed_after_cold_restart() {
+        use std::sync::Mutex;
+
         let session = make_session();
         let session_id = session.id;
 
@@ -1537,7 +1536,6 @@ mod tests {
         };
 
         // The new run will add more turns; we track everything via a store.
-        use std::sync::Mutex;
         let turns_store: Arc<Mutex<Vec<types::Turn>>> =
             Arc::new(Mutex::new(vec![pre_user_turn.clone(), pre_assistant_turn.clone()]));
         let blocks_store: Arc<Mutex<Vec<(Uuid, types::Role, types::ContentBlock)>>> =
@@ -1613,7 +1611,7 @@ mod tests {
             captured.len(),
             captured.iter().map(|(r, blocks)| {
                 let text = blocks.iter().find_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }).unwrap_or("?");
-                format!("{:?}: {}", r, text)
+                format!("{r:?}: {text}")
             }).collect::<Vec<_>>()
         );
 
@@ -1639,6 +1637,7 @@ mod tests {
     // --- Agent system prompt tests ---
 
     /// A client that captures the `system` field from the first request.
+    #[allow(clippy::option_option)]
     struct SystemCapturingClient {
         captured_system: std::sync::Mutex<Option<Option<String>>>,
     }
@@ -1660,6 +1659,7 @@ mod tests {
             if guard.is_none() {
                 *guard = Some(request.system);
             }
+            drop(guard);
             Ok(MessageResponse {
                 content: vec![ContentBlock::Text { text: "ok".into() }],
                 stop_reason: "end_turn".into(),
@@ -2252,6 +2252,7 @@ mod tests {
         let results = results_store.lock().unwrap();
         assert_eq!(results.len(), 1, "expected one tool result");
         assert_eq!(results[0], "file content here", "tool should have run normally");
+        drop(results);
     }
 
     #[tokio::test]
@@ -2310,6 +2311,7 @@ mod tests {
             "tool result must be hook stderr when blocked, got: {:?}",
             results[0]
         );
+        drop(results);
     }
 
     #[tokio::test]
@@ -2367,6 +2369,7 @@ mod tests {
             results[0], "file content here",
             "PostToolUse hook must not alter the tool result"
         );
+        drop(results);
     }
 
     #[tokio::test]
@@ -2484,7 +2487,7 @@ mod tests {
     /// test does not actually wait 10 s per retry.
     #[tokio::test(start_paused = true)]
     async fn test_429_retried_up_to_5_times_then_succeeds() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         let session = make_session();
         let mock_db = permissive_mock_db();
 
@@ -2522,7 +2525,7 @@ mod tests {
     }
 
     /// When the client returns 429 more than 5 times (all retries exhausted),
-    /// the harness must emit SessionEvent::Error.
+    /// the harness must emit `SessionEvent::Error`.
     ///
     /// `start_paused = true` makes `tokio::time::sleep` return immediately.
     #[tokio::test(start_paused = true)]
@@ -2592,7 +2595,7 @@ mod tests {
         assert!(result.is_err(), "non-429 error should propagate immediately as Err");
     }
 
-    /// NS2_MAX_RETRIES env var overrides the default of 5.
+    /// `NS2_MAX_RETRIES` env var overrides the default of 5.
     /// Set it to 2 → a client that fails 3 times should exhaust retries.
     ///
     /// Note: env var mutation in tests is inherently racy with parallel execution.
@@ -2601,7 +2604,7 @@ mod tests {
     /// inside the retry loop so the env value is sampled at test time.
     #[tokio::test(start_paused = true)]
     async fn test_ns2_max_retries_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("NS2_MAX_RETRIES", "2");
 
         let session = make_session();

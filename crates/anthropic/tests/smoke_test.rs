@@ -174,7 +174,7 @@ async fn test_tool_use_streaming_response() {
             assert_eq!(name, "read");
             assert_eq!(input["path"], "/tmp/test.txt");
         }
-        other => panic!("expected ToolUse block, got: {:?}", other),
+        other => panic!("expected ToolUse block, got: {other:?}"),
     }
     assert_eq!(response.input_tokens, 20);
     assert_eq!(response.output_tokens, 15);
@@ -244,7 +244,7 @@ async fn test_malformed_tool_input_json_returns_error() {
 
     let client = Client::with_base_url("test-key".into(), mock_server.uri());
     let result = client.complete(make_request()).await;
-    assert!(result.is_err(), "expected error for malformed tool input JSON, got: {:?}", result);
+    assert!(result.is_err(), "expected error for malformed tool input JSON, got: {result:?}");
     let err_str = result.unwrap_err().to_string();
     assert!(
         err_str.contains("parse error") || err_str.contains("invalid tool input JSON"),
@@ -284,7 +284,7 @@ async fn test_text_content_block_start_does_not_corrupt_output() {
     assert_eq!(response.content.len(), 1, "expected exactly one content block");
     match &response.content[0] {
         ContentBlock::Text { text } => assert_eq!(text, "hello world"),
-        other => panic!("expected Text block, got: {:?}", other),
+        other => panic!("expected Text block, got: {other:?}"),
     }
     assert_eq!(response.input_tokens, 8);
     assert_eq!(response.output_tokens, 3);

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -15,6 +16,7 @@ pub struct SpecDef {
     pub body: String,
 }
 
+#[must_use] 
 pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
     let content = content.trim_start();
     let rest = content.strip_prefix("---\n")?;
@@ -59,33 +61,42 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
     Some(SpecDef { targets, verified, severity, body: body.to_string() })
 }
 
+#[must_use] 
 pub fn format_spec_file(def: &SpecDef) -> String {
     let mut out = String::from("---\ntargets:\n");
     for t in &def.targets {
-        out.push_str(&format!("  - {t}\n"));
+        let _ = writeln!(out, "  - {t}");
     }
     if def.severity == Severity::Warning {
         out.push_str("severity: warning\n");
     }
     if let Some(v) = def.verified {
-        out.push_str(&format!("verified: {}\n", v.format("%Y-%m-%dT%H:%M:%SZ")));
+        let _ = writeln!(out, "verified: {}", v.format("%Y-%m-%dT%H:%M:%SZ"));
     }
     out.push_str("---\n");
     if !def.body.is_empty() {
-        out.push_str(&format!("\n{}", def.body));
+        let _ = write!(out, "\n{}", def.body);
     }
     out
 }
 
+#[must_use] 
 pub fn load_spec(path: &Path) -> Option<SpecDef> {
     let content = std::fs::read_to_string(path).ok()?;
     parse_spec_content(&content)
 }
 
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the file cannot be written.
 pub fn write_spec(path: &Path, def: &SpecDef) -> std::io::Result<()> {
     std::fs::write(path, format_spec_file(def))
 }
 
+/// # Panics
+///
+/// Panics if the internal fallback glob pattern is invalid (should never happen).
+#[must_use]
 pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
     let pattern = format!("{}/**/*.spec.md", root.display());
     let mut results: Vec<(PathBuf, SpecDef)> = glob::glob(&pattern)
@@ -93,12 +104,9 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
         .filter_map(|entry| {
             let path = entry.ok()?;
             let content = std::fs::read_to_string(&path).ok()?;
-            match parse_spec_content(&content) {
-                Some(def) => Some((path, def)),
-                None => {
-                    tracing::warn!("skipping {}: invalid frontmatter", path.display());
-                    None
-                }
+            if let Some(def) = parse_spec_content(&content) { Some((path, def)) } else {
+                tracing::warn!("skipping {}: invalid frontmatter", path.display());
+                None
             }
         })
         .collect();
@@ -111,6 +119,7 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
 /// In CI (`CI` env var set) with a git repo: uses commit ancestry — a target is stale if its
 /// last-touching commit is *not* an ancestor of the spec file's last-touching commit.
 /// Locally: compares file mtime against the `verified` timestamp in the spec frontmatter.
+#[must_use] 
 pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf> {
     let matched = glob_matched_files(root, &def.targets);
 
@@ -124,12 +133,10 @@ pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf>
         matched
             .into_iter()
             .filter(|rel_target| {
-                match workspace::git_last_commit_for_file(root, rel_target) {
-                    None => true,
-                    Some(target_commit) => {
+                workspace::git_last_commit_for_file(root, rel_target)
+                    .is_none_or(|target_commit| {
                         !workspace::git_is_ancestor_or_equal(root, &target_commit, &spec_commit)
-                    }
-                }
+                    })
             })
             .collect()
     } else {
@@ -142,9 +149,7 @@ pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf>
                 let dt: DateTime<Utc> = root
                     .join(rel)
                     .metadata()
-                    .and_then(|m| m.modified())
-                    .map(Into::into)
-                    .unwrap_or_else(|_| chrono::TimeZone::timestamp_opt(&Utc, 0, 0).unwrap());
+                    .and_then(|m| m.modified()).map_or_else(|_| chrono::TimeZone::timestamp_opt(&Utc, 0, 0).unwrap(), Into::into);
                 dt > verified
             })
             .collect()
@@ -155,11 +160,8 @@ fn glob_matched_files(root: &Path, targets: &[String]) -> Vec<PathBuf> {
     let mut matched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for target in targets {
         let pattern = format!("{}/{}", root.display(), target);
-        let entries = match glob::glob(&pattern) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
+        let Ok(entries) = glob::glob(&pattern) else { continue };
+        for entry in entries.filter_map(std::result::Result::ok) {
             if let Ok(rel) = entry.strip_prefix(root) {
                 matched.insert(rel.to_path_buf());
             }

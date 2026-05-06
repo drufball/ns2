@@ -7,7 +7,7 @@ fn write_agent(h: &common::TestHarness, name: &str, body: &str, include_project_
     let dir = h.repo_dir.path().join(".ns2/agents");
     std::fs::create_dir_all(&dir).unwrap();
     let ipc = if include_project_config { "include_project_config: true\n" } else { "" };
-    let hooks = if !hooks_yaml.is_empty() { format!("hooks:\n{}\n", hooks_yaml) } else { String::new() };
+    let hooks = if hooks_yaml.is_empty() { String::new() } else { format!("hooks:\n{hooks_yaml}\n") };
     std::fs::write(
         dir.join(format!("{name}.md")),
         format!("---\nname: {name}\ndescription: Test\n{ipc}{hooks}---\n\n{body}\n")
@@ -24,10 +24,10 @@ fn auto_complete_posts_comment_on_issue() {
     let id = h.ns2_stdout(&["issue", "new", "--title", "Test", "--body", "body", "--assignee", "swe"]);
     h.ns2().args(["issue", "start", "--id", &id]).assert().success();
     h.ns2().args(["issue", "wait", "--id", &id]).assert().success();
-    let body = h.http_get(&format!("/issues/{}", id));
-    assert!(body.contains("\"author\":\"swe\""), "missing author in: {}", body);
-    assert!(body.contains("\"body\":\"stub\""), "missing stub comment in: {}", body);
-    assert!(body.contains("\"status\":\"completed\""), "missing completed status in: {}", body);
+    let body = h.http_get(&format!("/issues/{id}"));
+    assert!(body.contains("\"author\":\"swe\""), "missing author in: {body}");
+    assert!(body.contains("\"body\":\"stub\""), "missing stub comment in: {body}");
+    assert!(body.contains("\"status\":\"completed\""), "missing completed status in: {body}");
 }
 
 #[test]
@@ -38,10 +38,10 @@ fn auto_complete_comment_author_matches_assignee() {
     let id = h.ns2_stdout(&["issue", "new", "--title", "Test", "--body", "body", "--assignee", "qa-tester"]);
     h.ns2().args(["issue", "start", "--id", &id]).assert().success();
     h.ns2().args(["issue", "wait", "--id", &id]).assert().success();
-    let body = h.http_get(&format!("/issues/{}", id));
-    assert!(body.contains("\"author\":\"qa-tester\""), "missing qa-tester author in: {}", body);
-    assert!(body.contains("\"body\":\"stub\""), "missing stub comment in: {}", body);
-    assert!(body.contains("\"status\":\"completed\""), "missing completed status in: {}", body);
+    let body = h.http_get(&format!("/issues/{id}"));
+    assert!(body.contains("\"author\":\"qa-tester\""), "missing qa-tester author in: {body}");
+    assert!(body.contains("\"body\":\"stub\""), "missing stub comment in: {body}");
+    assert!(body.contains("\"status\":\"completed\""), "missing completed status in: {body}");
 }
 
 // Flow 21 — Project config inheritance (CLAUDE.md loading)

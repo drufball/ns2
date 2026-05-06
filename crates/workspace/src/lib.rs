@@ -33,6 +33,7 @@ pub async fn git_root() -> Option<PathBuf> {
 ///
 /// Prefer [`git_root`] in async contexts.  This function blocks the calling
 /// thread and must not be called from inside a Tokio worker thread.
+#[must_use] 
 pub fn git_root_sync() -> Option<PathBuf> {
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -49,17 +50,18 @@ pub fn git_root_sync() -> Option<PathBuf> {
 }
 
 /// Returns true if `root` is inside a git working tree.
+#[must_use] 
 pub fn is_git_repo(root: &Path) -> bool {
     std::process::Command::new("git")
         .current_dir(root)
         .args(["rev-parse", "--git-dir"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Returns the commit hash of the last commit that touched `file` (relative to `root`),
 /// or None if the file has no commits.
+#[must_use] 
 pub fn git_last_commit_for_file(root: &Path, file: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .current_dir(root)
@@ -74,6 +76,7 @@ pub fn git_last_commit_for_file(root: &Path, file: &Path) -> Option<String> {
 }
 
 /// Returns true if `older` is an ancestor of `newer`, or they are the same commit.
+#[must_use] 
 pub fn git_is_ancestor_or_equal(root: &Path, older: &str, newer: &str) -> bool {
     if older == newer {
         return true;
@@ -82,14 +85,13 @@ pub fn git_is_ancestor_or_equal(root: &Path, older: &str, newer: &str) -> bool {
         .current_dir(root)
         .args(["merge-base", "--is-ancestor", older, newer])
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 // ── ns2.toml config ──────────────────────────────────────────────────────────
 
 /// Configuration loaded from `ns2.toml` at the repository root.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ns2Config {
     /// Base directory under which ns2 creates git worktrees.
     /// Default: `~/.ns2/<repo-name>/worktrees/`
@@ -143,6 +145,7 @@ fn default_worktree_base(root: &Path) -> PathBuf {
 
 /// Read `ns2.toml` from `root` and return an `Ns2Config`.
 /// Missing file or missing keys silently return defaults.
+#[must_use] 
 pub fn read_ns2_config(root: &Path) -> Ns2Config {
     let config_path = root.join("ns2.toml");
     let raw: RawNs2Config = std::fs::read_to_string(&config_path)

@@ -23,7 +23,7 @@ use crate::state::AppState;
 /// - `last_turns` — when `session_id` is set, limit the historical replay to the
 ///   last N turns.  `0` skips all history.  Absent → replay all.
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct EventsQuery {
+pub struct EventsQuery {
     pub(crate) session_id: Option<Uuid>,
     pub(crate) issue_id: Option<String>,
     pub(crate) types: Option<String>,
@@ -35,14 +35,13 @@ impl EventsQuery {
     pub(crate) fn matches(&self, ev: &SystemEvent) -> bool {
         // type filter
         if let Some(ref types_str) = self.types {
-            let allowed: Vec<&str> = types_str.split(',').map(str::trim).collect();
             let type_name = match ev {
                 SystemEvent::Session { .. } => "session",
                 SystemEvent::Issue(_) => "issue",
                 SystemEvent::External { .. } => "external",
                 SystemEvent::TimerFired { .. } => "timer",
             };
-            if !allowed.contains(&type_name) {
+            if !types_str.split(',').map(str::trim).any(|x| x == type_name) {
                 return false;
             }
         }
@@ -65,8 +64,7 @@ impl EventsQuery {
                 SystemEvent::Issue(ie) => {
                     let issue_id = match ie {
                         IssueEvent::Created(i) => &i.id,
-                        IssueEvent::StatusChanged { issue, .. } => &issue.id,
-                        IssueEvent::CommentAdded { issue, .. } => &issue.id,
+                        IssueEvent::StatusChanged { issue, .. } | IssueEvent::CommentAdded { issue, .. } => &issue.id,
                     };
                     if issue_id != iid {
                         return false;
@@ -80,13 +78,13 @@ impl EventsQuery {
     }
 }
 
-fn ev_to_sse(ev: SystemEvent) -> std::result::Result<Event, Infallible> {
-    Ok(Event::default().data(serde_json::to_string(&ev).unwrap_or_default()))
+fn ev_to_sse(ev: &SystemEvent) -> Event {
+    Event::default().data(serde_json::to_string(ev).unwrap_or_default())
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn events(
+pub async fn events(
     State(state): State<AppState>,
     Query(params): Query<EventsQuery>,
 ) -> Sse<impl futures::Stream<Item = std::result::Result<Event, Infallible>>> {
@@ -115,7 +113,7 @@ pub(crate) async fn events(
                     });
                     if let Ok(blocks) = state.db.list_content_blocks(turn.id).await {
                         for (i, (_role, block)) in blocks.into_iter().enumerate() {
-                            let index = i as u32;
+                            let index = u32::try_from(i).unwrap_or(u32::MAX);
                             if let types::ContentBlock::Text { ref text } = block {
                                 history.push(SystemEvent::Session {
                                     session_id,
@@ -161,7 +159,7 @@ pub(crate) async fn events(
     }
 
     let params_for_live = params.clone();
-    let history_stream = stream::iter(history).map(ev_to_sse);
+    let history_stream = stream::iter(history).map(|ev| Ok::<_, Infallible>(ev_to_sse(&ev)));
 
     // For terminal sessions with session_id filter: no live stream needed.
     // For all other cases: attach a live stream filtered by query params.
@@ -173,7 +171,7 @@ pub(crate) async fn events(
                 let params = params_for_live.clone();
                 async move {
                     match result {
-                        Ok(ev) if params.matches(&ev) => Some(ev_to_sse(ev)),
+                        Ok(ev) if params.matches(&ev) => Some(Ok::<_, Infallible>(ev_to_sse(&ev))),
                         Ok(_) => None,
                         Err(_lagged) => None,
                     }
@@ -405,8 +403,7 @@ mod tests {
                 SystemEvent::Issue(ie) => {
                     let issue_id = match ie {
                         IssueEvent::Created(i) => &i.id,
-                        IssueEvent::StatusChanged { issue, .. } => &issue.id,
-                        IssueEvent::CommentAdded { issue, .. } => &issue.id,
+                        IssueEvent::StatusChanged { issue, .. } | IssueEvent::CommentAdded { issue, .. } => &issue.id,
                     };
                     assert_eq!(issue_id, target_id, "all received events must be for target issue");
                 }

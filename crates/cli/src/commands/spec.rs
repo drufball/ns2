@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use crate::render::{format_sync_error, format_sync_warning};
 
 /// The result of verifying a batch of spec paths.
-pub(crate) struct VerifyResult {
+pub struct VerifyResult {
     /// Lines to print to stdout (one per successfully verified path).
     pub(crate) stdout_lines: Vec<String>,
     /// Lines to print to stderr (one per failure).
@@ -16,7 +16,7 @@ pub(crate) struct VerifyResult {
 /// For each path: resolve it relative to `git_root`, attempt to load + write the spec,
 /// record success/failure.  Does NOT call `process::exit` — returns a [`VerifyResult`]
 /// so callers (main and tests) can assert on the outcome.
-pub(crate) fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) -> VerifyResult {
+pub fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) -> VerifyResult {
     let mut stdout_lines = Vec::new();
     let mut stderr_lines = Vec::new();
     let mut any_failed = false;
@@ -28,13 +28,10 @@ pub(crate) fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) ->
             git_root.join(path)
         };
 
-        let mut def = match specs::load_spec(&resolved) {
-            Some(d) => d,
-            None => {
-                stderr_lines.push(format!("Error: could not load spec at {path}"));
-                any_failed = true;
-                continue;
-            }
+        let Some(mut def) = specs::load_spec(&resolved) else {
+            stderr_lines.push(format!("Error: could not load spec at {path}"));
+            any_failed = true;
+            continue;
         };
 
         def.verified = Some(chrono::Utc::now());
@@ -51,12 +48,12 @@ pub(crate) fn verify_spec_paths(git_root: &std::path::Path, paths: &[String]) ->
     VerifyResult { stdout_lines, stderr_lines, any_failed }
 }
 
-pub(crate) fn run_new(path: String, targets: Vec<String>, severity: String) {
+pub fn run_new(path: String, targets: Vec<String>, severity: &str) {
     if targets.is_empty() {
         eprintln!("Error: at least one --target is required");
         std::process::exit(1);
     }
-    let severity = match severity.as_str() {
+    let severity = match severity {
         "warning" => specs::Severity::Warning,
         "error" => specs::Severity::Error,
         _ => {
@@ -73,7 +70,7 @@ pub(crate) fn run_new(path: String, targets: Vec<String>, severity: String) {
     } else {
         git_root.join(&path)
     };
-    let path_display = path.clone();
+    let path_display = path;
     let path = resolved;
     if path.exists() {
         eprintln!("Error: spec already exists at {}", path.display());
@@ -95,7 +92,7 @@ pub(crate) fn run_new(path: String, targets: Vec<String>, severity: String) {
     println!("Created spec at {path_display}");
 }
 
-pub(crate) fn run_sync(path: Option<String>, error_on_warnings: bool) {
+pub fn run_sync(path: Option<String>, error_on_warnings: bool) {
     let git_root = workspace::git_root_sync().unwrap_or_else(|| {
         eprintln!("Error: not inside a git repository");
         std::process::exit(1);
@@ -174,12 +171,12 @@ pub(crate) fn run_sync(path: Option<String>, error_on_warnings: bool) {
     }
 }
 
-pub(crate) fn run_verify(paths: Vec<String>) {
+pub fn run_verify(paths: &[String]) {
     let git_root = workspace::git_root_sync().unwrap_or_else(|| {
         eprintln!("Error: not inside a git repository");
         std::process::exit(1);
     });
-    let result = verify_spec_paths(&git_root, &paths);
+    let result = verify_spec_paths(&git_root, paths);
     for line in &result.stdout_lines {
         println!("{line}");
     }

@@ -15,7 +15,13 @@ use chrono::Utc;
 /// `messages` should already contain the full history including the new user message.
 /// Hook subprocesses are started with `config.cwd` as their working directory so they
 /// operate on the session's worktree rather than the server's cwd.
-pub(crate) async fn run_tool_dispatch_loop(
+///
+/// # Errors
+///
+/// Returns an error if the LLM call fails with a non-rate-limit error, or if any
+/// database write fails.
+#[allow(clippy::too_many_lines)]
+pub async fn run_tool_dispatch_loop(
     config: &HarnessConfig,
     client: &Arc<dyn anthropic::AnthropicClient>,
     db: &Arc<dyn db::Db>,
@@ -59,7 +65,7 @@ pub(crate) async fn run_tool_dispatch_loop(
         let turn = Turn {
             id: Uuid::new_v4(),
             session_id: config.session.id,
-            token_count: Some((response.input_tokens + response.output_tokens) as i64),
+            token_count: Some(i64::from(response.input_tokens + response.output_tokens)),
             created_at: Utc::now(),
         };
         db.create_turn(&turn).await?;
@@ -67,7 +73,7 @@ pub(crate) async fn run_tool_dispatch_loop(
 
         // Store and emit content blocks
         for (index, block) in response.content.iter().enumerate() {
-            let index = index as u32;
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
             if let ContentBlock::Text { text } = block {
                 let _ = event_tx.send(SessionEvent::ContentBlockDelta {
                     turn_id: turn.id,
@@ -75,7 +81,7 @@ pub(crate) async fn run_tool_dispatch_loop(
                     delta: types::ContentBlockDelta::TextDelta { text: text.clone() },
                 });
             }
-            db.create_content_block(turn.id, index as i64, &Role::Assistant, block).await?;
+            db.create_content_block(turn.id, i64::from(index), &Role::Assistant, block).await?;
             let _ = event_tx.send(SessionEvent::ContentBlockDone {
                 turn_id: turn.id,
                 index,
@@ -151,8 +157,8 @@ pub(crate) async fn run_tool_dispatch_loop(
         let _ = event_tx.send(SessionEvent::TurnStarted { turn: tool_result_turn.clone() });
 
         for (index, block) in tool_result_blocks.iter().enumerate() {
-            let index = index as u32;
-            db.create_content_block(tool_result_turn.id, index as i64, &Role::User, block)
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            db.create_content_block(tool_result_turn.id, i64::from(index), &Role::User, block)
                 .await?;
             let _ = event_tx.send(SessionEvent::ContentBlockDone {
                 turn_id: tool_result_turn.id,
@@ -170,6 +176,10 @@ pub(crate) async fn run_tool_dispatch_loop(
     Ok(None)
 }
 
+/// # Errors
+///
+/// Returns an error if a database operation fails or the LLM call fails with a
+/// non-rate-limit error.
 pub async fn run(
     mut config: HarnessConfig,
     client: Arc<dyn anthropic::AnthropicClient>,
@@ -234,10 +244,7 @@ pub async fn run(
 
     loop {
         // Wait for the next user message. When the sender is dropped, recv() returns None → exit.
-        let message = match msg_rx.recv().await {
-            Some(m) => m,
-            None => break,
-        };
+        let Some(message) = msg_rx.recv().await else { break };
 
         // Transition session to Running
         db.update_session_status(config.session.id, SessionStatus::Running).await?;

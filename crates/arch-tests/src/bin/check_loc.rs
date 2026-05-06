@@ -81,12 +81,12 @@ fn count_code_loc_str(content: &str) -> (usize, usize) {
             let before = stripped[..block_start].trim();
             let after = &stripped[block_start + 2..];
             if after.contains("*/") {
-                is_code_line = if !before.is_empty() {
-                    true
-                } else {
+                is_code_line = if before.is_empty() {
                     let close = after.find("*/").unwrap();
                     let after_close = after[close + 2..].trim();
                     !after_close.is_empty() && !after_close.starts_with("//")
+                } else {
+                    true
                 };
             } else {
                 in_block = true;
@@ -137,9 +137,140 @@ fn count_code_loc_str(content: &str) -> (usize, usize) {
 }
 
 fn count_code_loc(path: &Path) -> (usize, usize) {
-    match fs::read_to_string(path) {
-        Ok(content) => count_code_loc_str(&content),
-        Err(_) => (0, 0),
+    fs::read_to_string(path).map_or((0, 0), |content| count_code_loc_str(&content))
+}
+
+fn is_test_file(rel: &str) -> bool {
+    rel.contains("/tests/")
+        || rel.ends_with("_test.rs")
+        || {
+            // bare filename starts with test_
+            let fname = rel.rsplit('/').next().unwrap_or(rel);
+            fname.starts_with("test_")
+        }
+}
+
+fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_recursive(dir, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_recursive(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn usage() -> ! {
+    eprintln!("Usage: check-loc [--threshold N] [--test-threshold N] [--dir DIR]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --threshold N        Max code LOC for production files (default: 1000)");
+    eprintln!("  --test-threshold N   Max code LOC for test files (default: same as --threshold)");
+    eprintln!("  --dir DIR            Directory to scan (default: crates/)");
+    process::exit(2);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let mut threshold: usize = 1000;
+    let mut test_threshold: Option<usize> = None;
+    let mut scan_dir: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--threshold" => {
+                i += 1;
+                threshold = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("--threshold requires a numeric argument");
+                    usage()
+                });
+            }
+            "--test-threshold" => {
+                i += 1;
+                test_threshold = Some(args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("--test-threshold requires a numeric argument");
+                    usage()
+                }));
+            }
+            "--dir" => {
+                i += 1;
+                scan_dir = Some(PathBuf::from(args.get(i).unwrap_or_else(|| {
+                    eprintln!("--dir requires a path argument");
+                    usage()
+                })));
+            }
+            "-h" | "--help" => usage(),
+            other => {
+                eprintln!("Unknown option: {other}");
+                usage();
+            }
+        }
+        i += 1;
+    }
+
+    let test_threshold = test_threshold.unwrap_or(threshold);
+    let scan_dir = scan_dir.unwrap_or_else(|| cwd.join("crates"));
+
+    let files = collect_rs_files(&scan_dir);
+
+    let mut violations: Vec<String> = Vec::new();
+
+    for file in &files {
+        let rel = file
+            .strip_prefix(&cwd)
+            .unwrap_or(file.as_path())
+            .to_string_lossy()
+            .to_string();
+
+        let (prod_loc, test_loc) = count_code_loc(file);
+
+        if is_test_file(&rel) {
+            let total = prod_loc + test_loc;
+            if total > test_threshold {
+                violations.push(format!("  {total} / {test_threshold}  [test]  {rel}"));
+            }
+        } else {
+            if prod_loc > threshold {
+                violations.push(format!("  {prod_loc} / {threshold}  [src]  {rel}"));
+            }
+            if test_loc > test_threshold {
+                violations.push(format!(
+                    "  {test_loc} / {test_threshold}  [inline-test]  {rel}"
+                ));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        println!(
+            "LOC check passed (threshold: src={threshold}, test={test_threshold})."
+        );
+    } else {
+        println!(
+            "LOC check FAILED — {} file(s) exceed the limit (threshold: src={}, test={}):",
+            violations.len(),
+            threshold,
+            test_threshold
+        );
+        for v in &violations {
+            println!("{v}");
+        }
+        process::exit(1);
     }
 }
 
@@ -359,144 +490,5 @@ mod tests {
     #[test]
     fn is_test_file_nested_tests_dir_in_path() {
         assert!(is_test_file("crates/bar/tests/mod.rs"));
-    }
-}
-
-fn is_test_file(rel: &str) -> bool {
-    rel.contains("/tests/")
-        || rel.ends_with("_test.rs")
-        || {
-            // bare filename starts with test_
-            let fname = rel.rsplit('/').next().unwrap_or(rel);
-            fname.starts_with("test_")
-        }
-}
-
-fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    collect_recursive(dir, &mut files);
-    files.sort();
-    files
-}
-
-fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|e| e.path());
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_recursive(&path, out);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            out.push(path);
-        }
-    }
-}
-
-fn usage() -> ! {
-    eprintln!("Usage: check-loc [--threshold N] [--test-threshold N] [--dir DIR]");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --threshold N        Max code LOC for production files (default: 1000)");
-    eprintln!("  --test-threshold N   Max code LOC for test files (default: same as --threshold)");
-    eprintln!("  --dir DIR            Directory to scan (default: crates/)");
-    process::exit(2);
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let mut threshold: usize = 1000;
-    let mut test_threshold: Option<usize> = None;
-    let mut scan_dir: Option<PathBuf> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--threshold" => {
-                i += 1;
-                threshold = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-                    eprintln!("--threshold requires a numeric argument");
-                    usage()
-                });
-            }
-            "--test-threshold" => {
-                i += 1;
-                test_threshold = Some(args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-                    eprintln!("--test-threshold requires a numeric argument");
-                    usage()
-                }));
-            }
-            "--dir" => {
-                i += 1;
-                scan_dir = Some(PathBuf::from(args.get(i).unwrap_or_else(|| {
-                    eprintln!("--dir requires a path argument");
-                    usage()
-                })));
-            }
-            "-h" | "--help" => usage(),
-            other => {
-                eprintln!("Unknown option: {}", other);
-                usage();
-            }
-        }
-        i += 1;
-    }
-
-    let test_threshold = test_threshold.unwrap_or(threshold);
-    let scan_dir = scan_dir.unwrap_or_else(|| cwd.join("crates"));
-
-    let files = collect_rs_files(&scan_dir);
-
-    let mut violations: Vec<String> = Vec::new();
-
-    for file in &files {
-        let rel = file
-            .strip_prefix(&cwd)
-            .unwrap_or(file.as_path())
-            .to_string_lossy()
-            .to_string();
-
-        let (prod_loc, test_loc) = count_code_loc(file);
-
-        if is_test_file(&rel) {
-            let total = prod_loc + test_loc;
-            if total > test_threshold {
-                violations.push(format!("  {} / {}  [test]  {}", total, test_threshold, rel));
-            }
-        } else {
-            if prod_loc > threshold {
-                violations.push(format!("  {} / {}  [src]  {}", prod_loc, threshold, rel));
-            }
-            if test_loc > test_threshold {
-                violations.push(format!(
-                    "  {} / {}  [inline-test]  {}",
-                    test_loc, test_threshold, rel
-                ));
-            }
-        }
-    }
-
-    if !violations.is_empty() {
-        println!(
-            "LOC check FAILED — {} file(s) exceed the limit (threshold: src={}, test={}):",
-            violations.len(),
-            threshold,
-            test_threshold
-        );
-        for v in &violations {
-            println!("{}", v);
-        }
-        process::exit(1);
-    } else {
-        println!(
-            "LOC check passed (threshold: src={}, test={}).",
-            threshold, test_threshold
-        );
     }
 }
