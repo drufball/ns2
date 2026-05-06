@@ -744,16 +744,14 @@ mod tests {
             (0..100).map(|_| generate_hook_id()).collect();
         assert!(ids.len() > 90);
     }
-}
 
-// ── execute module tests ──────────────────────────────────────────────────────
+    // ── execute module tests ──────────────────────────────────────────────────
 
-#[cfg(test)]
-mod execute_tests {
-    use super::*;
-    use async_trait::async_trait;
-    use chrono::Utc;
-    use std::sync::{Arc, Mutex};
+    mod execute_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
 
     // ── Helper: build an IssueService backed by an in-memory SQLite db ────────
 
@@ -764,7 +762,7 @@ mod execute_tests {
 
     // ── Stub HookStore ────────────────────────────────────────────────────────
 
-    /// Captures all calls to create_execution / update_execution for assertions.
+    /// Captures all calls to `create_execution` / `update_execution` for assertions.
     struct SpyHookStore {
         created: Mutex<Vec<HookExecution>>,
         updated: Mutex<Vec<HookExecution>>,
@@ -1074,6 +1072,7 @@ mod execute_tests {
             "final execution status must be Completed"
         );
         assert_eq!(updated[0].result.as_deref(), Some("comment added"));
+        drop(updated);
     }
 
     #[tokio::test]
@@ -1103,6 +1102,7 @@ mod execute_tests {
             updated[0].result.is_some(),
             "result should contain error message"
         );
+        drop(updated);
     }
 
     #[tokio::test]
@@ -1132,5 +1132,7 @@ mod execute_tests {
             updated[0].completed_at.is_some(),
             "completed_at must be set after run"
         );
+        drop(updated);
     }
+}
 }

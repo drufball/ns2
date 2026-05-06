@@ -1069,7 +1069,6 @@ dependencies = [
  "events",
  "issues",
  "minijinja",
- "mockall",
  "serde",
  "serde_json",
  "tokio",

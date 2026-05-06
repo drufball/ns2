@@ -353,44 +353,10 @@ mod tests {
 
     // ── Route-level integration tests ─────────────────────────────────────────
 
-    /// Builds an in-memory `AppState` wired to a real `EventBus` for route-level tests.
+    /// Builds an in-memory `AppState` for route-level tests.
+    /// Delegates to the shared `test_state()` helper in `crate::tests`.
     async fn make_route_state() -> crate::state::AppState {
-        use std::collections::{HashMap, HashSet};
-        use std::sync::Arc;
-        use async_trait::async_trait;
-
-        struct StubClient;
-        #[async_trait]
-        impl anthropic::AnthropicClient for StubClient {
-            async fn complete(
-                &self,
-                _req: anthropic::MessageRequest,
-            ) -> anthropic::Result<anthropic::MessageResponse> {
-                Ok(anthropic::MessageResponse {
-                    content: vec![types::ContentBlock::Text { text: "stub".into() }],
-                    stop_reason: "end_turn".into(),
-                    input_tokens: 1,
-                    output_tokens: 1,
-                })
-            }
-        }
-
-        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
-        let client = Arc::new(StubClient) as Arc<dyn anthropic::AnthropicClient>;
-        let issue_service =
-            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
-        let event_bus = issue_service.event_bus().clone();
-        crate::state::AppState {
-            db,
-            issue_service,
-            msg_senders: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            spawning: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            client,
-            tools: vec![],
-            model: "claude-opus-4-5".into(),
-            event_bus,
-            hook_store,
-        }
+        crate::tests::test_state().await
     }
 
     /// Helper: collect SSE body chunks with a deadline, returning all raw bytes received.
