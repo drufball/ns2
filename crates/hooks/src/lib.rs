@@ -97,7 +97,7 @@ pub mod evaluate {
         }
     }
 
-    fn glob_match(pattern: &str, text: &str) -> bool {
+    pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
         if pattern == "*" {
             return true;
         }
@@ -499,6 +499,234 @@ mod tests {
         let event_json = serde_json::json!({});
         let rendered = template::render_template("{{ event.missing.field }}", &event_json);
         assert!(rendered.is_empty(), "expected empty, got: {rendered:?}");
+    }
+
+    // ── Op::Contains on arrays ────────────────────────────────────────────────
+
+    #[test]
+    fn field_condition_contains_array_matches() {
+        // blocked_on: vec!["dep-1", "urgent"] — looking for "urgent"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.blocked_on".into(),
+                op: Op::Contains,
+                value: serde_json::json!("urgent"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.blocked_on = vec!["dep-1".into(), "urgent".into()];
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_contains_array_no_match() {
+        // blocked_on: vec!["bug"] — looking for "enhancement"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.blocked_on".into(),
+                op: Op::Contains,
+                value: serde_json::json!("enhancement"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.blocked_on = vec!["bug".into()];
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    // ── Op::Matches (via matches_event) ───────────────────────────────────────
+
+    #[test]
+    fn field_condition_matches_exact() {
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("Test"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_exact_no_match() {
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("notexact"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_prefix_wildcard() {
+        // pattern "Test*" matches "Test" (the issue title)
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("Test*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "Test issue".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_prefix_wildcard_no_match() {
+        // pattern "foo*" does not match "barfoo"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "barfoo".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_suffix_wildcard() {
+        // pattern "*bar" matches "foobar"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foobar".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_suffix_wildcard_no_match() {
+        // pattern "*bar" does not match "foobaz"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foobaz".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_middle_wildcard() {
+        // pattern "foo*bar" matches "foo-baz-bar"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foo-baz-bar".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_middle_wildcard_no_match() {
+        // pattern "foo*bar" does not match "foo-baz-baz"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foo-baz-baz".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_star_matches_anything() {
+        // pattern "*" matches "anything"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "anything".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    // ── glob_match direct tests ───────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_star_matches_anything() {
+        assert!(evaluate::glob_match("*", "anything"));
+        assert!(evaluate::glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_match_prefix_wildcard() {
+        assert!(evaluate::glob_match("foo*", "foobar"));
+        assert!(!evaluate::glob_match("foo*", "barfoo"));
+    }
+
+    #[test]
+    fn glob_match_suffix_wildcard() {
+        assert!(evaluate::glob_match("*bar", "foobar"));
+        assert!(!evaluate::glob_match("*bar", "foobaz"));
+    }
+
+    #[test]
+    fn glob_match_middle_wildcard() {
+        assert!(evaluate::glob_match("foo*bar", "foo-baz-bar"));
+        assert!(!evaluate::glob_match("foo*bar", "foo-baz-baz"));
+    }
+
+    #[test]
+    fn glob_match_exact() {
+        assert!(evaluate::glob_match("exact", "exact"));
+        assert!(!evaluate::glob_match("exact", "notexact"));
     }
 
     // ── Hook ID generation ────────────────────────────────────────────────────
