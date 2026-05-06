@@ -14,9 +14,9 @@ cargo llvm-cov --summary-only
 
 ## Sub tasks and agents
 
-- Break work into sub tasks and use agents to complete each sub task
-- Always run agents one at a time
-- Never use parallel or background agents
+- Break work into sub tasks and use sequential subagents to complete each sub task
+- Always run subagents one at a time
+- Never use parallel or background subagents
 - Complete sub tasks on the same branch/worktree 
 
 ## Finishing work
