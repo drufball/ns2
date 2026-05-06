@@ -9,7 +9,7 @@ use uuid::Uuid;
 /// Returns turns in order, each as `(Role, Vec<ContentBlock>)`.
 /// Turns with mixed roles are grouped by the role stored on each block;
 /// consecutive blocks with the same role are merged into one entry.
-pub(crate) async fn load_history(
+pub async fn load_history(
     db: &Arc<dyn db::Db>,
     session_id: Uuid,
 ) -> crate::Result<Vec<(Role, Vec<ContentBlock>)>> {
@@ -40,7 +40,7 @@ pub(crate) async fn load_history(
 }
 
 /// Persist a user message as a turn+block in the DB and emit events.
-pub(crate) async fn persist_user_message(
+pub async fn persist_user_message(
     db: &Arc<dyn db::Db>,
     session_id: Uuid,
     message: &str,

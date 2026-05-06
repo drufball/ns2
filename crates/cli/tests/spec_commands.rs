@@ -306,6 +306,7 @@ fn spec_verify_updates_existing_timestamp() {
 
 #[test]
 fn spec_verify_preserves_body_and_targets() {
+    use std::io::Write;
     let harness = common::TestHarness::new();
     harness
         .ns2()
@@ -318,7 +319,6 @@ fn spec_verify_preserves_body_and_targets() {
 
     let spec_path = harness.repo_dir.path().join("my.spec.md");
     let mut f = std::fs::OpenOptions::new().append(true).open(&spec_path).unwrap();
-    use std::io::Write;
     writeln!(f, "\n# My Spec\n\nSome body.").unwrap();
 
     harness

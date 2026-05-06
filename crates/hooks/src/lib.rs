@@ -58,7 +58,7 @@ pub struct HookFilter {
     /// All conditions must be true (AND'd).
     #[serde(default)]
     pub conditions: Vec<FieldCondition>,
-    /// Optional JMESPath expression (reserved for future use).
+    /// Optional `JMESPath` expression (reserved for future use).
     pub expression: Option<String>,
 }
 
@@ -70,7 +70,7 @@ pub struct FieldCondition {
     pub value: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     Eq,
@@ -92,7 +92,7 @@ pub struct HookExecution {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
     Pending,
@@ -104,10 +104,10 @@ pub enum ExecutionStatus {
 impl std::fmt::Display for ExecutionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            ExecutionStatus::Pending => "pending",
-            ExecutionStatus::Running => "running",
-            ExecutionStatus::Completed => "completed",
-            ExecutionStatus::Failed => "failed",
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
         };
         write!(f, "{s}")
     }
@@ -133,6 +133,7 @@ pub mod evaluate {
     use super::{FieldCondition, Hook, HookFilter, HookSource, Op};
 
     /// Map a `SystemEvent` to its canonical event-type string(s).
+    #[must_use] 
     pub fn event_type_strings(event: &SystemEvent) -> Vec<&'static str> {
         match event {
             SystemEvent::Issue(IssueEvent::Created(_)) => vec!["issue.created"],
@@ -142,18 +143,18 @@ pub mod evaluate {
             SystemEvent::Session { event: SessionEvent::TurnDone { .. }, .. } => vec!["session.turn_done"],
             SystemEvent::Session { event: SessionEvent::Error { .. }, .. } => vec!["session.error"],
             SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. } => vec!["session.turn_started"],
-            SystemEvent::Session { .. } => vec![],
-            SystemEvent::External { .. } => vec![],
-            SystemEvent::TimerFired { .. } => vec![],
+            SystemEvent::Session { .. }
+            | SystemEvent::External { .. }
+            | SystemEvent::TimerFired { .. } => vec![],
         }
     }
 
     /// Returns `true` when `event` should trigger the given `hook`.
+    #[must_use] 
     pub fn matches_event(hook: &Hook, event: &SystemEvent) -> bool {
         // 1. Check source: only Internal hooks are matched against live events.
-        let event_types = match &hook.source {
-            HookSource::Internal { event_types } => event_types,
-            _ => return false,
+        let HookSource::Internal { event_types } = &hook.source else {
+            return false;
         };
 
         // Wildcard "*" matches everything; otherwise check the event type strings.
@@ -242,12 +243,10 @@ pub mod evaluate {
                 remaining = &remaining[part.len()..];
             } else if i == parts.len() - 1 {
                 return remaining.ends_with(part);
+            } else if let Some(pos) = remaining.find(part) {
+                remaining = &remaining[pos + part.len()..];
             } else {
-                if let Some(pos) = remaining.find(part) {
-                    remaining = &remaining[pos + part.len()..];
-                } else {
-                    return false;
-                }
+                return false;
             }
         }
         true
@@ -389,16 +388,18 @@ pub mod store {
     }
 
     impl SqliteHookStore {
-        pub fn new(pool: SqlitePool) -> Self {
+        #[must_use] 
+        pub const fn new(pool: SqlitePool) -> Self {
             Self { pool }
         }
 
-        pub fn pool(&self) -> &SqlitePool {
+        #[must_use] 
+        pub const fn pool(&self) -> &SqlitePool {
             &self.pool
         }
     }
 
-    fn source_type_str(source: &HookSource) -> &'static str {
+    const fn source_type_str(source: &HookSource) -> &'static str {
         match source {
             HookSource::Internal { .. } => "internal",
             HookSource::External { .. } => "external",
@@ -406,7 +407,7 @@ pub mod store {
         }
     }
 
-    fn action_type_str(action: &HookAction) -> &'static str {
+    const fn action_type_str(action: &HookAction) -> &'static str {
         match action {
             HookAction::SendMessage { .. } => "send_message",
             HookAction::CreateIssue { .. } => "create_issue",
@@ -505,7 +506,7 @@ pub mod store {
             .bind(&filter_json)
             .bind(action_type_str(&hook.action))
             .bind(&action_json)
-            .bind(if hook.enabled { 1i64 } else { 0i64 })
+            .bind(i64::from(hook.enabled))
             .bind(&hook.created_by)
             .bind(hook.created_at.to_rfc3339())
             .bind(hook.updated_at.to_rfc3339())
@@ -533,7 +534,7 @@ pub mod store {
                         "SELECT id, name, source_type, source, filter, action_type, action, enabled, created_by, created_at, updated_at \
                          FROM hooks WHERE enabled = ? ORDER BY created_at ASC"
                     )
-                    .bind(if en { 1i64 } else { 0i64 })
+                    .bind(i64::from(en))
                     .fetch_all(&self.pool)
                     .await?
                 }
@@ -551,7 +552,7 @@ pub mod store {
                         "SELECT id, name, source_type, source, filter, action_type, action, enabled, created_by, created_at, updated_at \
                          FROM hooks WHERE enabled = ? AND source_type = ? ORDER BY created_at ASC"
                     )
-                    .bind(if en { 1i64 } else { 0i64 })
+                    .bind(i64::from(en))
                     .bind(st)
                     .fetch_all(&self.pool)
                     .await?
@@ -593,7 +594,7 @@ pub mod store {
             .bind(&filter_json)
             .bind(action_type_str(&hook.action))
             .bind(&action_json)
-            .bind(if hook.enabled { 1i64 } else { 0i64 })
+            .bind(i64::from(hook.enabled))
             .bind(&hook.created_by)
             .bind(hook.updated_at.to_rfc3339())
             .bind(&hook.id)
@@ -664,7 +665,7 @@ pub mod store {
                  FROM hook_executions WHERE hook_id = ? ORDER BY triggered_at DESC LIMIT ?"
             )
             .bind(hook_id)
-            .bind(limit as i64)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
             .fetch_all(&self.pool)
             .await?;
             rows.iter().map(parse_execution_row).collect()
@@ -674,6 +675,7 @@ pub mod store {
 
 // ── Hook ID generation ────────────────────────────────────────────────────────
 
+#[must_use] 
 pub fn generate_hook_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let id = uuid::Uuid::new_v4();

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use types::{Issue, SessionStatus, ContentBlock, IssueStatus};
 use events::{IssueEvent, SessionEvent};
@@ -6,15 +7,15 @@ use events::{IssueEvent, SessionEvent};
 // Spinner / animated progress helpers
 
 /// Braille spinner frames for animated "running" indicator.
-pub(crate) const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Return the spinner character for the given tick index.
-pub(crate) fn spinner_char(tick: usize) -> char {
+pub fn spinner_char(tick: usize) -> char {
     SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
 }
 
 /// Truncate a string to at most `max_chars` Unicode characters.
-pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
@@ -26,7 +27,7 @@ pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
 // ────────────────────────────────────────────────────────────────────────────
 // Issue table formatting
 
-pub(crate) fn format_issue_row(issue: &Issue) -> String {
+pub fn format_issue_row(issue: &Issue) -> String {
     format!(
         "{:<6}  {:<30}  {:<10}  {:<12}  {:<25}  {}",
         issue.id,
@@ -46,37 +47,38 @@ pub(crate) fn format_issue_row(issue: &Issue) -> String {
     )
 }
 
-pub(crate) fn print_issue_row(issue: &Issue) {
+pub fn print_issue_row(issue: &Issue) {
     println!("{}", format_issue_row(issue));
 }
 
-pub(crate) fn format_issue_show(issue: &Issue) -> String {
+pub fn format_issue_show(issue: &Issue) -> String {
     let mut out = String::new();
-    out.push_str(&format!("id:         {}\n", issue.id));
-    out.push_str(&format!("title:      {}\n", issue.title));
-    out.push_str(&format!("status:     {}\n", issue.status));
-    out.push_str(&format!("assignee:   {}\n", issue.assignee.as_deref().unwrap_or("-")));
-    out.push_str(&format!("branch:     {}\n", issue.branch));
+    writeln!(out, "id:         {}", issue.id).ok();
+    writeln!(out, "title:      {}", issue.title).ok();
+    writeln!(out, "status:     {}", issue.status).ok();
+    writeln!(out, "assignee:   {}", issue.assignee.as_deref().unwrap_or("-")).ok();
+    writeln!(out, "branch:     {}", issue.branch).ok();
     if let Some(pid) = &issue.parent_id {
-        out.push_str(&format!("parent:     {pid}\n"));
+        writeln!(out, "parent:     {pid}").ok();
     }
     if !issue.blocked_on.is_empty() {
-        out.push_str(&format!("blocked-on: {}\n", issue.blocked_on.join(", ")));
+        writeln!(out, "blocked-on: {}", issue.blocked_on.join(", ")).ok();
     }
-    out.push_str(&format!("created:    {}\n", issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")));
-    out.push_str(&format!("updated:    {}\n", issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")));
+    writeln!(out, "created:    {}", issue.created_at.format("%Y-%m-%d %H:%M:%S UTC")).ok();
+    writeln!(out, "updated:    {}", issue.updated_at.format("%Y-%m-%d %H:%M:%S UTC")).ok();
     out.push_str("\nbody:\n");
     out.push_str(&issue.body);
     out.push('\n');
     if !issue.comments.is_empty() {
         out.push_str("\ncomments:\n");
         for comment in &issue.comments {
-            out.push_str(&format!(
-                "  [{}] {}: {}\n",
+            writeln!(
+                out,
+                "  [{}] {}: {}",
                 comment.created_at.format("%Y-%m-%d %H:%M UTC"),
                 comment.author,
                 comment.body,
-            ));
+            ).ok();
         }
     }
     out
@@ -85,7 +87,7 @@ pub(crate) fn format_issue_show(issue: &Issue) -> String {
 // ────────────────────────────────────────────────────────────────────────────
 // Session event formatting
 
-pub(crate) fn format_session_event(event: &SessionEvent) -> Option<String> {
+pub fn format_session_event(event: &SessionEvent) -> Option<String> {
     use events::SessionEvent::*;
     match event {
         TurnStarted { turn } => Some(format!("[turn {}]\n", turn.id)),
@@ -96,24 +98,22 @@ pub(crate) fn format_session_event(event: &SessionEvent) -> Option<String> {
         ContentBlockDelta {
             delta: types::ContentBlockDelta::InputJsonDelta { .. },
             ..
-        } => None,
+        } | TurnDone { .. } | ToolUseStart { .. } | ToolUseDone { .. } => None,
         ContentBlockDone { block, .. } => match block {
             ContentBlock::Text { .. } => Some("\n".to_string()),
             ContentBlock::ToolUse { name, input, .. } => {
-                Some(format!("[tool: {}({})]\n", name, input))
+                Some(format!("[tool: {name}({input})]\n"))
             }
             ContentBlock::ToolResult { content, .. } => {
-                Some(format!("[result: {}]\n", content))
+                Some(format!("[result: {content}]\n"))
             }
         },
-        TurnDone { .. } => None,
         Done => Some("[done]\n".to_string()),
         Error { message } => Some(format!("[error] {message}\n")),
-        ToolUseStart { .. } | ToolUseDone { .. } => None,
     }
 }
 
-pub(crate) fn print_session_event(event: &SessionEvent, to_stderr: bool) {
+pub fn print_session_event(event: &SessionEvent, to_stderr: bool) {
     use std::io::Write;
     use events::SessionEvent::*;
     match event {
@@ -156,13 +156,13 @@ pub(crate) fn print_session_event(event: &SessionEvent, to_stderr: bool) {
 /// - `[created]        open  – <title>`
 /// - `[status_changed] <from> → <to>`
 /// - `[comment_added]  <author>: "<body>"`
-pub(crate) fn format_issue_event(event: &IssueEvent) -> String {
+pub fn format_issue_event(event: &IssueEvent) -> String {
     match event {
         IssueEvent::Created(issue) => {
             format!("[created]        {}  – {}", issue.status, issue.title)
         }
         IssueEvent::StatusChanged { from, to, .. } => {
-            format!("[status_changed] {} → {}", from, to)
+            format!("[status_changed] {from} → {to}")
         }
         IssueEvent::CommentAdded { comment, .. } => {
             format!("[comment_added]  {}: \"{}\"", comment.author, comment.body)
@@ -173,7 +173,7 @@ pub(crate) fn format_issue_event(event: &IssueEvent) -> String {
 // ────────────────────────────────────────────────────────────────────────────
 // SSE frame parsing
 
-pub(crate) fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<String> {
+pub fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<String> {
     buffer.push_str(new_data);
     let mut frames = Vec::new();
     while let Some(pos) = buffer.find("\n\n") {
@@ -187,18 +187,18 @@ pub(crate) fn parse_sse_frames(buffer: &mut String, new_data: &str) -> Vec<Strin
 // ────────────────────────────────────────────────────────────────────────────
 // Spec sync formatting
 
-pub(crate) fn format_sync_error(spec_path: &str, stale: &[PathBuf]) -> String {
+pub fn format_sync_error(spec_path: &str, stale: &[PathBuf]) -> String {
     let mut out = format!("[error] spec {spec_path} has stale files:\n");
     for f in stale {
-        out.push_str(&format!("  {}\n", f.display()));
+        writeln!(out, "  {}", f.display()).ok();
     }
     out
 }
 
-pub(crate) fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
+pub fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String {
     let mut out = format!("[warning] spec {spec_path} has stale files:\n");
     for f in stale {
-        out.push_str(&format!("  {}\n", f.display()));
+        writeln!(out, "  {}", f.display()).ok();
     }
     out
 }
@@ -207,14 +207,14 @@ pub(crate) fn format_sync_warning(spec_path: &str, stale: &[PathBuf]) -> String 
 // Issue tree rendering
 
 /// A node in the issue tree for rendering.
-pub(crate) struct IssueTreeNode {
+pub struct IssueTreeNode {
     pub(crate) issue: types::Issue,
     pub(crate) snippet: Option<String>,
-    pub(crate) children: Vec<IssueTreeNode>,
+    pub(crate) children: Vec<Self>,
 }
 
 /// Return the symbol and status label for an issue status.
-pub(crate) fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'static str) {
+pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'static str) {
     match status {
         IssueStatus::Running => (spinner_char(tick).to_string(), "running"),
         IssueStatus::Completed => ("✔".to_string(), "completed"),
@@ -229,14 +229,14 @@ pub(crate) fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String,
 /// - `prefix` is the indentation/connector string (e.g., "├── ", "└── ", "│   ├── ").
 /// - `tick` is the spinner frame counter.
 /// - `is_root` controls whether to include the snippet.
-pub(crate) fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, is_root: bool) -> String {
+pub fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, is_root: bool) -> String {
     let (sym, status_label) = issue_status_symbol(&node.issue.status, tick);
     let id = &node.issue.id;
 
     let title_part = truncate_str(&node.issue.title, 30);
 
     if is_root {
-        let snippet_part = if let Some(ref snippet) = node.snippet {
+        let snippet_part = node.snippet.as_ref().map_or_else(String::new, |snippet| {
             // Sanitize: replace newlines/carriage-returns with spaces so the
             // line-count assumption used for ANSI cursor-up redraw is not broken.
             let clean: String = snippet.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
@@ -246,9 +246,7 @@ pub(crate) fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, 
             } else {
                 format!(": {s}")
             }
-        } else {
-            String::new()
-        };
+        });
         format!("{prefix}[{id}] {title_part}{snippet_part}  {sym} {status_label}")
     } else {
         format!("{prefix}[{id}] {title_part}  {sym} {status_label}")
@@ -256,12 +254,12 @@ pub(crate) fn render_tree_line(node: &IssueTreeNode, prefix: &str, tick: usize, 
 }
 
 /// Render the full issue tree to a vector of lines.
-pub(crate) fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
+pub fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for (ri, root) in roots.iter().enumerate() {
         let is_last_root = ri + 1 == roots.len();
         let root_prefix = if roots.len() > 1 {
-            if !is_last_root { "├── " } else { "└── " }
+            if is_last_root { "└── " } else { "├── " }
         } else {
             ""
         };
@@ -274,7 +272,7 @@ pub(crate) fn render_issue_tree(roots: &[IssueTreeNode], tick: usize) -> Vec<Str
         //   └── Root B          <- root_prefix = "└── "
         //       └── Child 3     <- parent_indent = "    "
         let child_indent = if roots.len() > 1 {
-            if !is_last_root { "│   " } else { "    " }
+            if is_last_root { "    " } else { "│   " }
         } else {
             ""
         };
@@ -305,7 +303,7 @@ fn render_children(children: &[IssueTreeNode], parent_indent: &str, tick: usize,
 
 /// Return `(symbol, label)` for the given session status at a tick.
 /// Running sessions get an animated braille spinner; terminal sessions get a static symbol.
-pub(crate) fn session_status_symbol(status: &SessionStatus, tick: usize) -> (String, &'static str) {
+pub fn session_status_symbol(status: &SessionStatus, tick: usize) -> (String, &'static str) {
     match status {
         SessionStatus::Running => (spinner_char(tick).to_string(), "running"),
         SessionStatus::Created => (spinner_char(tick).to_string(), "created"),
@@ -322,7 +320,7 @@ pub(crate) fn session_status_symbol(status: &SessionStatus, tick: usize) -> (Str
 /// - `id` is the full session UUID string; the first 8 chars are shown.
 /// - `name` is the session name (empty string renders as `-`).
 /// - `snippet` is an optional last-content text snippet (truncated to 40 chars).
-pub(crate) fn render_session_line(
+pub fn render_session_line(
     id: &str,
     name: &str,
     snippet: Option<&str>,

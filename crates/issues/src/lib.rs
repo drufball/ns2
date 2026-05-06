@@ -1,9 +1,11 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 use chrono::Utc;
 use events::{EventBus, IssueEvent, SystemEvent};
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
 
+#[must_use] 
 pub fn slugify(title: &str) -> String {
     let lower = title.to_lowercase();
     let mut result = String::new();
@@ -20,6 +22,7 @@ pub fn slugify(title: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
+#[must_use] 
 pub fn generate_issue_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let id = Uuid::new_v4();
@@ -84,14 +87,19 @@ impl IssueService {
         Self { db, event_bus }
     }
 
+    #[must_use] 
     pub fn db(&self) -> &Arc<dyn db::Db> {
         &self.db
     }
 
-    pub fn event_bus(&self) -> &EventBus {
+    #[must_use] 
+    pub const fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
     pub async fn create_issue(&self, input: CreateIssueInput) -> Result<Issue> {
         let now = Utc::now();
         let id = generate_issue_id();
@@ -124,6 +132,9 @@ impl IssueService {
         Ok(issue)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found or the database write fails.
     pub async fn edit_issue(&self, id: String, input: EditIssueInput) -> Result<Issue> {
         let mut issue = self.db.get_issue(id).await?;
         if let Some(title) = input.title {
@@ -149,6 +160,9 @@ impl IssueService {
         Ok(issue)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found or the database write fails.
     pub async fn add_comment(&self, id: String, author: String, body: String) -> Result<Issue> {
         let mut issue = self.db.get_issue(id).await?;
         let comment = IssueComment {
@@ -166,6 +180,9 @@ impl IssueService {
         Ok(issue)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found or the database write fails.
     pub async fn finish_issue(&self, id: &str, summary: Option<String>) -> Result<()> {
         let mut issue = self.db.get_issue(id.to_string()).await?;
         let from = issue.status.clone();
@@ -195,6 +212,9 @@ impl IssueService {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found or the database write fails.
     pub async fn fail_issue(&self, id: &str, error_message: String) -> Result<()> {
         let mut issue = self.db.get_issue(id.to_string()).await?;
         let from = issue.status.clone();
@@ -219,6 +239,10 @@ impl IssueService {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found, has no assignee, is not open,
+    /// or a database write fails.
     pub async fn start_issue(&self, id: String) -> Result<StartIssueOutcome> {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
@@ -256,18 +280,23 @@ impl IssueService {
         if !issue.comments.is_empty() {
             initial_message.push_str("\n\n---\n# Issue History\n");
             for comment in &issue.comments {
-                initial_message.push_str(&format!(
-                    "\n**{}** ({}): {}\n",
+                let _ = writeln!(
+                    initial_message,
+                    "\n**{}** ({}): {}",
                     comment.author,
                     comment.created_at.format("%Y-%m-%d %H:%M UTC"),
                     comment.body
-                ));
+                );
             }
         }
 
         Ok(StartIssueOutcome { issue, session, initial_message })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found, is already completed or failed,
+    /// or a database write fails.
     pub async fn complete_issue(&self, id: String, comment: String) -> Result<Issue> {
         let mut issue = self.db.get_issue(id.clone()).await?;
         if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
@@ -295,6 +324,10 @@ impl IssueService {
         Ok(issue)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found, is not open or running,
+    /// or a database write fails.
     pub async fn cancel_issue(&self, id: String) -> Result<Issue> {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
@@ -330,6 +363,10 @@ impl IssueService {
         Ok(issue)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found, is not failed/completed/cancelled,
+    /// or a database write fails.
     pub async fn reopen_issue(&self, id: String, comment: Option<String>) -> Result<Issue> {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
@@ -433,6 +470,7 @@ impl IssueService {
 }
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -1158,16 +1196,16 @@ mod tests {
 
     // --- event emission ---
 
-    fn make_service_with_bus(db: Arc<dyn db::Db>) -> (IssueService, events::EventBus) {
+    fn make_service_with_bus(db: &Arc<dyn db::Db>) -> (IssueService, events::EventBus) {
         let bus = events::EventBus::new(32);
-        let svc = IssueService::with_event_bus(Arc::clone(&db), bus.clone());
+        let svc = IssueService::with_event_bus(Arc::clone(db), bus.clone());
         (svc, bus)
     }
 
     #[tokio::test]
     async fn create_issue_emits_created_event() {
         let db = Arc::new(MemoryDb::new());
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.create_issue(CreateIssueInput {
@@ -1192,7 +1230,7 @@ mod tests {
         let issue = open_issue("ab12");
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.start_issue("ab12".into()).await.unwrap();
@@ -1218,7 +1256,7 @@ mod tests {
         issue.status = IssueStatus::Running;
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.complete_issue("ab12".into(), "All done".into()).await.unwrap();
@@ -1248,7 +1286,7 @@ mod tests {
         let issue = open_issue("ab12");
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.add_comment("ab12".into(), "tester".into(), "Great issue".into()).await.unwrap();
@@ -1271,7 +1309,7 @@ mod tests {
         let issue = open_issue("ab12");
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.cancel_issue("ab12".into()).await.unwrap();
@@ -1299,7 +1337,7 @@ mod tests {
         issue.status = IssueStatus::Failed;
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.reopen_issue("ab12".into(), None).await.unwrap();
@@ -1325,7 +1363,7 @@ mod tests {
         issue.status = IssueStatus::Running;
         db.create_issue(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(Arc::clone(&db) as Arc<dyn db::Db>);
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
         svc.fail_issue("ab12", "timeout".into()).await.unwrap();

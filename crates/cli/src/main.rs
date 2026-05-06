@@ -386,6 +386,7 @@ fn load_dotenv() {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     load_dotenv();
     let cli = Cli::parse();
@@ -432,13 +433,13 @@ async fn main() {
         },
         Command::Spec { action } => match action {
             SpecAction::New { path, targets, severity } => {
-                commands::spec::run_new(path, targets, severity);
+                commands::spec::run_new(path, targets, &severity);
             }
             SpecAction::Sync { path, error_on_warnings } => {
                 commands::spec::run_sync(path, error_on_warnings);
             }
             SpecAction::Verify { paths } => {
-                commands::spec::run_verify(paths);
+                commands::spec::run_verify(&paths);
             }
         },
         Command::Issue { action } => match action {
@@ -1800,14 +1801,12 @@ mod tests {
         // The output line must NOT contain a literal newline character
         assert!(
             !line.contains('\n'),
-            "rendered tree line must not contain literal newline, got: {:?}",
-            line
+            "rendered tree line must not contain literal newline, got: {line:?}"
         );
         // The snippet content should appear with a space substituted for the newline
         assert!(
             line.contains("line one line two"),
-            "newline in snippet should be replaced with space, got: {:?}",
-            line
+            "newline in snippet should be replaced with space, got: {line:?}"
         );
     }
 
@@ -1858,8 +1857,7 @@ mod tests {
         );
         assert!(
             !line.contains('\r'),
-            "render_session_line must not embed carriage return in output, got: {:?}",
-            line
+            "render_session_line must not embed carriage return in output, got: {line:?}"
         );
         assert!(
             !line.contains('\n'),
@@ -1936,7 +1934,7 @@ mod tests {
         write_temp_spec(git_root, "c.spec.md");
 
         let paths: Vec<String> =
-            ["a.spec.md", "b.spec.md", "c.spec.md"].iter().map(|s| s.to_string()).collect();
+            ["a.spec.md", "b.spec.md", "c.spec.md"].iter().map(|s| (*s).to_string()).collect();
         let result = verify_spec_paths(git_root, &paths);
 
         assert!(!result.any_failed);
@@ -1963,7 +1961,7 @@ mod tests {
 
         let paths: Vec<String> = ["good1.spec.md", "missing.spec.md", "good2.spec.md"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect();
         let result = verify_spec_paths(git_root, &paths);
 

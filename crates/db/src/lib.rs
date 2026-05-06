@@ -71,14 +71,18 @@ pub struct SqliteDb {
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 impl SqliteDb {
-    pub fn from_pool(pool: SqlitePool) -> Self {
-        SqliteDb { pool }
+    #[must_use] 
+    pub const fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the database connection or migration fails.
     pub async fn connect(url: &str) -> Result<Self> {
         let pool = SqlitePool::connect(url).await?;
         MIGRATOR.run(&pool).await?;
-        Ok(SqliteDb { pool })
+        Ok(Self { pool })
     }
 }
 
@@ -134,7 +138,7 @@ fn parse_turn_row(row: &sqlx::sqlite::SqliteRow) -> Result<Turn> {
     })
 }
 
-fn role_to_str(role: &Role) -> &'static str {
+const fn role_to_str(role: &Role) -> &'static str {
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -149,7 +153,7 @@ fn role_from_str(s: &str) -> Result<Role> {
     }
 }
 
-fn timestamp(dt: &DateTime<Utc>) -> i64 {
+const fn timestamp(dt: &DateTime<Utc>) -> i64 {
     dt.timestamp()
 }
 
@@ -381,7 +385,7 @@ impl IssueDb for SqliteDb {
         .bind(issue.status.to_string())
         .bind(&issue.branch)
         .bind(&issue.assignee)
-        .bind(issue.session_id.as_ref().map(|id| id.to_string()))
+        .bind(issue.session_id.as_ref().map(std::string::ToString::to_string))
         .bind(&issue.parent_id)
         .bind(&blocked_on)
         .bind(&comments)
@@ -449,7 +453,7 @@ impl IssueDb for SqliteDb {
         .bind(issue.status.to_string())
         .bind(&issue.branch)
         .bind(&issue.assignee)
-        .bind(issue.session_id.as_ref().map(|id| id.to_string()))
+        .bind(issue.session_id.as_ref().map(std::string::ToString::to_string))
         .bind(&issue.parent_id)
         .bind(&blocked_on)
         .bind(&comments)

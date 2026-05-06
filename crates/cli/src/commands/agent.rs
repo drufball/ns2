@@ -1,4 +1,4 @@
-pub(crate) fn run_list() {
+pub fn run_list() {
     let dir = agents::agents_dir().unwrap_or_else(|| {
         eprintln!("Error: not inside a git repository");
         std::process::exit(1);
@@ -18,7 +18,7 @@ pub(crate) fn run_list() {
     }
 }
 
-pub(crate) fn run_new(name: Option<String>, description: Option<String>, body: Option<String>) {
+pub fn run_new(name: Option<String>, description: Option<String>, body: Option<String>) {
     let name = name.unwrap_or_else(|| {
         eprintln!("Error: --name is required");
         std::process::exit(1);
@@ -55,7 +55,7 @@ pub(crate) fn run_new(name: Option<String>, description: Option<String>, body: O
     eprintln!("Created agent '{name}' at {}", path.display());
 }
 
-pub(crate) fn run_edit(name: Option<String>, description: Option<String>, body: Option<String>) {
+pub fn run_edit(name: Option<String>, description: Option<String>, body: Option<String>) {
     let name = name.unwrap_or_else(|| {
         eprintln!("Error: --name is required");
         std::process::exit(1);

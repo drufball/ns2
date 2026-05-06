@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
     Open,
@@ -15,11 +15,11 @@ pub enum IssueStatus {
 impl std::fmt::Display for IssueStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IssueStatus::Open => write!(f, "open"),
-            IssueStatus::Running => write!(f, "running"),
-            IssueStatus::Completed => write!(f, "completed"),
-            IssueStatus::Failed => write!(f, "failed"),
-            IssueStatus::Cancelled => write!(f, "cancelled"),
+            Self::Open => write!(f, "open"),
+            Self::Running => write!(f, "running"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -28,11 +28,11 @@ impl std::str::FromStr for IssueStatus {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, String> {
         match s {
-            "open" => Ok(IssueStatus::Open),
-            "running" => Ok(IssueStatus::Running),
-            "completed" => Ok(IssueStatus::Completed),
-            "failed" => Ok(IssueStatus::Failed),
-            "cancelled" => Ok(IssueStatus::Cancelled),
+            "open" => Ok(Self::Open),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("unknown issue status: {s}")),
         }
     }
@@ -61,7 +61,7 @@ pub struct Issue {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Created,
@@ -74,11 +74,11 @@ pub enum SessionStatus {
 impl std::fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionStatus::Created => write!(f, "created"),
-            SessionStatus::Running => write!(f, "running"),
-            SessionStatus::Completed => write!(f, "completed"),
-            SessionStatus::Failed => write!(f, "failed"),
-            SessionStatus::Cancelled => write!(f, "cancelled"),
+            Self::Created => write!(f, "created"),
+            Self::Running => write!(f, "running"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -87,11 +87,11 @@ impl std::str::FromStr for SessionStatus {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, String> {
         match s {
-            "created" => Ok(SessionStatus::Created),
-            "running" => Ok(SessionStatus::Running),
-            "completed" => Ok(SessionStatus::Completed),
-            "failed" => Ok(SessionStatus::Failed),
-            "cancelled" => Ok(SessionStatus::Cancelled),
+            "created" => Ok(Self::Created),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("unknown status: {s}")),
         }
     }
@@ -107,7 +107,7 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     User,

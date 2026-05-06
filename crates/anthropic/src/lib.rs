@@ -43,6 +43,7 @@ pub struct Client {
 }
 
 impl Client {
+    #[must_use] 
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -51,6 +52,7 @@ impl Client {
         }
     }
 
+    #[must_use] 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
         Self {
             api_key,
@@ -182,9 +184,9 @@ struct BlockAssembler {
 impl BlockAssembler {
     fn new() -> Self {
         Self {
-            texts: Default::default(),
-            tool_uses: Default::default(),
-            finished_tool_uses: Default::default(),
+            texts: HashMap::default(),
+            tool_uses: HashMap::default(),
+            finished_tool_uses: Vec::default(),
             input_tokens: 0,
             output_tokens: 0,
             stop_reason: "end_turn".into(),
@@ -202,7 +204,6 @@ impl BlockAssembler {
             } => {
                 self.tool_uses.insert(index, ToolUseAccumulator { id, name, partial_json: String::new() });
             }
-            ApiEvent::ContentBlockStart { .. } => {}
             ApiEvent::ContentBlockDelta {
                 index,
                 delta: ApiDelta::TextDelta { text },
@@ -262,6 +263,7 @@ impl BlockAssembler {
 #[async_trait::async_trait]
 impl AnthropicClient for Client {
     async fn complete(&self, request: MessageRequest) -> Result<MessageResponse> {
+        use futures::StreamExt;
         let messages: Vec<ApiRequestMessage> = request
             .messages
             .into_iter()
@@ -317,7 +319,6 @@ impl AnthropicClient for Client {
         }
 
         // Parse SSE stream
-        use futures::StreamExt;
         let mut stream = resp.bytes_stream();
         let mut assembler = BlockAssembler::new();
         let mut buffer = String::new();

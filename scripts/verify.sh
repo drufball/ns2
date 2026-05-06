@@ -5,7 +5,7 @@ WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$WORKSPACE_ROOT"
 
 echo "=== Clippy ==="
-cargo clippy -- -D warnings
+cargo clippy --tests -- -D warnings -W clippy::pedantic -W clippy::nursery
 
 echo "=== Coverage (includes tests) ==="
 # Build --ignore-filename-regex flags from the [[file_ignore]] table in

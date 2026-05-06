@@ -9,7 +9,8 @@ use crate::state::AppState;
 ///
 /// All events are published to the global `EventBus` wrapped in
 /// `SystemEvent::Session { session_id, event }`.
-pub(crate) fn spawn_harness_sync(
+#[allow(clippy::too_many_lines)]
+pub fn spawn_harness_sync(
     state: &AppState,
     session: types::Session,
     issue_id: Option<String>,
@@ -21,7 +22,7 @@ pub(crate) fn spawn_harness_sync(
     let db = Arc::clone(&state.db);
     let issue_service = state.issue_service.clone();
     let client = Arc::clone(&state.client);
-    let session_clone = session.clone();
+    let session_clone = session;
     let msg_tx_ret = msg_tx.clone();
     let tools = state.tools.clone();
     let model = state.model.clone();
@@ -97,7 +98,7 @@ pub(crate) fn spawn_harness_sync(
     // Forward per-session broadcast → global EventBus.
     let bus_forwarder = {
         let mut rx = event_tx.subscribe();
-        let bus = event_bus.clone();
+        let bus = event_bus;
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -122,9 +123,8 @@ pub(crate) fn spawn_harness_sync(
 
     tokio::spawn(async move {
         {
-            let mut smap = msg_senders_map.lock().await;
+            msg_senders_map.lock().await.insert(session_id, msg_tx);
             let mut spawning = spawning_set.lock().await;
-            smap.insert(session_id, msg_tx);
             spawning.remove(&session_id);
         }
 

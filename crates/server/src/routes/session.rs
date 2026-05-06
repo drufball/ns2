@@ -21,32 +21,32 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ListSessionsQuery {
+pub struct ListSessionsQuery {
     pub(crate) status: Option<String>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct HealthResponse {
+pub struct HealthResponse {
     status: &'static str,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SendMessageRequest {
+pub struct SendMessageRequest {
     pub(crate) message: String,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct UpdateSessionStatusRequest {
+pub struct UpdateSessionStatusRequest {
     pub(crate) status: String,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
-pub(crate) async fn health() -> Json<HealthResponse> {
+pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-pub(crate) async fn create_session(
+pub async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> std::result::Result<(StatusCode, Json<Session>), Error> {
@@ -54,8 +54,7 @@ pub(crate) async fn create_session(
     let has_message = req
         .initial_message
         .as_deref()
-        .map(|m| !m.is_empty())
-        .unwrap_or(false);
+        .is_some_and(|m| !m.is_empty());
 
     let initial_message = req.initial_message.unwrap_or_default();
 
@@ -77,7 +76,7 @@ pub(crate) async fn create_session(
     Ok((StatusCode::CREATED, Json(session)))
 }
 
-pub(crate) async fn list_sessions(
+pub async fn list_sessions(
     State(state): State<AppState>,
     Query(params): Query<ListSessionsQuery>,
 ) -> std::result::Result<Json<Vec<Session>>, Error> {
@@ -90,7 +89,7 @@ pub(crate) async fn list_sessions(
     Ok(Json(sessions))
 }
 
-pub(crate) async fn get_session(
+pub async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> std::result::Result<Json<Session>, Error> {
@@ -101,7 +100,7 @@ pub(crate) async fn get_session(
 /// Serialise a `SessionEvent` into an SSE `Event`.
 /// Used by tests in `server/src/lib.rs` that verify event serialisation.
 #[cfg(test)]
-pub(crate) fn event_from(ev: &events::SessionEvent) -> axum::response::sse::Event {
+pub fn event_from(ev: &events::SessionEvent) -> axum::response::sse::Event {
     axum::response::sse::Event::default().data(serde_json::to_string(ev).unwrap_or_default())
 }
 
@@ -111,7 +110,7 @@ pub(crate) fn event_from(ev: &events::SessionEvent) -> axum::response::sse::Even
 /// - If the session exists in DB but has no active harness (`created` status): spawn a
 ///   new harness and send the message to it.
 /// - If the session does not exist: 404.
-pub(crate) async fn send_message(
+pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<SendMessageRequest>,
@@ -191,7 +190,7 @@ pub(crate) async fn send_message(
     }
 }
 
-pub(crate) async fn update_session_status(
+pub async fn update_session_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateSessionStatusRequest>,
@@ -207,10 +206,10 @@ pub(crate) async fn update_session_status(
 
 /// POST /sessions/:id/cancel — cancel a running or created session.
 ///
-/// Drops the mpsc sender so the harness exits cleanly on its next recv() call,
+/// Drops the mpsc sender so the harness exits cleanly on its next `recv()` call,
 /// marks the session `cancelled` in the DB, and marks any linked issue `failed`
 /// (the issue wasn't explicitly cancelled — its session was, so the issue impl failed).
-pub(crate) async fn cancel_session(
+pub async fn cancel_session(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> std::result::Result<Json<Session>, Error> {
@@ -257,9 +256,9 @@ pub(crate) async fn cancel_session(
     Ok(Json(updated))
 }
 
-/// GET /sessions/:id/last_text — return the last assistant text content block for a session.
+/// GET /`sessions/:id/last_text` — return the last assistant text content block for a session.
 /// Returns JSON: {"text": "<content>"} or {"text": null} if no text content found.
-pub(crate) async fn session_last_text(
+pub async fn session_last_text(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> std::result::Result<Json<serde_json::Value>, Error> {

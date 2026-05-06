@@ -16,7 +16,7 @@ use crate::state::AppState;
 // ── Request / response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct CreateHookRequest {
+pub struct CreateHookRequest {
     pub name: String,
     pub source: HookSource,
     pub filter: Option<HookFilter>,
@@ -26,30 +26,30 @@ pub(crate) struct CreateHookRequest {
     pub created_by: Option<String>,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, Deserialize, Default)]
-pub(crate) struct UpdateHookRequest {
+pub struct UpdateHookRequest {
     pub name: Option<String>,
     pub action: Option<HookAction>,
     pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListHooksQuery {
+pub struct ListHooksQuery {
     pub enabled: Option<bool>,
     pub source_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListExecutionsQuery {
+pub struct ListExecutionsQuery {
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
 
-fn default_limit() -> usize {
+const fn default_limit() -> usize {
     20
 }
 
@@ -71,13 +71,13 @@ impl IntoResponse for HookApiError {
 
 impl From<StoreError> for HookApiError {
     fn from(e: StoreError) -> Self {
-        HookApiError(e)
+        Self(e)
     }
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn create_hook(
+pub async fn create_hook(
     State(state): State<AppState>,
     Json(req): Json<CreateHookRequest>,
 ) -> impl IntoResponse {
@@ -100,7 +100,7 @@ pub(crate) async fn create_hook(
     (StatusCode::CREATED, Json(hook)).into_response()
 }
 
-pub(crate) async fn list_hooks(
+pub async fn list_hooks(
     State(state): State<AppState>,
     Query(q): Query<ListHooksQuery>,
 ) -> impl IntoResponse {
@@ -114,7 +114,7 @@ pub(crate) async fn list_hooks(
     }
 }
 
-pub(crate) async fn get_hook(
+pub async fn get_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -124,7 +124,7 @@ pub(crate) async fn get_hook(
     }
 }
 
-pub(crate) async fn update_hook(
+pub async fn update_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<UpdateHookRequest>,
@@ -159,7 +159,7 @@ pub(crate) async fn update_hook(
     Json(hook).into_response()
 }
 
-pub(crate) async fn delete_hook(
+pub async fn delete_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -169,7 +169,7 @@ pub(crate) async fn delete_hook(
     }
 }
 
-pub(crate) async fn list_executions(
+pub async fn list_executions(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<ListExecutionsQuery>,

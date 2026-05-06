@@ -66,6 +66,7 @@ pub struct EventBus {
 
 impl EventBus {
     /// Create a new bus with the given channel capacity.
+    #[must_use] 
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
@@ -73,6 +74,7 @@ impl EventBus {
 
     /// Subscribe to the bus.  Returns a `Receiver` that will see all events
     /// sent *after* this call.
+    #[must_use] 
     pub fn subscribe(&self) -> broadcast::Receiver<SystemEvent> {
         self.tx.subscribe()
     }
@@ -182,7 +184,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let ev = SystemEvent::Issue(IssueEvent::Created(issue.clone()));
+        let ev = SystemEvent::Issue(IssueEvent::Created(issue));
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
         assert!(
@@ -267,7 +269,7 @@ mod tests {
         };
         let ev = IssueEvent::CommentAdded {
             issue: make_issue(),
-            comment: comment.clone(),
+            comment,
         };
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: IssueEvent = serde_json::from_str(&json).unwrap();

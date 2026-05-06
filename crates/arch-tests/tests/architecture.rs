@@ -111,7 +111,7 @@ fn tools_does_not_know_about_sessions() {
     }
 }
 
-/// `db` owns only SQLite access — must not depend on anthropic, tools, harness, server, tui, or cli.
+/// `db` owns only `SQLite` access — must not depend on anthropic, tools, harness, server, tui, or cli.
 #[test]
 fn db_owns_only_sqlite_access() {
     let graph = build_dep_graph();
@@ -267,15 +267,9 @@ fn collect_coverage_off_files(
     arch_tests_dir: &Path,
     found: &mut Vec<String>,
 ) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        let path = match entry.path().canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let Ok(path) = entry.path().canonicalize() else { continue };
         if path.is_dir() {
             // Skip the arch-tests crate entirely to avoid false positives.
             if path.starts_with(arch_tests_dir) {
@@ -283,10 +277,7 @@ fn collect_coverage_off_files(
             }
             collect_coverage_off_files(&path, workspace_root, arch_tests_dir, found);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let contents = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+            let Ok(contents) = std::fs::read_to_string(&path) else { continue };
             if contents.contains("#[coverage(off)]") {
                 // Convert to a workspace-relative path with forward slashes.
                 let rel = path
@@ -362,7 +353,7 @@ fn test_no_stale_coverage_ignores() {
     );
 }
 
-/// Every [[file_ignore]] entry in coverage-ignores.toml must point to a file that
+/// Every [[`file_ignore`]] entry in coverage-ignores.toml must point to a file that
 /// actually exists in the workspace, so stale entries don't silently widen the exclusion.
 #[test]
 fn test_no_stale_file_ignores() {

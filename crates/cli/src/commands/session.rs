@@ -4,14 +4,14 @@ use uuid::Uuid;
 use crate::client::{handle_connection_error, print_error_response, resolve_session_id, stream_events};
 use crate::render::{render_session_line};
 
-pub(crate) fn session_is_terminal(status: &SessionStatus) -> bool {
+pub const fn session_is_terminal(status: &SessionStatus) -> bool {
     matches!(
         status,
         SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled
     )
 }
 
-pub(crate) async fn run_list(server: &str, status: Option<String>, id: Option<String>) {
+pub async fn run_list(server: &str, status: Option<String>, id: Option<String>) {
     let client = reqwest::Client::new();
 
     // If --id is provided, fetch the specific session
@@ -20,7 +20,7 @@ pub(crate) async fn run_list(server: &str, status: Option<String>, id: Option<St
             eprintln!("Invalid session ID: {session_id}");
             std::process::exit(1);
         });
-        let url = format!("{}/sessions/{}", server, session_uuid);
+        let url = format!("{server}/sessions/{session_uuid}");
         let resp = client.get(&url).send().await.unwrap_or_else(|e| {
             handle_connection_error(&e);
         });
@@ -43,7 +43,7 @@ pub(crate) async fn run_list(server: &str, status: Option<String>, id: Option<St
         );
     } else {
         // List all sessions with optional status filter
-        let mut url = format!("{}/sessions", server);
+        let mut url = format!("{server}/sessions");
         if let Some(s) = &status {
             url = format!("{url}?status={s}");
         }
@@ -72,14 +72,14 @@ pub(crate) async fn run_list(server: &str, status: Option<String>, id: Option<St
     }
 }
 
-pub(crate) async fn run_new(
+pub async fn run_new(
     server: &str,
     name: Option<String>,
     agent: Option<String>,
     message: Option<String>,
     wait: bool,
 ) {
-    let url = format!("{}/sessions", server);
+    let url = format!("{server}/sessions");
     let body = serde_json::json!({
         "name": name,
         "agent": agent,
@@ -108,9 +108,9 @@ pub(crate) async fn run_new(
     }
 }
 
-pub(crate) async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>, timeout: Option<u64>) {
+pub async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>, timeout: Option<u64>) {
     let session_id = resolve_session_id(server, id, name).await;
-    let mut url = format!("{}/events?session_id={}", server, session_id);
+    let mut url = format!("{server}/events?session_id={session_id}");
     if let Some(n) = turns {
         url = format!("{url}&last_turns={n}");
     }
@@ -125,9 +125,9 @@ pub(crate) async fn run_tail(server: &str, id: Option<String>, name: Option<Stri
     }
 }
 
-pub(crate) async fn run_send(server: &str, id: Option<String>, name: Option<String>, message: String) {
+pub async fn run_send(server: &str, id: Option<String>, name: Option<String>, message: String) {
     let session_id = resolve_session_id(server, id, name).await;
-    let url = format!("{}/sessions/{}/messages", server, session_id);
+    let url = format!("{server}/sessions/{session_id}/messages");
     let body = serde_json::json!({ "message": message });
     let client = reqwest::Client::new();
     let resp = client.post(&url).json(&body).send().await.unwrap_or_else(|e| {
@@ -140,9 +140,9 @@ pub(crate) async fn run_send(server: &str, id: Option<String>, name: Option<Stri
     eprintln!("Message sent.");
 }
 
-pub(crate) async fn run_stop(server: &str, id: Option<String>, name: Option<String>) {
+pub async fn run_stop(server: &str, id: Option<String>, name: Option<String>) {
     let session_id = resolve_session_id(server, id, name).await;
-    let url = format!("{}/sessions/{}/cancel", server, session_id);
+    let url = format!("{server}/sessions/{session_id}/cancel");
     let client = reqwest::Client::new();
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
@@ -157,7 +157,10 @@ pub(crate) async fn run_stop(server: &str, id: Option<String>, name: Option<Stri
     eprintln!("Session {session_id} cancelled.");
 }
 
-pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
+#[allow(clippy::too_many_lines)]
+pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
+    use std::io::Write;
+
     if ids.is_empty() {
         eprintln!("Error: at least one --id is required");
         std::process::exit(1);
@@ -170,8 +173,6 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
             std::process::exit(1);
         }
     }
-
-    use std::io::Write;
 
     let deadline = timeout.map(|secs| {
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
@@ -193,14 +194,14 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
             if terminal_statuses.contains_key(id.as_str()) {
                 continue;
             }
-            let url = format!("{}/sessions/{}", server, id);
+            let url = format!("{server}/sessions/{id}");
             let resp = client.get(&url).send().await.unwrap_or_else(|e| {
                 handle_connection_error(&e);
             });
             if !resp.status().is_success() {
                 // Clear progress lines before printing the error.
                 if lines_rendered > 0 {
-                    eprint!("\x1b[{}A\x1b[J", lines_rendered);
+                    eprint!("\x1b[{lines_rendered}A\x1b[J");
                 }
                 if resp.status() == reqwest::StatusCode::NOT_FOUND {
                     eprintln!("Error: session not found: {id}");
@@ -221,7 +222,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
             } else {
                 all_done = false;
                 // Fetch snippet for running sessions.
-                let text_url = format!("{}/sessions/{}/last_text", server, id);
+                let text_url = format!("{server}/sessions/{id}/last_text");
                 if let Ok(text_resp) = client.get(&text_url).send().await {
                     if text_resp.status().is_success() {
                         if let Ok(body) = text_resp.json::<serde_json::Value>().await {
@@ -241,7 +242,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
             let mut out = stderr.lock();
             if lines_rendered > 0 {
                 // Move up `lines_rendered` lines and clear to end of screen.
-                write!(out, "\x1b[{}A\x1b[J", lines_rendered).ok();
+                write!(out, "\x1b[{lines_rendered}A\x1b[J").ok();
             }
             let mut count = 0;
             for id in &ids {
@@ -249,8 +250,8 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
                     .get(id.as_str())
                     .cloned()
                     .unwrap_or(SessionStatus::Running);
-                let name = names.get(id.as_str()).map(|s| s.as_str()).unwrap_or("");
-                let snippet = snippets.get(id.as_str()).map(|s| s.as_str());
+                let name = names.get(id.as_str()).map_or("", std::string::String::as_str);
+                let snippet = snippets.get(id.as_str()).map(std::string::String::as_str);
                 let line = render_session_line(id, name, snippet, &status, tick);
                 writeln!(out, "{line}").ok();
                 count += 1;

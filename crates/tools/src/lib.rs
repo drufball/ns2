@@ -101,7 +101,7 @@ impl Tool for BashTool {
 
         let timeout_ms = input
             .get("timeout_ms")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
@@ -128,7 +128,7 @@ impl Tool for BashTool {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let formatted = if stderr.is_empty() {
-            stdout.clone()
+            stdout
         } else {
             format!("stdout:\n{stdout}stderr:\n{stderr}")
         };
@@ -244,7 +244,7 @@ impl Tool for EditTool {
 
         let replace_all = input
             .get("replace_all")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
         let resolved = resolve_path(cwd, path);
@@ -385,7 +385,7 @@ mod tests {
             )
             .await
             .expect("edit should succeed");
-        assert!(result.contains("1"), "should report 1 replacement");
+        assert!(result.contains('1'), "should report 1 replacement");
 
         let contents = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(contents, "hello rust");
@@ -423,7 +423,7 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_owned();
 
         let result = ReadTool.execute(serde_json::json!({"path": path}), None).await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), "hello from file");
     }
 
@@ -464,7 +464,7 @@ mod tests {
         let result = BashTool
             .execute(serde_json::json!({"command": "echo hello"}), None)
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), "hello\n");
     }
 
@@ -473,7 +473,7 @@ mod tests {
         let result = BashTool
             .execute(serde_json::json!({"command": "echo out; echo err >&2"}), None)
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
         let output = result.unwrap();
         assert!(output.contains("stdout:\n"), "expected 'stdout:' label: {output}");
         assert!(output.contains("stderr:\n"), "expected 'stderr:' label: {output}");
@@ -519,8 +519,7 @@ mod tests {
             .await;
         assert!(
             matches!(result, Err(Error::ExitError { code: -1, .. })),
-            "expected ExitError with code -1, got: {:?}",
-            result
+            "expected ExitError with code -1, got: {result:?}"
         );
     }
 
@@ -540,7 +539,7 @@ mod tests {
         let result = WriteTool
             .execute(serde_json::json!({"path": path_str, "content": "hello write"}), None)
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         let written = tokio::fs::read_to_string(&path_str).await.unwrap();
         assert_eq!(written, "hello write");
@@ -555,7 +554,7 @@ mod tests {
         let result = WriteTool
             .execute(serde_json::json!({"path": path_str, "content": "nested content"}), None)
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         let written = tokio::fs::read_to_string(&path_str).await.unwrap();
         assert_eq!(written, "nested content");
@@ -602,7 +601,7 @@ mod tests {
                 None,
             )
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents, "hello rust");
@@ -661,7 +660,7 @@ mod tests {
                 None,
             )
             .await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents, "bar bar bar");

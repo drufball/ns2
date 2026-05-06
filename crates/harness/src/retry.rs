@@ -2,7 +2,7 @@ use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 use std::sync::Arc;
 
 /// Read the max-retry count from `NS2_MAX_RETRIES` (default 5).
-pub(crate) fn max_retries() -> u32 {
+pub fn max_retries() -> u32 {
     std::env::var("NS2_MAX_RETRIES")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -10,7 +10,7 @@ pub(crate) fn max_retries() -> u32 {
 }
 
 /// Returns `true` if the error is an Anthropic 429 rate-limit response.
-pub(crate) fn is_rate_limit(err: &anthropic::Error) -> bool {
+pub const fn is_rate_limit(err: &anthropic::Error) -> bool {
     matches!(err, anthropic::Error::Api { status: 429, .. })
 }
 
@@ -22,15 +22,15 @@ pub(crate) fn is_rate_limit(err: &anthropic::Error) -> bool {
 ///
 /// In tests using `#[tokio::test(start_paused = true)]`, `tokio::time::sleep`
 /// returns instantly, so no real wall-clock time is consumed.
-pub(crate) async fn complete_with_retry(
+pub async fn complete_with_retry(
     client: &Arc<dyn AnthropicClient>,
     request: MessageRequest,
 ) -> anthropic::Result<MessageResponse> {
     use tokio::time::{sleep, Duration};
+    const MAX_DELAY_MS: u64 = 120_000;
 
     let retries = max_retries();
     let mut delay_ms: u64 = 10_000;
-    const MAX_DELAY_MS: u64 = 120_000;
 
     let mut attempt = 0u32;
     loop {

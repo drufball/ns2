@@ -7,14 +7,17 @@ ns2 is a CLI coding agent + orchestration framework built with Rust. See specs/a
 ```bash
 cargo check
 cargo build
-cargo clippy -- -D warnings
+cargo clippy --tests -- -D warnings -W clippy::pedantic -W clippy::nursery
 cargo test
 cargo llvm-cov --summary-only
 ```
 
-## Subagents
+## Sub tasks and agents
 
-Break all non-trivial work into sequential subagents to preserve the context window. Always run subagents one at a time — do not use parallel or background agents, and do not use separate worktrees for subagents. The coordination cost is not worth it.
+- Break work into sub tasks and use agents to complete each sub task
+- Always run agents one at a time
+- Never use parallel or background agents
+- Complete sub tasks on the same branch/worktree 
 
 ## Finishing work
 

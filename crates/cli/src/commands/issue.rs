@@ -5,13 +5,13 @@ use events::SystemEvent;
 use crate::client::{handle_connection_error, print_error_response};
 use crate::render::{format_issue_show, format_issue_event, print_issue_row, render_issue_tree, IssueTreeNode};
 
-pub(crate) fn issue_is_terminal(status: &IssueStatus) -> bool {
+pub const fn issue_is_terminal(status: &IssueStatus) -> bool {
     matches!(status, IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled)
 }
 
 /// Check whether every node in the issue tree (roots AND all descendants) is terminal.
 /// Used by `issue wait` to decide when to stop polling.
-pub(crate) fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
+pub fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
     fn node_terminal(node: &IssueTreeNode) -> bool {
         issue_is_terminal(&node.issue.status) && node.children.iter().all(node_terminal)
     }
@@ -19,7 +19,7 @@ pub(crate) fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_new(
+pub async fn run_new(
     server: &str,
     title: String,
     body: String,
@@ -43,7 +43,7 @@ pub(crate) async fn run_new(
             }
         }
     }
-    let url = format!("{}/issues", server);
+    let url = format!("{server}/issues");
     let req_body = json!({
         "title": title,
         "body": body,
@@ -86,7 +86,7 @@ pub(crate) async fn run_new(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_edit(
+pub async fn run_edit(
     server: &str,
     id: String,
     title: Option<String>,
@@ -97,7 +97,7 @@ pub(crate) async fn run_edit(
     branch: Option<String>,
 ) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}", server, id);
+    let url = format!("{server}/issues/{id}");
     let mut req_body = serde_json::Map::new();
     if let Some(t) = title {
         req_body.insert("title".into(), json!(t));
@@ -151,9 +151,9 @@ pub(crate) async fn run_edit(
     eprintln!("Updated issue {}.", issue.id);
 }
 
-pub(crate) async fn run_comment(server: &str, id: String, body: String, author: String) {
+pub async fn run_comment(server: &str, id: String, body: String, author: String) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}/comments", server, id);
+    let url = format!("{server}/issues/{id}/comments");
     let req_body = json!({ "author": author, "body": body });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
@@ -168,9 +168,9 @@ pub(crate) async fn run_comment(server: &str, id: String, body: String, author: 
     eprintln!("Comment added to issue {id}.");
 }
 
-pub(crate) async fn run_start(server: &str, id: String) {
+pub async fn run_start(server: &str, id: String) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}/start", server, id);
+    let url = format!("{server}/issues/{id}/start");
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
@@ -188,9 +188,9 @@ pub(crate) async fn run_start(server: &str, id: String) {
     eprintln!("Started issue {id}. Session: {}", issue.session_id.map(|id| id.to_string()).unwrap_or_default());
 }
 
-pub(crate) async fn run_complete(server: &str, id: String, comment: String) {
+pub async fn run_complete(server: &str, id: String, comment: String) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}/complete", server, id);
+    let url = format!("{server}/issues/{id}/complete");
     let req_body = json!({ "comment": comment });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
@@ -205,9 +205,9 @@ pub(crate) async fn run_complete(server: &str, id: String, comment: String) {
     eprintln!("Issue {id} marked as completed.");
 }
 
-pub(crate) async fn run_reopen(server: &str, id: String, comment: Option<String>, start: bool) {
+pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start: bool) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}/reopen", server, id);
+    let url = format!("{server}/issues/{id}/reopen");
     let req_body = json!({ "comment": comment });
     let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
@@ -222,7 +222,7 @@ pub(crate) async fn run_reopen(server: &str, id: String, comment: Option<String>
     eprintln!("Issue {id} reopened.");
 
     if start {
-        let start_url = format!("{}/issues/{}/start", server, id);
+        let start_url = format!("{server}/issues/{id}/start");
         let start_resp = client.post(&start_url).send().await.unwrap_or_else(|e| {
             handle_connection_error(&e);
         });
@@ -241,7 +241,7 @@ pub(crate) async fn run_reopen(server: &str, id: String, comment: Option<String>
     }
 }
 
-pub(crate) async fn run_list(
+pub async fn run_list(
     server: &str,
     status: Option<String>,
     assignee: Option<String>,
@@ -249,7 +249,7 @@ pub(crate) async fn run_list(
     blocked_on: Option<String>,
 ) {
     let client = reqwest::Client::new();
-    let mut url = format!("{}/issues", server);
+    let mut url = format!("{server}/issues");
     let mut params: Vec<String> = vec![];
     if let Some(s) = &status {
         params.push(format!("status={s}"));
@@ -287,9 +287,9 @@ pub(crate) async fn run_list(
     }
 }
 
-pub(crate) async fn run_show(server: &str, id: String, json: bool) {
+pub async fn run_show(server: &str, id: String, json: bool) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}", server, id);
+    let url = format!("{server}/issues/{id}");
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
@@ -315,9 +315,9 @@ pub(crate) async fn run_show(server: &str, id: String, json: bool) {
     }
 }
 
-pub(crate) async fn run_cancel(server: &str, id: String) {
+pub async fn run_cancel(server: &str, id: String) {
     let client = reqwest::Client::new();
-    let url = format!("{}/issues/{}/cancel", server, id);
+    let url = format!("{server}/issues/{id}/cancel");
     let resp = client.post(&url).send().await.unwrap_or_else(|e| {
         handle_connection_error(&e);
     });
@@ -331,16 +331,10 @@ pub(crate) async fn run_cancel(server: &str, id: String) {
     eprintln!("Issue {id} cancelled.");
 }
 
-pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
-    if ids.is_empty() {
-        eprintln!("Error: at least one --id is required");
-        std::process::exit(1);
-    }
-
-    let client = reqwest::Client::new();
-    let deadline = timeout.map(|secs| {
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
-    });
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::future_not_send)]
+pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
+    use std::io::Write;
 
     // Helper: fetch an issue tree rooted at `id` recursively.
     async fn fetch_issue_tree(
@@ -348,7 +342,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         server: &str,
         id: &str,
     ) -> Option<IssueTreeNode> {
-        let url = format!("{}/issues/{}", server, id);
+        let url = format!("{server}/issues/{id}");
         let resp = client.get(&url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -356,7 +350,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         let issue: types::Issue = resp.json().await.ok()?;
 
         // Fetch children (issues with this parent_id)
-        let children_url = format!("{}/issues?parent_id={}", server, id);
+        let children_url = format!("{server}/issues?parent_id={id}");
         let children_resp = client.get(&children_url).send().await.ok()?;
         let child_issues: Vec<types::Issue> = if children_resp.status().is_success() {
             children_resp.json().await.unwrap_or_default()
@@ -382,13 +376,13 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         server: &str,
         session_id: uuid::Uuid,
     ) -> Option<String> {
-        let url = format!("{}/sessions/{}/last_text", server, session_id);
+        let url = format!("{server}/sessions/{session_id}/last_text");
         let resp = client.get(&url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
         let v: serde_json::Value = resp.json().await.ok()?;
-        v["text"].as_str().map(|s| s.to_string())
+        v["text"].as_str().map(std::string::ToString::to_string)
     }
 
     // Recursively attach snippets to running nodes.
@@ -399,7 +393,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         if node.issue.status == IssueStatus::Running {
             if let Some(session_id) = node.issue.session_id {
                 if let Some(snippet_opt) = snippets.get(&session_id) {
-                    node.snippet = snippet_opt.clone();
+                    node.snippet.clone_from(snippet_opt);
                 }
             }
         }
@@ -420,7 +414,15 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         }
     }
 
-    use std::io::Write;
+    if ids.is_empty() {
+        eprintln!("Error: at least one --id is required");
+        std::process::exit(1);
+    }
+
+    let client = reqwest::Client::new();
+    let deadline = timeout.map(|secs| {
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
+    });
 
     let mut tick: usize = 0;
     let mut prev_line_count = 0usize;
@@ -432,12 +434,9 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
         let mut roots: Vec<IssueTreeNode> = Vec::new();
         let mut fetch_error = false;
         for id in &ids {
-            match fetch_issue_tree(&client, server, id).await {
-                Some(node) => roots.push(node),
-                None => {
-                    eprintln!("Error: issue not found: {id}");
-                    fetch_error = true;
-                }
+            if let Some(node) = fetch_issue_tree(&client, server, id).await { roots.push(node) } else {
+                eprintln!("Error: issue not found: {id}");
+                fetch_error = true;
             }
         }
         if fetch_error {
@@ -472,7 +471,7 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
 
         // Write new frame
         for line in &lines {
-            writeln!(out, "{}", line).ok();
+            writeln!(out, "{line}").ok();
         }
         out.flush().ok();
         prev_line_count = lines.len();
@@ -515,11 +514,11 @@ pub(crate) async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64
 /// Connects to `GET /events?issue_id=<id>` as an SSE stream and renders each
 /// `IssueEvent` to stdout, one line per event.  Exits on Ctrl-C (SIGINT) or
 /// when the server closes the stream.
-pub(crate) async fn run_watch(server: &str, id: String) {
+pub async fn run_watch(server: &str, id: String) {
     use futures::StreamExt;
     use std::io::Write;
 
-    let url = format!("{}/events?issue_id={}", server, id);
+    let url = format!("{server}/events?issue_id={id}");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(0)) // no timeout — long-lived SSE stream
         .build()
@@ -537,7 +536,7 @@ pub(crate) async fn run_watch(server: &str, id: String) {
 
     // Install a simple Ctrl-C handler so the process exits cleanly.
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let running_clone = running.clone();
+    let running_clone = std::sync::Arc::clone(&running);
     // Best-effort SIGINT handler — drop the JoinHandle intentionally (fire-and-forget).
     let _ctrl_c = tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
@@ -548,8 +547,7 @@ pub(crate) async fn run_watch(server: &str, id: String) {
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         match stream.next().await {
-            None => break, // server closed the stream
-            Some(Err(_)) => break,
+            None | Some(Err(_)) => break, // server closed the stream or error
             Some(Ok(bytes)) => {
                 let chunk = String::from_utf8_lossy(&bytes).to_string();
                 let frames = crate::render::parse_sse_frames(&mut buf, &chunk);
@@ -557,9 +555,7 @@ pub(crate) async fn run_watch(server: &str, id: String) {
                     // Each SSE frame is one or more "field: value" lines.
                     // We look for the `data:` line.
                     for line in frame.lines() {
-                        let data = if let Some(rest) = line.strip_prefix("data: ") {
-                            rest
-                        } else {
+                        let Some(data) = line.strip_prefix("data: ") else {
                             continue;
                         };
 
@@ -584,19 +580,23 @@ pub(crate) async fn run_watch(server: &str, id: String) {
 ///
 /// Sugar for creating an internal hook that delivers a notification comment
 /// whenever issue X has a status change or a comment added.
-pub(crate) async fn run_subscribe(server: &str, id: String, deliver_to: String) {
+pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
     let client = reqwest::Client::new();
-    let url = format!("{}/hooks", server);
+    let url = format!("{server}/hooks");
 
     // Parse "issue:<id>" or "session:<id>"
-    let (target_type, target_id) = if let Some(rest) = deliver_to.strip_prefix("issue:") {
-        ("issue", rest.to_string())
-    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
-        ("session", rest.to_string())
-    } else {
-        eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
-        std::process::exit(1);
-    };
+    let (target_type, target_id) = deliver_to.strip_prefix("issue:").map_or_else(
+        || {
+            deliver_to.strip_prefix("session:").map_or_else(
+                || {
+                    eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
+                    std::process::exit(1);
+                },
+                |rest| ("session", rest.to_string()),
+            )
+        },
+        |rest| ("issue", rest.to_string()),
+    );
 
     let hook_name = format!("subscribe-{id}");
     let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();

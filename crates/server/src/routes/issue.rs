@@ -13,12 +13,12 @@ use super::Error;
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-pub(crate) fn generate_issue_id_for_test() -> String {
+pub fn generate_issue_id_for_test() -> String {
     issues::generate_issue_id()
 }
 
 #[cfg(test)]
-pub(crate) fn slugify(title: &str) -> String {
+pub fn slugify(title: &str) -> String {
     issues::slugify(title)
 }
 
@@ -36,7 +36,7 @@ where
 // ─── Request / Response types ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub(crate) struct CreateIssueRequest {
+pub struct CreateIssueRequest {
     pub(crate) title: String,
     pub(crate) body: String,
     pub(crate) assignee: Option<String>,
@@ -46,19 +46,21 @@ pub(crate) struct CreateIssueRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct EditIssueRequest {
+pub struct EditIssueRequest {
     pub(crate) title: Option<String>,
     pub(crate) body: Option<String>,
     #[serde(default, deserialize_with = "deserialize_some")]
+    #[allow(clippy::option_option)]
     pub(crate) assignee: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_some")]
+    #[allow(clippy::option_option)]
     pub(crate) parent_id: Option<Option<String>>,
     pub(crate) blocked_on: Option<Vec<String>>,
     pub(crate) branch: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ListIssuesQuery {
+pub struct ListIssuesQuery {
     pub(crate) status: Option<String>,
     pub(crate) assignee: Option<String>,
     pub(crate) parent_id: Option<String>,
@@ -66,29 +68,29 @@ pub(crate) struct ListIssuesQuery {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct AddCommentRequest {
+pub struct AddCommentRequest {
     pub(crate) author: String,
     pub(crate) body: String,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CompleteIssueRequest {
+pub struct CompleteIssueRequest {
     pub(crate) comment: String,
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct ReopenIssueRequest {
+pub struct ReopenIssueRequest {
     pub(crate) comment: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct UpdateIssueStatusRequest {
+pub struct UpdateIssueStatusRequest {
     pub(crate) status: String,
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
-pub(crate) async fn create_issue(
+pub async fn create_issue(
     State(state): State<AppState>,
     Json(req): Json<CreateIssueRequest>,
 ) -> std::result::Result<(StatusCode, Json<Issue>), Error> {
@@ -103,7 +105,7 @@ pub(crate) async fn create_issue(
     Ok((StatusCode::CREATED, Json(issue)))
 }
 
-pub(crate) async fn get_issue(
+pub async fn get_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
@@ -111,7 +113,7 @@ pub(crate) async fn get_issue(
     Ok(Json(issue))
 }
 
-pub(crate) async fn list_issues(
+pub async fn list_issues(
     State(state): State<AppState>,
     Query(params): Query<ListIssuesQuery>,
 ) -> std::result::Result<Json<Vec<Issue>>, Error> {
@@ -130,7 +132,7 @@ pub(crate) async fn list_issues(
     Ok(Json(issues))
 }
 
-pub(crate) async fn edit_issue(
+pub async fn edit_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<EditIssueRequest>,
@@ -146,7 +148,7 @@ pub(crate) async fn edit_issue(
     Ok(Json(issue))
 }
 
-pub(crate) async fn add_comment(
+pub async fn add_comment(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<AddCommentRequest>,
@@ -155,7 +157,7 @@ pub(crate) async fn add_comment(
     Ok(Json(issue))
 }
 
-pub(crate) async fn start_issue(
+pub async fn start_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
@@ -165,7 +167,7 @@ pub(crate) async fn start_issue(
     Ok(Json(outcome.issue))
 }
 
-pub(crate) async fn complete_issue(
+pub async fn complete_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<CompleteIssueRequest>,
@@ -174,7 +176,7 @@ pub(crate) async fn complete_issue(
     Ok(Json(issue))
 }
 
-pub(crate) async fn reopen_issue(
+pub async fn reopen_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<ReopenIssueRequest>>,
@@ -189,7 +191,7 @@ pub(crate) async fn reopen_issue(
 /// Marks the issue `cancelled`. If the issue has a linked session, also drops
 /// the session's msg sender (terminating the harness) and marks the session
 /// `cancelled` in the DB.
-pub(crate) async fn cancel_issue(
+pub async fn cancel_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
@@ -211,7 +213,7 @@ pub(crate) async fn cancel_issue(
     Ok(Json(issue))
 }
 
-pub(crate) async fn update_issue_status(
+pub async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<UpdateIssueStatusRequest>,

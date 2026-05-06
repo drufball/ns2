@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 
 /// A single git worktree entry, parsed from `git worktree list --porcelain`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeEntry {
     pub branch: String,
     pub path: PathBuf,
@@ -120,7 +120,7 @@ pub async fn ensure_worktree(
 ///
 /// This function is async and uses `tokio::process::Command` to avoid blocking
 /// the Tokio thread pool.
-pub(crate) async fn detect_remote_default_branch(git_root: &Path) -> String {
+pub async fn detect_remote_default_branch(git_root: &Path) -> String {
     tokio::process::Command::new("git")
         .current_dir(git_root)
         .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
@@ -165,9 +165,8 @@ pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<Worktr
         _ => return vec![],
     };
 
-    let text = match String::from_utf8(output) {
-        Ok(s) => s,
-        Err(_) => return vec![],
+    let Ok(text) = String::from_utf8(output) else {
+        return vec![];
     };
 
     parse_worktree_porcelain(&text, &canonical_base)
@@ -183,6 +182,7 @@ pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<Worktr
 ///
 /// ```
 /// Blocks are separated by blank lines.
+#[must_use] 
 pub fn parse_worktree_porcelain(text: &str, worktree_base: &Path) -> Vec<WorktreeEntry> {
     let mut entries = Vec::new();
     let mut current_path: Option<PathBuf> = None;
@@ -241,6 +241,11 @@ pub enum DeleteWorktreeError {
 ///
 /// This function is async and uses `tokio::process::Command` to avoid blocking
 /// the Tokio thread pool.
+///
+/// # Errors
+///
+/// Returns [`DeleteWorktreeError`] if the worktree is not found, is not merged,
+/// the git commands fail, or the branch cannot be deleted.
 pub async fn delete_worktree(
     git_root: &Path,
     worktree_base: &Path,
@@ -327,8 +332,7 @@ async fn is_branch_merged_to_main(git_root: &Path, branch: &str) -> bool {
         .args(["merge-base", "--is-ancestor", branch, &local_default])
         .status()
         .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -646,7 +650,7 @@ mod tests {
 
     /// Set up a temporary bare origin + a cloned local repo with an initial commit on `main`.
     /// Returns `(local_dir, wt_base)` as `TempDir` handles.
-    pub(crate) fn setup_git_repo_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
+    pub fn setup_git_repo_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["init", "--bare", "-b", "main"])

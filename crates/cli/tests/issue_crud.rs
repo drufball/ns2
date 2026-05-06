@@ -169,8 +169,8 @@ fn issue_child_inherits_parent_branch() {
     h.start_server();
     let parent_id = h.ns2_stdout(&["issue", "new", "--title", "Parent Issue", "--body", "b"]);
     let child_id = h.ns2_stdout(&["issue", "new", "--title", "Child Issue", "--body", "b", "--parent", &parent_id]);
-    let parent_json = h.http_get(&format!("/issues/{}", parent_id));
-    let child_json = h.http_get(&format!("/issues/{}", child_id));
+    let parent_json = h.http_get(&format!("/issues/{parent_id}"));
+    let child_json = h.http_get(&format!("/issues/{child_id}"));
     assert!(parent_json.contains("\"branch\""), "parent should have branch field");
     assert!(child_json.contains("\"branch\""), "child should have branch field");
     let parent_branch = extract_branch(&parent_json);
@@ -197,15 +197,15 @@ fn issue_list_filter_by_parent() {
 fn issue_list_filter_by_blocked_on() {
     let mut h = TestHarness::new();
     h.start_server();
-    let blocker_id = h.ns2_stdout(&["issue", "new", "--title", "Blocker", "--body", "b"]);
-    let blocked_id =
-        h.ns2_stdout(&["issue", "new", "--title", "Blocked", "--body", "b", "--blocked-on", &blocker_id]);
+    let source_id = h.ns2_stdout(&["issue", "new", "--title", "Blocker", "--body", "b"]);
+    let dependent_id =
+        h.ns2_stdout(&["issue", "new", "--title", "Blocked", "--body", "b", "--blocked-on", &source_id]);
     h.ns2_stdout(&["issue", "new", "--title", "Unblocked", "--body", "b"]);
-    let out = h.ns2_stdout(&["issue", "list", "--blocked-on", &blocker_id]);
+    let out = h.ns2_stdout(&["issue", "list", "--blocked-on", &source_id]);
     assert!(out.contains("Blocked"), "filter by blocked-on should include blocked issue");
     assert!(!out.contains("Unblocked"), "filter by blocked-on should not include unblocked issue");
     assert!(!out.contains("Blocker"), "filter by blocked-on should not include blocker itself");
-    let _ = blocked_id;
+    let _ = dependent_id;
 }
 
 #[test]
@@ -275,15 +275,15 @@ fn issue_edit_replace_blocked_on_list() {
 fn issue_edit_clear_blocked_on() {
     let mut h = TestHarness::new();
     h.start_server();
-    let blocker_id = h.ns2_stdout(&["issue", "new", "--title", "Blocker", "--body", "b"]);
-    let blocked_id =
-        h.ns2_stdout(&["issue", "new", "--title", "Blocked", "--body", "b", "--blocked-on", &blocker_id]);
+    let source_id = h.ns2_stdout(&["issue", "new", "--title", "Blocker", "--body", "b"]);
+    let dependent_id =
+        h.ns2_stdout(&["issue", "new", "--title", "Blocked", "--body", "b", "--blocked-on", &source_id]);
     h.ns2()
-        .args(["issue", "edit", "--id", &blocked_id, "--blocked-on"])
+        .args(["issue", "edit", "--id", &dependent_id, "--blocked-on"])
         .assert()
         .success();
     h.ns2()
-        .args(["issue", "list", "--blocked-on", &blocker_id])
+        .args(["issue", "list", "--blocked-on", &source_id])
         .assert()
         .success()
         .stdout(predicate::str::contains("No issues found."));
@@ -386,15 +386,14 @@ fn issue_new_auto_generates_branch() {
     let mut h = TestHarness::new();
     h.start_server();
     let id = h.ns2_stdout(&["issue", "new", "--title", "My New Feature", "--body", "b"]);
-    let json = h.http_get(&format!("/issues/{}", id));
+    let json = h.http_get(&format!("/issues/{id}"));
     assert!(json.contains("\"branch\""), "branch field should exist");
     let branch = extract_branch(&json);
     assert!(
         branch.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-        "branch '{}' should only contain lowercase alphanumeric and dashes",
-        branch
+        "branch '{branch}' should only contain lowercase alphanumeric and dashes"
     );
-    assert!(branch.contains('-'), "branch '{}' should contain a dash separator", branch);
+    assert!(branch.contains('-'), "branch '{branch}' should contain a dash separator");
 }
 
 #[test]
@@ -404,8 +403,8 @@ fn issue_child_inherits_parent_branch_field() {
     let parent_id = h.ns2_stdout(&["issue", "new", "--title", "Parent Feature", "--body", "b"]);
     let child_id =
         h.ns2_stdout(&["issue", "new", "--title", "Child Feature", "--body", "b", "--parent", &parent_id]);
-    let parent_json = h.http_get(&format!("/issues/{}", parent_id));
-    let child_json = h.http_get(&format!("/issues/{}", child_id));
+    let parent_json = h.http_get(&format!("/issues/{parent_id}"));
+    let child_json = h.http_get(&format!("/issues/{child_id}"));
     let parent_branch = extract_branch(&parent_json);
     let child_branch = extract_branch(&child_json);
     assert_eq!(parent_branch, child_branch, "child branch should equal parent branch");
@@ -416,7 +415,7 @@ fn issue_explicit_branch_stored_as_provided() {
     let mut h = TestHarness::new();
     h.start_server();
     let id = h.ns2_stdout(&["issue", "new", "--title", "Hotfix", "--body", "b", "--branch", "hotfix/my-fix"]);
-    let json = h.http_get(&format!("/issues/{}", id));
+    let json = h.http_get(&format!("/issues/{id}"));
     assert!(json.contains("\"branch\""), "branch field should exist");
     assert!(json.contains("\"hotfix/my-fix\""), "branch should be stored as-is");
 }
@@ -439,7 +438,7 @@ fn issue_edit_branch_updates_value() {
         .args(["issue", "edit", "--id", &id, "--branch", "new/branch"])
         .assert()
         .success();
-    let json = h.http_get(&format!("/issues/{}", id));
+    let json = h.http_get(&format!("/issues/{id}"));
     assert!(json.contains("\"new/branch\""), "branch should be updated to new/branch");
 }
 

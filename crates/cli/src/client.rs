@@ -1,7 +1,7 @@
 use crate::render::{parse_sse_frames, print_session_event};
 use uuid::Uuid;
 
-pub(crate) fn handle_connection_error(err: &reqwest::Error) -> ! {
+pub fn handle_connection_error(err: &reqwest::Error) -> ! {
     if err.is_connect() {
         eprintln!("Error: server is not running (connection refused). Start it with: ns2 server start");
     } else {
@@ -10,7 +10,7 @@ pub(crate) fn handle_connection_error(err: &reqwest::Error) -> ! {
     std::process::exit(1);
 }
 
-pub(crate) async fn print_error_response(resp: reqwest::Response) -> ! {
+pub async fn print_error_response(resp: reqwest::Response) -> ! {
     let status = resp.status();
     if let Ok(body) = resp.json::<serde_json::Value>().await {
         if let Some(msg) = body.get("error").and_then(|v| v.as_str()) {
@@ -24,7 +24,7 @@ pub(crate) async fn print_error_response(resp: reqwest::Response) -> ! {
     std::process::exit(1);
 }
 
-pub(crate) async fn stream_events(url: &str, to_stderr: bool) {
+pub async fn stream_events(url: &str, to_stderr: bool) {
     use futures::StreamExt;
     let client = reqwest::Client::new();
     let resp = client
@@ -49,15 +49,16 @@ pub(crate) async fn stream_events(url: &str, to_stderr: bool) {
                     // Try to parse as SystemEvent first (new /events endpoint).
                     // Fall back to SessionEvent (legacy, kept for backward compat).
                     let session_event: Option<events::SessionEvent> =
-                        if let Ok(ev) = serde_json::from_str::<events::SystemEvent>(data) {
-                            match ev {
+                        serde_json::from_str::<events::SystemEvent>(data).map_or_else(
+                            |_| {
+                                // Fallback: try old SessionEvent format
+                                serde_json::from_str::<events::SessionEvent>(data).ok()
+                            },
+                            |ev| match ev {
                                 events::SystemEvent::Session { event, .. } => Some(event),
                                 _ => None,
-                            }
-                        } else {
-                            // Fallback: try old SessionEvent format
-                            serde_json::from_str::<events::SessionEvent>(data).ok()
-                        };
+                            },
+                        );
 
                     if let Some(event) = session_event {
                         print_session_event(&event, to_stderr);
@@ -74,7 +75,7 @@ pub(crate) async fn stream_events(url: &str, to_stderr: bool) {
     }
 }
 
-pub(crate) async fn resolve_session_id(server: &str, id: Option<String>, name: Option<String>) -> Uuid {
+pub async fn resolve_session_id(server: &str, id: Option<String>, name: Option<String>) -> Uuid {
     if let Some(id) = id {
         id.parse().unwrap_or_else(|_| {
             eprintln!("Invalid session ID");
@@ -92,12 +93,10 @@ pub(crate) async fn resolve_session_id(server: &str, id: Option<String>, name: O
             .unwrap();
         sessions
             .into_iter()
-            .find(|s| s.name == name)
-            .map(|s| s.id)
-            .unwrap_or_else(|| {
+            .find(|s| s.name == name).map_or_else(|| {
                 eprintln!("Session not found: {name}");
                 std::process::exit(1);
-            })
+            }, |s| s.id)
     } else {
         eprintln!("Must provide --id or --name");
         std::process::exit(1);

@@ -95,18 +95,19 @@ fn spawn_hook_evaluator(state: &AppState) {
     });
 }
 
+/// # Errors
+///
+/// Returns an error if the data directory cannot be created, the PID file cannot
+/// be written, the database cannot be opened, or the TCP listener cannot bind.
 pub async fn run(config: ServerConfig) -> Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
 
     let pid = std::process::id();
     std::fs::write(&config.pid_file, format!("{pid}\n"))?;
 
-    let client: Arc<dyn anthropic::AnthropicClient> = match std::env::var("ANTHROPIC_API_KEY").ok() {
-        Some(key) => Arc::new(anthropic::Client::new(key)),
-        None => {
-            eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
-            Arc::new(anthropic::StubClient)
-        }
+    let client: Arc<dyn anthropic::AnthropicClient> = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") { Arc::new(anthropic::Client::new(key)) } else {
+        eprintln!("Warning: ANTHROPIC_API_KEY not set — using stub client (responses will be fake)");
+        Arc::new(anthropic::StubClient)
     };
     let tools: Vec<Arc<dyn tools::Tool>> = vec![
         Arc::new(tools::ReadTool),
@@ -194,8 +195,8 @@ mod tests {
     #[allow(unused_imports)]
     use routes::events_route;
 
-    /// A minimal stub AnthropicClient defined locally in server tests.
-    /// Does NOT use harness::StubClient — server tests must not depend on harness internals.
+    /// A minimal stub `AnthropicClient` defined locally in server tests.
+    /// Does NOT use `harness::StubClient` — server tests must not depend on harness internals.
     struct TestClient;
 
     #[async_trait]
@@ -308,12 +309,12 @@ mod tests {
 
     // --- POST /sessions ---
 
-    async fn create_session_req(body: serde_json::Value) -> Request<Body> {
+    fn create_session_req(body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/sessions")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
             .unwrap()
     }
 
@@ -321,7 +322,7 @@ mod tests {
     async fn test_create_session_returns_201() {
         let app = test_app().await;
         let resp = app
-            .oneshot(create_session_req(serde_json::json!({})).await)
+            .oneshot(create_session_req(&serde_json::json!({})))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -331,7 +332,7 @@ mod tests {
     async fn test_create_session_no_message_status_is_created() {
         let app = test_app().await;
         let resp = app
-            .oneshot(create_session_req(serde_json::json!({})).await)
+            .oneshot(create_session_req(&serde_json::json!({})))
             .await
             .unwrap();
         let body = response_body_bytes(resp).await;
@@ -344,10 +345,9 @@ mod tests {
         let app = test_app().await;
         let resp = app
             .oneshot(
-                create_session_req(serde_json::json!({
+                create_session_req(&serde_json::json!({
                     "name": "my-session"
-                }))
-                .await,
+                })),
             )
             .await
             .unwrap();
@@ -364,7 +364,7 @@ mod tests {
     async fn test_create_session_default_name() {
         let app = test_app().await;
         let resp = app
-            .oneshot(create_session_req(serde_json::json!({})).await)
+            .oneshot(create_session_req(&serde_json::json!({})))
             .await
             .unwrap();
         let body = response_body_bytes(resp).await;
@@ -381,7 +381,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(
-                create_session_req(serde_json::json!({"name": "sess-1"})).await,
+                create_session_req(&serde_json::json!({"name": "sess-1"})),
             )
             .await
             .unwrap();
@@ -411,7 +411,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(
-                create_session_req(serde_json::json!({"name": "by-id"})).await,
+                create_session_req(&serde_json::json!({"name": "by-id"})),
             )
             .await
             .unwrap();
@@ -459,7 +459,7 @@ mod tests {
 
         app.clone()
             .oneshot(
-                create_session_req(serde_json::json!({"name": "created-sess"})).await,
+                create_session_req(&serde_json::json!({"name": "created-sess"})),
             )
             .await
             .unwrap();
@@ -486,7 +486,7 @@ mod tests {
         let app = test_app().await;
 
         app.clone()
-            .oneshot(create_session_req(serde_json::json!({})).await)
+            .oneshot(create_session_req(&serde_json::json!({})))
             .await
             .unwrap();
 
@@ -527,7 +527,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({"name": "sse-test"})).await)
+            .oneshot(create_session_req(&serde_json::json!({"name": "sse-test"})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -552,7 +552,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({})).await)
+            .oneshot(create_session_req(&serde_json::json!({})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -601,7 +601,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({"name": "idle"})).await)
+            .oneshot(create_session_req(&serde_json::json!({"name": "idle"})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -631,11 +631,10 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(
-                create_session_req(serde_json::json!({
+                create_session_req(&serde_json::json!({
                     "name": "running-sess",
                     "initial_message": "start"
-                }))
-                .await,
+                })),
             )
             .await
             .unwrap();
@@ -668,7 +667,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({"name": "race-test"})).await)
+            .oneshot(create_session_req(&serde_json::json!({"name": "race-test"})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -709,7 +708,8 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let senders = state.msg_senders.lock().await;
-        let sender_count = if senders.contains_key(&session_id) { 1 } else { 0 };
+        let sender_count = i32::from(senders.contains_key(&session_id));
+        drop(senders);
         assert_eq!(
             sender_count, 1,
             "expected exactly 1 msg sender in msg_senders map, got {sender_count}"
@@ -748,7 +748,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                create_session_req(serde_json::json!({"initial_message": ""})).await,
+                create_session_req(&serde_json::json!({"initial_message": ""})),
             )
             .await
             .unwrap();
@@ -757,7 +757,9 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let senders = state.msg_senders.lock().await;
-        assert!(senders.is_empty(), "empty initial_message must not spawn a harness");
+        let is_empty = senders.is_empty();
+        drop(senders);
+        assert!(is_empty, "empty initial_message must not spawn a harness");
     }
 
     #[tokio::test]
@@ -766,7 +768,7 @@ mod tests {
 
         let resp = app
             .oneshot(
-                create_session_req(serde_json::json!({"initial_message": "hello"})).await,
+                create_session_req(&serde_json::json!({"initial_message": "hello"})),
             )
             .await
             .unwrap();
@@ -778,8 +780,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let senders = state.msg_senders.lock().await;
+        let has_key = senders.contains_key(&session_id);
+        drop(senders);
         assert!(
-            senders.contains_key(&session_id),
+            has_key,
             "non-empty initial_message must spawn a harness"
         );
     }
@@ -825,8 +829,7 @@ mod tests {
             .any(|l| {
                 let json = &l["data: ".len()..];
                 serde_json::from_str::<events::SystemEvent>(json)
-                    .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
-                    .unwrap_or(false)
+                    .is_ok_and(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
             });
         assert!(has_session_done, "completed session events must include SessionDone");
     }
@@ -890,16 +893,14 @@ mod tests {
         let has_turn_started = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
             serde_json::from_str::<events::SystemEvent>(json)
-                .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
-                .unwrap_or(false)
+                .is_ok_and(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
         });
         assert!(!has_turn_started, "last_turns=0 should skip all history turns");
 
         let has_session_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
             serde_json::from_str::<events::SystemEvent>(json)
-                .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
-                .unwrap_or(false)
+                .is_ok_and(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::Done, .. }))
         });
         assert!(has_session_done, "completed session should still emit SessionDone");
     }
@@ -918,7 +919,6 @@ mod tests {
         };
         state.db.create_session(&session).await.unwrap();
 
-        let mut turn_ids = Vec::new();
         for i in 0..3 {
             let turn = types::Turn {
                 id: Uuid::new_v4(),
@@ -926,7 +926,6 @@ mod tests {
                 token_count: Some(10),
                 created_at: chrono::Utc::now(),
             };
-            turn_ids.push(turn.id);
             state.db.create_turn(&turn).await.unwrap();
             state
                 .db
@@ -934,7 +933,7 @@ mod tests {
                     turn.id,
                     0,
                     &types::Role::Assistant,
-                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                    &types::ContentBlock::Text { text: format!("turn-{i}") },
                 )
                 .await
                 .unwrap();
@@ -966,8 +965,7 @@ mod tests {
             .filter(|l| {
                 let json = &l["data: ".len()..];
                 serde_json::from_str::<events::SystemEvent>(json)
-                    .map(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
-                    .unwrap_or(false)
+                    .is_ok_and(|ev| matches!(ev, events::SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. }))
             })
             .count();
         assert_eq!(turn_started_count, 1, "last_turns=1 should emit exactly 1 turn");
@@ -1005,7 +1003,7 @@ mod tests {
                     turn.id,
                     0,
                     &types::Role::Assistant,
-                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                    &types::ContentBlock::Text { text: format!("turn-{i}") },
                 )
                 .await
                 .unwrap();
@@ -1097,7 +1095,7 @@ mod tests {
                     turn.id,
                     0,
                     &types::Role::Assistant,
-                    &types::ContentBlock::Text { text: format!("turn-{}", i) },
+                    &types::ContentBlock::Text { text: format!("turn-{i}") },
                 )
                 .await
                 .unwrap();
@@ -1130,8 +1128,7 @@ mod tests {
         let has_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
             let json = &l["data: ".len()..];
             serde_json::from_str::<events::SystemEvent>(json)
-                .map(|ev| matches!(ev, events::SystemEvent::Session { event: events::SessionEvent::Done, .. }))
-                .unwrap_or(false)
+                .is_ok_and(|ev| matches!(ev, events::SystemEvent::Session { event: events::SessionEvent::Done, .. }))
         });
         assert!(has_done, "/events?session_id must include Done for completed session");
     }
@@ -1210,11 +1207,10 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(
-                create_session_req(serde_json::json!({
+                create_session_req(&serde_json::json!({
                     "name": "completed-test",
                     "initial_message": "run and complete"
-                }))
-                .await,
+                })),
             )
             .await
             .unwrap();
@@ -1230,9 +1226,7 @@ mod tests {
             if session.status == SessionStatus::Completed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("session did not reach Completed within 3s; status={}", session.status);
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "session did not reach Completed within 3s; status={}", session.status);
         }
 
         let resp = app
@@ -1277,7 +1271,9 @@ mod tests {
 
         {
             let senders = state.msg_senders.lock().await;
-            assert!(!senders.contains_key(&session.id));
+            let not_present = !senders.contains_key(&session.id);
+            drop(senders);
+            assert!(not_present);
         }
 
         let resp = app
@@ -1398,12 +1394,12 @@ mod tests {
 
     // ─── Issue endpoint tests ─────────────────────────────────────────────────
 
-    fn issue_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    fn issue_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
             .unwrap()
     }
 
@@ -1411,7 +1407,7 @@ mod tests {
     async fn test_create_issue_returns_201() {
         let app = test_app().await;
         let resp = app
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Fix the bug",
                 "body": "Details here"
             })))
@@ -1424,7 +1420,7 @@ mod tests {
     async fn test_create_issue_response_has_id_and_open_status() {
         let app = test_app().await;
         let resp = app
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Fix the bug",
                 "body": "Details here"
             })))
@@ -1458,7 +1454,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "My issue",
                 "body": "Body text"
             })))
@@ -1506,13 +1502,13 @@ mod tests {
     async fn test_list_issues_returns_created_issues() {
         let app = test_app().await;
         app.clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Issue One", "body": "B1"
             })))
             .await
             .unwrap();
         app.clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Issue Two", "body": "B2"
             })))
             .await
@@ -1536,7 +1532,7 @@ mod tests {
     async fn test_list_issues_filter_by_status() {
         let app = test_app().await;
         app.clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Open issue", "body": "B"
             })))
             .await
@@ -1578,7 +1574,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Old title", "body": "B"
             })))
             .await
@@ -1588,7 +1584,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let edit_resp = app
-            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), &serde_json::json!({
                 "title": "New title"
             })))
             .await
@@ -1604,7 +1600,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Child", "body": "B", "parent_id": "abc1"
             })))
             .await
@@ -1616,7 +1612,7 @@ mod tests {
 
         let edit_resp = app
             .clone()
-            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), &serde_json::json!({
                 "parent_id": null
             })))
             .await
@@ -1632,7 +1628,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Child", "body": "B", "parent_id": "abc1"
             })))
             .await
@@ -1642,7 +1638,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let edit_resp = app
-            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), &serde_json::json!({
                 "title": "Renamed"
             })))
             .await
@@ -1658,7 +1654,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Issue", "body": "B"
             })))
             .await
@@ -1668,7 +1664,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let comment_resp = app
-            .oneshot(issue_req("POST", &format!("/issues/{id}/comments"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{id}/comments"), &serde_json::json!({
                 "author": "user",
                 "body": "First comment"
             })))
@@ -1688,7 +1684,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "No assignee", "body": "B"
             })))
             .await
@@ -1715,7 +1711,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Has assignee", "body": "B", "assignee": "swe"
             })))
             .await
@@ -1753,7 +1749,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Issue", "body": "B"
             })))
             .await
@@ -1763,7 +1759,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let complete_resp = app
-            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), &serde_json::json!({
                 "comment": "All done"
             })))
             .await
@@ -1782,7 +1778,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Issue", "body": "B"
             })))
             .await
@@ -1792,14 +1788,14 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         app.clone()
-            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), &serde_json::json!({
                 "comment": "First completion"
             })))
             .await
             .unwrap();
 
         let second = app
-            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{id}/complete"), &serde_json::json!({
                 "comment": "Should fail"
             })))
             .await
@@ -1815,7 +1811,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
             })))
             .await
@@ -1842,9 +1838,7 @@ mod tests {
             if issue.status == IssueStatus::Completed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("issue did not auto-complete within 5 seconds; status={}", issue.status);
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "issue did not auto-complete within 5 seconds; status={}", issue.status);
         }
     }
 
@@ -1869,7 +1863,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({"name": "status-test"})).await)
+            .oneshot(create_session_req(&serde_json::json!({"name": "status-test"})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -1904,7 +1898,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(create_session_req(serde_json::json!({"name": "bad-status"})).await)
+            .oneshot(create_session_req(&serde_json::json!({"name": "bad-status"})))
             .await
             .unwrap();
         let body = response_body_bytes(create_resp).await;
@@ -1926,7 +1920,7 @@ mod tests {
 
             let create_resp = app
                 .clone()
-                .oneshot(create_session_req(serde_json::json!({"name": format!("sess-{status}")})).await)
+                .oneshot(create_session_req(&serde_json::json!({"name": format!("sess-{status}")})))
                 .await
                 .unwrap();
             let body = response_body_bytes(create_resp).await;
@@ -1950,7 +1944,7 @@ mod tests {
         let app = test_app().await;
         let blocker = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Blocker", "body": "B"
             })))
             .await
@@ -1962,7 +1956,7 @@ mod tests {
             .to_string();
 
         app.clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Blocked issue", "body": "B",
                 "blocked_on": [&blocker_id]
             })))
@@ -2096,8 +2090,7 @@ mod tests {
             assert_eq!(
                 fetched.status,
                 *original_status,
-                "session with original status '{}' must not have been changed by orphan sweep",
-                original_status
+                "session with original status '{original_status}' must not have been changed by orphan sweep"
             );
         }
     }
@@ -2305,7 +2298,7 @@ mod tests {
             .oneshot(issue_req(
                 "POST",
                 &format!("/issues/{id}/reopen"),
-                serde_json::json!({ "comment": "the tests were failing because of X" }),
+                &serde_json::json!({ "comment": "the tests were failing because of X" }),
             ))
             .await
             .unwrap();
@@ -2400,7 +2393,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "My Title",
                 "body": "My Body",
                 "assignee": "test-agent"
@@ -2428,9 +2421,7 @@ mod tests {
             if !captured.lock().unwrap().is_empty() {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("capturing client was never called");
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "capturing client was never called");
         }
 
         let msgs = captured.lock().unwrap().clone();
@@ -2446,6 +2437,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn test_start_issue_initial_message_includes_comments() {
         use std::sync::Mutex;
 
@@ -2497,7 +2489,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "PM Task",
                 "body": "Do the thing",
                 "assignee": "product-manager"
@@ -2509,14 +2501,14 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         app.clone()
-            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), &serde_json::json!({
                 "author": "swe",
                 "body": "Slice 1 done"
             })))
             .await
             .unwrap();
         app.clone()
-            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), serde_json::json!({
+            .oneshot(issue_req("POST", &format!("/issues/{issue_id}/comments"), &serde_json::json!({
                 "author": "system",
                 "body": "session lost on server restart"
             })))
@@ -2540,9 +2532,7 @@ mod tests {
             if !captured.lock().unwrap().is_empty() {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("capturing client was never called");
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "capturing client was never called");
         }
 
         let msgs = captured.lock().unwrap().clone();
@@ -2600,7 +2590,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Watcher comment test",
                 "body": "Please respond",
                 "assignee": "swe-agent"
@@ -2629,9 +2619,7 @@ mod tests {
             if issue.status == IssueStatus::Completed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("issue did not auto-complete within 5 seconds; status={}", issue.status);
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "issue did not auto-complete within 5 seconds; status={}", issue.status);
         }
 
         let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
@@ -2693,7 +2681,7 @@ mod tests {
 
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Error test issue",
                 "body": "trigger an error",
                 "assignee": "swe-agent"
@@ -2722,9 +2710,7 @@ mod tests {
             if issue.status == IssueStatus::Failed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("issue did not reach Failed within 5 seconds; status={}", issue.status);
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "issue did not reach Failed within 5 seconds; status={}", issue.status);
         }
 
         let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
@@ -2787,10 +2773,8 @@ mod tests {
                     } => {
                         current_turn_text.push_str(&text);
                     }
-                    SessionEvent::TurnDone { .. } => {
-                        if !current_turn_text.is_empty() {
-                            last_turn_text = std::mem::take(&mut current_turn_text);
-                        }
+                    SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
+                        last_turn_text = std::mem::take(&mut current_turn_text);
                     }
                     SessionEvent::Done => {
                         if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
@@ -2841,9 +2825,7 @@ mod tests {
             if fetched.status == IssueStatus::Completed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("issue did not complete within 3s");
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "issue did not complete within 3s");
         }
 
         let fetched = state.db.get_issue("tt01".to_string()).await.unwrap();
@@ -3096,7 +3078,7 @@ mod tests {
     async fn test_create_issue_no_parent_no_branch_generates_slug() {
         let app = test_app().await;
         let resp = app
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Fix the Bug",
                 "body": "Details here"
             })))
@@ -3124,7 +3106,7 @@ mod tests {
 
         let parent_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Parent Issue",
                 "body": "Parent body"
             })))
@@ -3136,7 +3118,7 @@ mod tests {
         let parent_branch = parent["branch"].as_str().unwrap();
 
         let child_resp = app
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Child Issue",
                 "body": "Child body",
                 "parent_id": parent_id
@@ -3157,7 +3139,7 @@ mod tests {
     async fn test_create_issue_explicit_branch_stored_as_is() {
         let app = test_app().await;
         let resp = app
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "My Issue",
                 "body": "Body",
                 "branch": "my-custom-branch"
@@ -3175,7 +3157,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "My Issue",
                 "body": "Body"
             })))
@@ -3186,7 +3168,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let edit_resp = app
-            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), serde_json::json!({
+            .oneshot(issue_req("PATCH", &format!("/issues/{id}"), &serde_json::json!({
                 "branch": "updated-branch"
             })))
             .await
@@ -3202,7 +3184,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Branch Test",
                 "body": "Body",
                 "branch": "feature/xyz"
@@ -3268,10 +3250,8 @@ mod tests {
                     } => {
                         current_turn_text.push_str(&text);
                     }
-                    SessionEvent::TurnDone { .. } => {
-                        if !current_turn_text.is_empty() {
-                            last_turn_text = std::mem::take(&mut current_turn_text);
-                        }
+                    SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
+                        last_turn_text = std::mem::take(&mut current_turn_text);
                     }
                     SessionEvent::Done => {
                         if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
@@ -3308,9 +3288,7 @@ mod tests {
             if fetched.status == IssueStatus::Completed {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("issue did not complete within 3s");
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "issue did not complete within 3s");
         }
 
         let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
@@ -3324,12 +3302,12 @@ mod tests {
 
     // ─── /hooks CRUD integration tests ───────────────────────────────────────
 
-    fn hook_req(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    fn hook_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
             .unwrap()
     }
 
@@ -3337,7 +3315,7 @@ mod tests {
     async fn test_create_hook_returns_201() {
         let app = test_app().await;
         let resp = app
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "test-hook",
                 "source": { "type": "internal", "event_types": ["issue.status_changed"] },
                 "action": {
@@ -3355,7 +3333,7 @@ mod tests {
     async fn test_create_hook_response_has_id_and_name() {
         let app = test_app().await;
         let resp = app
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "my-hook",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3391,7 +3369,7 @@ mod tests {
     async fn test_list_hooks_after_create() {
         let app = test_app().await;
         app.clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "hook-one",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3418,7 +3396,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "get-hook",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3459,7 +3437,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "old-name",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3475,7 +3453,7 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let patch_resp = app
-            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), &serde_json::json!({
                 "name": "new-name"
             })))
             .await
@@ -3491,7 +3469,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "toggle-hook",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3509,7 +3487,7 @@ mod tests {
         // Disable
         let patch_resp = app
             .clone()
-            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), &serde_json::json!({
                 "enabled": false
             })))
             .await
@@ -3521,7 +3499,7 @@ mod tests {
 
         // Re-enable
         let patch_resp = app
-            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), serde_json::json!({
+            .oneshot(hook_req("PATCH", &format!("/hooks/{id}"), &serde_json::json!({
                 "enabled": true
             })))
             .await
@@ -3536,7 +3514,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "del-hook",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3578,7 +3556,7 @@ mod tests {
         let app = test_app().await;
         // Create two hooks
         app.clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "enabled-hook",
                 "enabled": true,
                 "source": { "type": "internal", "event_types": ["issue.created"] },
@@ -3588,7 +3566,7 @@ mod tests {
 
         let create_resp2 = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "disabled-hook",
                 "enabled": false,
                 "source": { "type": "internal", "event_types": ["issue.created"] },
@@ -3614,7 +3592,7 @@ mod tests {
         let app = test_app().await;
         let create_resp = app
             .clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "exec-hook",
                 "source": { "type": "internal", "event_types": ["issue.created"] },
                 "action": {
@@ -3652,7 +3630,7 @@ mod tests {
         // Create a watcher issue
         let watcher_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Watcher", "body": "watch"
             })))
             .await
@@ -3663,7 +3641,7 @@ mod tests {
 
         // Create a hook that sends a message to the watcher on status_changed
         app.clone()
-            .oneshot(hook_req("POST", "/hooks", serde_json::json!({
+            .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "notify",
                 "source": { "type": "internal", "event_types": ["issue.status_changed"] },
                 "action": {
@@ -3678,7 +3656,7 @@ mod tests {
         // Create a work issue with an assignee
         let work_resp = app
             .clone()
-            .oneshot(issue_req("POST", "/issues", serde_json::json!({
+            .oneshot(issue_req("POST", "/issues", &serde_json::json!({
                 "title": "Work", "body": "do work", "assignee": "test-agent"
             })))
             .await
@@ -3707,9 +3685,7 @@ mod tests {
             if !watcher_issue.comments.is_empty() {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("hook evaluator never fired a comment on watcher within 3s");
-            }
+            assert!(tokio::time::Instant::now() <= deadline, "hook evaluator never fired a comment on watcher within 3s");
         }
 
         let watcher_issue = state.db.get_issue(watcher_id.clone()).await.unwrap();

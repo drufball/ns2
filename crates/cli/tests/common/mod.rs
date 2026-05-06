@@ -14,6 +14,7 @@ pub struct TestHarness {
     server: Option<Child>,
 }
 
+#[allow(dead_code)]
 impl TestHarness {
     /// Create a new harness with a git-initialised temp repo. No server started.
     pub fn new() -> Self {
@@ -40,9 +41,7 @@ impl TestHarness {
         let mut line = String::new();
         loop {
             line.clear();
-            if reader.read_line(&mut line).unwrap() == 0 {
-                panic!("ns2 server exited before printing 'Listening on'");
-            }
+            assert!(reader.read_line(&mut line).unwrap() != 0, "ns2 server exited before printing 'Listening on'");
             if line.contains("Listening on") {
                 break;
             }
