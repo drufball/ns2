@@ -12,7 +12,6 @@ anthropic = { path = "../anthropic" }
 tools = { path = "../tools" }
 issues = { path = "../issues" }
 hooks = { path = "../hooks" }
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls"] }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

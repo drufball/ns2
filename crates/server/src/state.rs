@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 use events::EventBus;
-use hooks::store::HookStore;
+use db::HookStore;
 use uuid::Uuid;
 
 /// Central application state shared across all request handlers.

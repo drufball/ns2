@@ -13,6 +13,8 @@ Flat set of crates, each owning one layer. Dependencies are a directed acyclic g
 
 **Do not add dependencies to a crate's `Cargo.toml` to work around an architectural boundary.** Adding a dep to the wrong crate is a violation, not a shortcut.
 
+**Crates that own an external dependency boundary (database, HTTP) must not expose their concrete implementation types.** Use `pub(crate)` for types like `SqliteDb`, `SqliteHookStore`, etc. and expose only traits and factory functions. Upper-layer crates must couple to abstractions, not implementations. A factory function (e.g. `db::connect() -> (Arc<dyn Db>, Arc<dyn HookStore>)`) is the correct seam.
+
 When adding a substantial new unit of responsibilities or business logic, consider whether a new crate should be created instead of adding it to an existing one.
 
 ## Dependency Graph
@@ -44,7 +46,7 @@ graph TD
 
 Arrows point from dependent to dependency.
 
-> **Known violations (tracked):** `hooks` depends on `issues` and directly uses sqlx — both reach across layer boundaries. These are tracked in GH#97 and GH#98 and will be resolved in follow-up work.
+> **Known violations (tracked):** `hooks` depends on `issues` — reaches across layer boundaries. Tracked in GH#98.
 
 ## Crates
 
@@ -73,12 +75,12 @@ _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
 
 **`hooks`** — hook types, filter evaluation, and action dispatch. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). A hook evaluator subscribes to the `EventBus` and dispatches actions when filters match.
-_Known violations tracked in GH#97 (direct `issues` dep) and GH#98 (direct sqlx dep)._
+_Known violation tracked in GH#98 (direct `issues` dep)._
 
 **`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
 _Doesn't own: issue business logic — delegate to `issues`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 
-**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types.
+**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types. Uses `reqwest` directly for HTTP calls to the local ns2 server (health checks, issue/session/hook CRUD, SSE streaming).
 _Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._

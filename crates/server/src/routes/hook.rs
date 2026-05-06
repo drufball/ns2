@@ -5,10 +5,8 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use hooks::{
-    generate_hook_id, Hook, HookAction, HookFilter, HookSource,
-    store::StoreError,
-};
+use db::Error as StoreError;
+use hooks::{generate_hook_id, Hook, HookAction, HookFilter, HookSource};
 use serde::Deserialize;
 
 use crate::state::AppState;

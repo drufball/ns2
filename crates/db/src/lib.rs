@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::SqlitePool;
 use std::str::FromStr;
+use std::sync::Arc;
 use types::{ContentBlock, Issue, IssueComment, IssueStatus, Role, Session, SessionStatus, Turn};
 use uuid::Uuid;
 
@@ -64,29 +65,51 @@ pub trait IssueDb {
 
 pub trait Db: SessionDb + TurnDb + ContentBlockDb + IssueDb + Send + Sync {}
 
-pub struct SqliteDb {
+pub(crate) struct SqliteDb {
     pool: SqlitePool,
 }
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 impl SqliteDb {
-    #[must_use] 
-    pub const fn from_pool(pool: SqlitePool) -> Self {
-        Self { pool }
-    }
-
     /// # Errors
     ///
     /// Returns an error if the database connection or migration fails.
-    pub async fn connect(url: &str) -> Result<Self> {
+    pub(crate) async fn connect(url: &str) -> Result<Self> {
         let pool = SqlitePool::connect(url).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
     }
 }
 
+#[cfg(test)]
+impl SqliteDb {
+    pub(crate) const fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
 impl Db for SqliteDb {}
+
+impl SqliteDb {
+    #[must_use]
+    pub(crate) const fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
+
+/// Connect to the `SQLite` database at `url`, run migrations, and return
+/// trait-object handles for [`Db`] and [`HookStore`].
+///
+/// # Errors
+///
+/// Returns an error if the database connection or migration fails.
+pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>)> {
+    let sqlite_db = SqliteDb::connect(url).await?;
+    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let db: Arc<dyn Db> = Arc::new(sqlite_db);
+    Ok((db, hook_store))
+}
 
 fn parse_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
     use sqlx::Row;
@@ -466,6 +489,321 @@ impl IssueDb for SqliteDb {
             return Err(Error::NotFound);
         }
         Ok(())
+    }
+}
+
+// ── HookStore ─────────────────────────────────────────────────────────────────
+
+use types::{Hook, HookAction, HookExecution, HookFilter, HookSource, ExecutionStatus};
+
+#[async_trait]
+pub trait HookStore: Send + Sync {
+    async fn create_hook(&self, hook: &Hook) -> Result<()>;
+    async fn list_hooks(
+        &self,
+        enabled: Option<bool>,
+        source_type: Option<&str>,
+    ) -> Result<Vec<Hook>>;
+    async fn get_hook(&self, id: &str) -> Result<Hook>;
+    async fn update_hook(&self, hook: &Hook) -> Result<()>;
+    async fn delete_hook(&self, id: &str) -> Result<()>;
+    async fn create_execution(&self, exec: &HookExecution) -> Result<()>;
+    async fn update_execution(&self, exec: &HookExecution) -> Result<()>;
+    async fn list_executions(
+        &self,
+        hook_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HookExecution>>;
+}
+
+pub(crate) struct SqliteHookStore {
+    pool: SqlitePool,
+}
+
+impl SqliteHookStore {
+    #[must_use]
+    pub(crate) const fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+const fn source_type_str(source: &HookSource) -> &'static str {
+    match source {
+        HookSource::Internal { .. } => "internal",
+        HookSource::External { .. } => "external",
+        HookSource::Timer { .. } => "timer",
+    }
+}
+
+const fn action_type_str(action: &HookAction) -> &'static str {
+    match action {
+        HookAction::SendMessage { .. } => "send_message",
+        HookAction::CreateIssue { .. } => "create_issue",
+        HookAction::RunShell { .. } => "run_shell",
+    }
+}
+
+fn parse_rfc3339_hook(s: &str) -> Result<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| Error::Parse(e.to_string()))
+}
+
+fn parse_hook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Hook> {
+    use sqlx::Row;
+    let id: String = row.get("id");
+    let name: String = row.get("name");
+    let source_json: String = row.get("source");
+    let filter_json: Option<String> = row.get("filter");
+    let action_json: String = row.get("action");
+    let enabled: i64 = row.get("enabled");
+    let created_by: Option<String> = row.get("created_by");
+    let created_at_str: String = row.get("created_at");
+    let updated_at_str: String = row.get("updated_at");
+
+    let source: HookSource = serde_json::from_str(&source_json)
+        .map_err(|e| Error::Parse(format!("source: {e}")))?;
+    let filter: Option<HookFilter> = filter_json
+        .as_deref()
+        .map(|s| {
+            serde_json::from_str(s).map_err(|e| Error::Parse(format!("filter: {e}")))
+        })
+        .transpose()?;
+    let action: HookAction = serde_json::from_str(&action_json)
+        .map_err(|e| Error::Parse(format!("action: {e}")))?;
+
+    Ok(Hook {
+        id,
+        name,
+        source,
+        filter,
+        action,
+        enabled: enabled != 0,
+        created_by,
+        created_at: parse_rfc3339_hook(&created_at_str)?,
+        updated_at: parse_rfc3339_hook(&updated_at_str)?,
+    })
+}
+
+fn parse_execution_row(row: &sqlx::sqlite::SqliteRow) -> Result<HookExecution> {
+    use sqlx::Row;
+    let id: String = row.get("id");
+    let hook_id: String = row.get("hook_id");
+    let triggered_at_str: String = row.get("triggered_at");
+    let event_payload_str: String = row.get("event_payload");
+    let status_str: String = row.get("status");
+    let result: Option<String> = row.get("result");
+    let completed_at_str: Option<String> = row.get("completed_at");
+
+    let event_payload: serde_json::Value = serde_json::from_str(&event_payload_str)
+        .map_err(|e| Error::Parse(e.to_string()))?;
+    let status: ExecutionStatus = status_str.parse().map_err(Error::Parse)?;
+    let completed_at = completed_at_str
+        .as_deref()
+        .map(parse_rfc3339_hook)
+        .transpose()?;
+
+    Ok(HookExecution {
+        id,
+        hook_id,
+        triggered_at: parse_rfc3339_hook(&triggered_at_str)?,
+        event_payload,
+        status,
+        result,
+        completed_at,
+    })
+}
+
+#[async_trait]
+impl HookStore for SqliteHookStore {
+    async fn create_hook(&self, hook: &Hook) -> Result<()> {
+        let source_json = serde_json::to_string(&hook.source)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+        let filter_json = hook
+            .filter
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e: serde_json::Error| Error::Parse(e.to_string()))?;
+        let action_json = serde_json::to_string(&hook.action)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO hooks (id, name, source_type, source, filter, action_type, action, \
+             enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&hook.id)
+        .bind(&hook.name)
+        .bind(source_type_str(&hook.source))
+        .bind(&source_json)
+        .bind(&filter_json)
+        .bind(action_type_str(&hook.action))
+        .bind(&action_json)
+        .bind(i64::from(hook.enabled))
+        .bind(&hook.created_by)
+        .bind(hook.created_at.to_rfc3339())
+        .bind(hook.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_hooks(
+        &self,
+        enabled: Option<bool>,
+        source_type: Option<&str>,
+    ) -> Result<Vec<Hook>> {
+        let rows = match (enabled, source_type) {
+            (None, None) => {
+                sqlx::query(
+                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+                     created_by, created_at, updated_at FROM hooks ORDER BY created_at ASC",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(en), None) => {
+                sqlx::query(
+                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+                     created_by, created_at, updated_at FROM hooks WHERE enabled = ? \
+                     ORDER BY created_at ASC",
+                )
+                .bind(i64::from(en))
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(st)) => {
+                sqlx::query(
+                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+                     created_by, created_at, updated_at FROM hooks WHERE source_type = ? \
+                     ORDER BY created_at ASC",
+                )
+                .bind(st)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(en), Some(st)) => {
+                sqlx::query(
+                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+                     created_by, created_at, updated_at FROM hooks \
+                     WHERE enabled = ? AND source_type = ? ORDER BY created_at ASC",
+                )
+                .bind(i64::from(en))
+                .bind(st)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.iter().map(parse_hook_row).collect()
+    }
+
+    async fn get_hook(&self, id: &str) -> Result<Hook> {
+        let row = sqlx::query(
+            "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+             created_by, created_at, updated_at FROM hooks WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        parse_hook_row(&row)
+    }
+
+    async fn update_hook(&self, hook: &Hook) -> Result<()> {
+        let source_json = serde_json::to_string(&hook.source)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+        let filter_json = hook
+            .filter
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e: serde_json::Error| Error::Parse(e.to_string()))?;
+        let action_json = serde_json::to_string(&hook.action)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+
+        let affected = sqlx::query(
+            "UPDATE hooks SET name = ?, source_type = ?, source = ?, filter = ?, \
+             action_type = ?, action = ?, enabled = ?, created_by = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&hook.name)
+        .bind(source_type_str(&hook.source))
+        .bind(&source_json)
+        .bind(&filter_json)
+        .bind(action_type_str(&hook.action))
+        .bind(&action_json)
+        .bind(i64::from(hook.enabled))
+        .bind(&hook.created_by)
+        .bind(hook.updated_at.to_rfc3339())
+        .bind(&hook.id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn delete_hook(&self, id: &str) -> Result<()> {
+        let affected = sqlx::query("DELETE FROM hooks WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn create_execution(&self, exec: &HookExecution) -> Result<()> {
+        let event_payload_str = serde_json::to_string(&exec.event_payload)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO hook_executions (id, hook_id, triggered_at, event_payload, \
+             status, result, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&exec.id)
+        .bind(&exec.hook_id)
+        .bind(exec.triggered_at.to_rfc3339())
+        .bind(&event_payload_str)
+        .bind(exec.status.to_string())
+        .bind(&exec.result)
+        .bind(exec.completed_at.map(|dt| dt.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_execution(&self, exec: &HookExecution) -> Result<()> {
+        let event_payload_str = serde_json::to_string(&exec.event_payload)
+            .map_err(|e| Error::Parse(e.to_string()))?;
+        sqlx::query(
+            "UPDATE hook_executions SET status = ?, result = ?, completed_at = ?, \
+             event_payload = ? WHERE id = ?",
+        )
+        .bind(exec.status.to_string())
+        .bind(&exec.result)
+        .bind(exec.completed_at.map(|dt| dt.to_rfc3339()))
+        .bind(&event_payload_str)
+        .bind(&exec.id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_executions(&self, hook_id: &str, limit: usize) -> Result<Vec<HookExecution>> {
+        let rows = sqlx::query(
+            "SELECT id, hook_id, triggered_at, event_payload, status, result, completed_at \
+             FROM hook_executions WHERE hook_id = ? ORDER BY triggered_at DESC LIMIT ?",
+        )
+        .bind(hook_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(parse_execution_row).collect()
     }
 }
 

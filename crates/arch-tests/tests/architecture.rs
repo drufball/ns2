@@ -203,6 +203,96 @@ fn specs_has_no_upper_layer_deps() {
 }
 
 // ---------------------------------------------------------------------------
+// External crate ownership tests
+// ---------------------------------------------------------------------------
+
+/// Return the names of all workspace packages that directly depend on `ext_crate`.
+fn direct_users_of(ext_crate: &str) -> Vec<String> {
+    let metadata = MetadataCommand::new()
+        .manifest_path(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"),
+        )
+        .exec()
+        .expect("cargo metadata failed");
+
+    metadata
+        .workspace_packages()
+        .iter()
+        .filter(|pkg| {
+            pkg.dependencies
+                .iter()
+                .any(|d| d.kind == DependencyKind::Normal && d.name == ext_crate)
+        })
+        .map(|pkg| pkg.name.clone())
+        .collect()
+}
+
+/// Only `db` may depend directly on `sqlx`.
+/// Any other crate that adds sqlx is bypassing the db boundary.
+#[test]
+fn only_db_uses_sqlx_directly() {
+    let users = direct_users_of("sqlx");
+    let violations: Vec<&String> = users.iter().filter(|name| name.as_str() != "db").collect();
+    assert!(
+        violations.is_empty(),
+        "External crate ownership violation: only `db` may depend on sqlx directly.\n\
+         Violating crates: {}\n\
+         See architecture.spec.md: \"`db` — SQLite access via sqlx. Owns schema, migrations, \
+         and every query. Doesn't own: SQL written anywhere else.\"",
+        violations
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Only `server` may depend directly on `axum`.
+/// HTTP routing is the server's responsibility; other crates must not reach for it.
+#[test]
+fn only_server_uses_axum_directly() {
+    let users = direct_users_of("axum");
+    let violations: Vec<&String> =
+        users.iter().filter(|name| name.as_str() != "server").collect();
+    assert!(
+        violations.is_empty(),
+        "External crate ownership violation: only `server` may depend on axum directly.\n\
+         Violating crates: {}\n\
+         See architecture.spec.md: \"`server` — axum HTTP server. Routes, ServerConfig, \
+         session maps, harness spawning.\"",
+        violations
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Only `anthropic` (Anthropic API) and `cli` (local server HTTP) may depend directly
+/// on `reqwest`. All other crates must go through one of these two.
+#[test]
+fn only_designated_http_crates_use_reqwest_directly() {
+    let users = direct_users_of("reqwest");
+    let allowed = ["anthropic", "cli"];
+    let violations: Vec<&String> = users
+        .iter()
+        .filter(|name| !allowed.contains(&name.as_str()))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "External crate ownership violation: only `anthropic` (Anthropic API) and \
+         `cli` (local server HTTP) may depend on reqwest directly.\n\
+         Violating crates:\n{}\n\
+         See architecture.spec.md for the HTTP ownership rules.",
+        violations
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Coverage-ignore allowlist helpers
 // ---------------------------------------------------------------------------
 
