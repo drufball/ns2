@@ -18,3 +18,5 @@ minijinja = "2"
 
 [dev-dependencies]
 tokio = { workspace = true }
+mockall = "0.12"
+async-trait = { workspace = true }

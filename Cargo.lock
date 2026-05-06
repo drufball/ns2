@@ -1063,11 +1063,13 @@ dependencies = [
 name = "hooks"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "db",
  "events",
  "issues",
  "minijinja",
+ "mockall",
  "serde",
  "serde_json",
  "tokio",
