@@ -13,6 +13,8 @@ Flat set of crates, each owning one layer. Dependencies are a directed acyclic g
 
 **Do not add dependencies to a crate's `Cargo.toml` to work around an architectural boundary.** Adding a dep to the wrong crate is a violation, not a shortcut.
 
+**Crates that own an external dependency boundary (database, HTTP) must not expose their concrete implementation types.** Use `pub(crate)` for types like `SqliteDb`, `SqliteHookStore`, etc. and expose only traits and factory functions. Upper-layer crates must couple to abstractions, not implementations. A factory function (e.g. `db::connect() -> (Arc<dyn Db>, Arc<dyn HookStore>)`) is the correct seam.
+
 When adding a substantial new unit of responsibilities or business logic, consider whether a new crate should be created instead of adding it to an existing one.
 
 ## Dependency Graph

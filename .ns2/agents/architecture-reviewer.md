@@ -12,5 +12,5 @@ Review the changed files (or full codebase if no branch context). Run these chec
   - `target/debug/check-fanout` (flag score > 300)
   - `target/debug/check-state` (flag score > 8)
   - `target/debug/cohesion <file>` (flag concern score > 12; include cluster output for flagged files)
-- **Independent review** — read each changed file and flag issues the automated checks missed: mixed concerns, unclear boundaries, assumption gaps at callsites.
+- **Independent review** — read each changed file and flag issues the automated checks missed: mixed concerns, unclear boundaries, assumption gaps at callsites. Also check for **exposed implementation details**: if a boundary crate (`db`, `server`, `anthropic`) has `pub` structs or fns that are concrete implementations rather than traits or factory functions, flag them — they should be `pub(crate)` instead.
 - **Check improvement suggestions** — for anything caught in independent review, note whether a tweak to one of the four scripts (threshold, pattern, formula) would have caught it automatically, and whether any current flags look like false positives worth suppressing.
