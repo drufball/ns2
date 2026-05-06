@@ -10,8 +10,8 @@ GIT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 # 1. Check for uncommitted / untracked changes.
 STATUS=$(git -C "$GIT_DIR" status --short 2>/dev/null)
 if [ -n "$STATUS" ]; then
-  echo "You have uncommitted changes. Please commit all your work before stopping."
-  exit 1
+  echo "You have uncommitted changes. Please commit all your work before stopping." >&2
+  exit 2
 fi
 
 # 2. Check for commits that exist locally but have not been pushed to any remote.
@@ -19,8 +19,8 @@ HAS_REMOTE=$(git -C "$GIT_DIR" remote 2>/dev/null)
 if [ -n "$HAS_REMOTE" ]; then
   UNPUSHED=$(git -C "$GIT_DIR" log HEAD --oneline --not --remotes 2>/dev/null | wc -l | tr -d ' ')
   if [ "$UNPUSHED" -gt 0 ]; then
-    echo "You have ${UNPUSHED} unpushed commit(s). Please push your work before stopping."
-    exit 1
+    echo "You have ${UNPUSHED} unpushed commit(s). Please push your work before stopping." >&2
+    exit 2
   fi
 fi
 

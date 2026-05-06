@@ -35,7 +35,7 @@ ns2 issue start --id "$id"
 
 ### Quick progress check
 ```bash
-# Peek at last 2 turns, kill after 10 seconds (macOS: timeout not in PATH, use background+kill)
+# Peek at last 2 turns, exit after <timeout> seconds (session continues in background)
 ns2 session tail --id "$SESSION" --turns 2 --timeout <timeout>
 ```
 
