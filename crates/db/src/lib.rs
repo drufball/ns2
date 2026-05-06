@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::SqlitePool;
 use std::str::FromStr;
+use std::sync::Arc;
 use types::{ContentBlock, Issue, IssueComment, IssueStatus, Role, Session, SessionStatus, Turn};
 use uuid::Uuid;
 
@@ -64,25 +65,27 @@ pub trait IssueDb {
 
 pub trait Db: SessionDb + TurnDb + ContentBlockDb + IssueDb + Send + Sync {}
 
-pub struct SqliteDb {
+pub(crate) struct SqliteDb {
     pool: SqlitePool,
 }
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 impl SqliteDb {
-    #[must_use] 
-    pub const fn from_pool(pool: SqlitePool) -> Self {
-        Self { pool }
-    }
-
     /// # Errors
     ///
     /// Returns an error if the database connection or migration fails.
-    pub async fn connect(url: &str) -> Result<Self> {
+    pub(crate) async fn connect(url: &str) -> Result<Self> {
         let pool = SqlitePool::connect(url).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
+    }
+}
+
+#[cfg(test)]
+impl SqliteDb {
+    pub(crate) const fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 }
 
@@ -90,9 +93,22 @@ impl Db for SqliteDb {}
 
 impl SqliteDb {
     #[must_use]
-    pub const fn pool(&self) -> &SqlitePool {
+    pub(crate) const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+/// Connect to the `SQLite` database at `url`, run migrations, and return
+/// trait-object handles for [`Db`] and [`HookStore`].
+///
+/// # Errors
+///
+/// Returns an error if the database connection or migration fails.
+pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>)> {
+    let sqlite_db = SqliteDb::connect(url).await?;
+    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let db: Arc<dyn Db> = Arc::new(sqlite_db);
+    Ok((db, hook_store))
 }
 
 fn parse_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
@@ -500,13 +516,13 @@ pub trait HookStore: Send + Sync {
     ) -> Result<Vec<HookExecution>>;
 }
 
-pub struct SqliteHookStore {
+pub(crate) struct SqliteHookStore {
     pool: SqlitePool,
 }
 
 impl SqliteHookStore {
     #[must_use]
-    pub const fn new(pool: SqlitePool) -> Self {
+    pub(crate) const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }

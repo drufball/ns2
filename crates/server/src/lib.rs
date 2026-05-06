@@ -1,6 +1,4 @@
 use axum::{routing::{delete, get, patch, post}, Router};
-use db::SqliteDb;
-use db::SqliteHookStore;
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -118,10 +116,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let sqlite_db = SqliteDb::connect(&db_url).await?;
-    let hook_store: Arc<dyn db::HookStore> =
-        Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
-    let db: Arc<dyn db::Db> = Arc::new(sqlite_db);
+    let (db, hook_store) = db::connect(&db_url).await?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 
@@ -182,7 +177,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
     use std::sync::Arc;
-    use db::SqliteDb;
     use uuid::Uuid;
     use types::{Session, SessionStatus, IssueStatus, IssueComment};
     use events::SessionEvent;
@@ -214,15 +208,12 @@ mod tests {
 
     /// Helper to build an in-memory hook store suitable for tests.
     async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
-        let sqlite_db = SqliteDb::connect("sqlite::memory:").await.unwrap();
-        Arc::new(db::SqliteHookStore::new(sqlite_db.pool().clone()))
+        let (_db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        hook_store
     }
 
     async fn test_state() -> AppState {
-        let sqlite_db = SqliteDb::connect("sqlite::memory:").await.unwrap();
-        let hook_store: Arc<dyn db::HookStore> =
-            Arc::new(db::SqliteHookStore::new(sqlite_db.pool().clone()));
-        let db = Arc::new(sqlite_db) as Arc<dyn db::Db>;
+        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
@@ -2365,7 +2356,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
@@ -2461,7 +2452,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient { captured: Arc::clone(&captured) }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
@@ -2653,7 +2644,7 @@ mod tests {
             }
         }
 
-        let db = Arc::new(SqliteDb::connect("sqlite::memory:").await.unwrap()) as Arc<dyn db::Db>;
+        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
