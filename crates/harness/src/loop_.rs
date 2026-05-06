@@ -201,6 +201,8 @@ pub async fn run(
     // Resolve the effective git root (injected in tests; discovered via git in production).
     let effective_root = if let Some(root) = config.git_root.clone() {
         Some(root)
+    } else if let Some(cwd) = config.cwd.clone() {
+        Some(cwd)
     } else {
         workspace::git_root().await
     };

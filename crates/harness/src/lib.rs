@@ -2769,4 +2769,51 @@ mod tests {
             "project hook must NOT run when include_project_config=false (log: {log_content:?})"
         );
     }
+
+    // ── Effective-root / system-prompt tests ──────────────────────────────────
+
+    /// When `config.cwd` is set and `config.git_root` is absent, `run()` must use
+    /// `cwd` as the effective root so the system prompt preamble reflects the
+    /// worktree path rather than whatever `git rev-parse --show-toplevel` returns.
+    #[tokio::test]
+    async fn run_builds_system_prompt_from_cwd_when_git_root_absent() {
+        let worktree_dir = tempfile::TempDir::new().unwrap();
+        let agents_dir_path = worktree_dir.path().join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir_path).unwrap();
+        // Agent body is required; without it build_system_prompt returns None.
+        std::fs::write(
+            agents_dir_path.join("test-agent.md"),
+            "---\nname: test-agent\ndescription: test\n---\nTest body",
+        )
+        .unwrap();
+
+        let mut session = make_session();
+        session.agent = Some("test-agent".into());
+        let mock_db = permissive_mock_db(); // returns empty issues → cwd not overridden
+
+        let config = HarnessConfig {
+            session,
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+            cwd: Some(worktree_dir.path().to_owned()),
+        };
+
+        let client = Arc::new(SystemCapturingClient::new());
+        let client_ref = Arc::clone(&client);
+        let db = Arc::new(mock_db);
+        let (event_tx, _) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let system = client_ref.captured().unwrap_or_default();
+        let worktree_path_str = worktree_dir.path().to_str().unwrap();
+        assert!(
+            system.contains(worktree_path_str),
+            "system prompt should reference cwd/worktree path '{worktree_path_str}'; got: {system:?}"
+        );
+    }
 }
