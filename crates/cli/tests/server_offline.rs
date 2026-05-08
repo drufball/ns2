@@ -27,7 +27,12 @@ fn session_new_fails_when_server_down() {
 fn session_tail_fails_when_server_down() {
     let h = TestHarness::new();
     h.ns2()
-        .args(["session", "tail", "--id", "00000000-0000-0000-0000-000000000000"])
+        .args([
+            "session",
+            "tail",
+            "--id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("server is not running"));

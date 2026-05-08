@@ -21,7 +21,12 @@ impl TestHarness {
         let home_dir = TempDir::new().unwrap();
         let repo_dir = TempDir::new().unwrap();
         git_init(repo_dir.path(), home_dir.path());
-        Self { home_dir, repo_dir, port: free_port(), server: None }
+        Self {
+            home_dir,
+            repo_dir,
+            port: free_port(),
+            server: None,
+        }
     }
 
     /// Start the ns2 server on `self.port` and block until it is ready.
@@ -41,7 +46,10 @@ impl TestHarness {
         let mut line = String::new();
         loop {
             line.clear();
-            assert!(reader.read_line(&mut line).unwrap() != 0, "ns2 server exited before printing 'Listening on'");
+            assert!(
+                reader.read_line(&mut line).unwrap() != 0,
+                "ns2 server exited before printing 'Listening on'"
+            );
             if line.contains("Listening on") {
                 break;
             }
@@ -73,7 +81,12 @@ impl TestHarness {
             .args(args)
             .output()
             .expect("failed to run ns2");
-        assert!(out.status.success(), "ns2 {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "ns2 {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
@@ -115,7 +128,12 @@ impl TestHarness {
     pub fn setup_origin(&self) {
         let bare = self.home_dir.path().join("origin-bare");
         Command::new("git")
-            .args(["clone", "--bare", self.repo_dir.path().to_str().unwrap(), bare.to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                self.repo_dir.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
             .env("HOME", self.home_dir.path())
             .output()
             .unwrap();
@@ -180,7 +198,11 @@ impl TestHarness {
             .to_str()
             .unwrap()
             .to_string();
-        self.home_dir.path().join(".ns2").join(repo_name).join("worktrees")
+        self.home_dir
+            .path()
+            .join(".ns2")
+            .join(repo_name)
+            .join("worktrees")
     }
 }
 
@@ -217,12 +239,24 @@ fn git_init(repo: &Path, home: &Path) {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "config", "user.email", "test@example.com"])
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@example.com",
+        ])
         .env("HOME", home)
         .output()
         .unwrap();
     Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "config", "user.name", "ns2 tester"])
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "config",
+            "user.name",
+            "ns2 tester",
+        ])
         .env("HOME", home)
         .output()
         .unwrap();
@@ -233,7 +267,13 @@ fn git_init(repo: &Path, home: &Path) {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "commit", "-m", "initial commit"])
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "commit",
+            "-m",
+            "initial commit",
+        ])
         .env("HOME", home)
         .output()
         .unwrap();

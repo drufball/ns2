@@ -10,11 +10,7 @@ pub async fn run_list() {
     } else {
         println!("{:<40}  path", "branch");
         for entry in &entries {
-            println!(
-                "{:<40}  {}",
-                entry.branch,
-                entry.path.display()
-            );
+            println!("{:<40}  {}", entry.branch, entry.path.display());
         }
     }
 }
@@ -44,12 +40,7 @@ pub async fn run_delete(branch: String, force: bool) {
         std::process::exit(1);
     });
     let config = workspace::read_ns2_config(&git_root);
-    match workspace::delete_worktree(
-        &git_root,
-        &config.worktree_base,
-        &branch,
-        force,
-    ).await {
+    match workspace::delete_worktree(&git_root, &config.worktree_base, &branch, force).await {
         Ok(_path) => {
             eprintln!("Deleted worktree for branch {branch}");
         }
@@ -58,9 +49,7 @@ pub async fn run_delete(branch: String, force: bool) {
             std::process::exit(1);
         }
         Err(workspace::DeleteWorktreeError::UnmergedCommits(_)) => {
-            eprintln!(
-                "Error: branch {branch} has unmerged commits. Use --force to delete anyway."
-            );
+            eprintln!("Error: branch {branch} has unmerged commits. Use --force to delete anyway.");
             std::process::exit(1);
         }
         Err(workspace::DeleteWorktreeError::GitFailed(msg)) => {

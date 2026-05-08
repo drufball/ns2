@@ -1,11 +1,11 @@
-use std::fmt::Write as _;
-use std::sync::Arc;
 use chrono::Utc;
 use events::{EventBus, IssueEvent, SystemEvent};
+use std::fmt::Write as _;
+use std::sync::Arc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
 
-#[must_use] 
+#[must_use]
 pub fn slugify(title: &str) -> String {
     let lower = title.to_lowercase();
     let mut result = String::new();
@@ -22,7 +22,7 @@ pub fn slugify(title: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-#[must_use] 
+#[must_use]
 pub fn generate_issue_id() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let id = Uuid::new_v4();
@@ -87,12 +87,12 @@ impl IssueService {
         Self { db, event_bus }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn db(&self) -> &Arc<dyn db::Db> {
         &self.db
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
@@ -128,7 +128,8 @@ impl IssueService {
             updated_at: now,
         };
         self.db.create_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::Created(issue.clone())));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::Created(issue.clone())));
         Ok(issue)
     }
 
@@ -173,10 +174,11 @@ impl IssueService {
         issue.comments.push(comment.clone());
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-            issue: issue.clone(),
-            comment,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                issue: issue.clone(),
+                comment,
+            }));
         Ok(issue)
     }
 
@@ -188,27 +190,32 @@ impl IssueService {
         let from = issue.status.clone();
         if let Some(text) = summary {
             if !text.is_empty() {
-                let author = issue.assignee.clone().unwrap_or_else(|| "agent".to_string());
+                let author = issue
+                    .assignee
+                    .clone()
+                    .unwrap_or_else(|| "agent".to_string());
                 let comment = IssueComment {
                     author,
                     created_at: Utc::now(),
                     body: text,
                 };
                 issue.comments.push(comment.clone());
-                self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                    issue: issue.clone(),
-                    comment,
-                }));
+                self.event_bus
+                    .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                        issue: issue.clone(),
+                        comment,
+                    }));
             }
         }
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Completed,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Completed,
+            }));
         Ok(())
     }
 
@@ -227,15 +234,17 @@ impl IssueService {
         issue.status = IssueStatus::Failed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-            issue: issue.clone(),
-            comment,
-        }));
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Failed,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                issue: issue.clone(),
+                comment,
+            }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Failed,
+            }));
         Ok(())
     }
 
@@ -247,10 +256,15 @@ impl IssueService {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
         if issue.assignee.is_none() {
-            return Err(Error::BadRequest("issue has no assignee; set one with `issue edit --assignee <agent>`".into()));
+            return Err(Error::BadRequest(
+                "issue has no assignee; set one with `issue edit --assignee <agent>`".into(),
+            ));
         }
         if issue.status != IssueStatus::Open {
-            return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
+            return Err(Error::BadRequest(format!(
+                "issue is already {}",
+                issue.status
+            )));
         }
 
         let from = issue.status.clone();
@@ -270,11 +284,12 @@ impl IssueService {
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
 
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Running,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Running,
+            }));
 
         let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
         if !issue.comments.is_empty() {
@@ -290,7 +305,11 @@ impl IssueService {
             }
         }
 
-        Ok(StartIssueOutcome { issue, session, initial_message })
+        Ok(StartIssueOutcome {
+            issue,
+            session,
+            initial_message,
+        })
     }
 
     /// # Errors
@@ -300,7 +319,10 @@ impl IssueService {
     pub async fn complete_issue(&self, id: String, comment: String) -> Result<Issue> {
         let mut issue = self.db.get_issue(id.clone()).await?;
         if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
-            return Err(Error::BadRequest(format!("issue is already {}", issue.status)));
+            return Err(Error::BadRequest(format!(
+                "issue is already {}",
+                issue.status
+            )));
         }
         let from = issue.status.clone();
         let new_comment = IssueComment {
@@ -312,15 +334,17 @@ impl IssueService {
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-            issue: issue.clone(),
-            comment: new_comment,
-        }));
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Completed,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                issue: issue.clone(),
+                comment: new_comment,
+            }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Completed,
+            }));
         Ok(issue)
     }
 
@@ -351,15 +375,17 @@ impl IssueService {
         issue.status = IssueStatus::Cancelled;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-            issue: issue.clone(),
-            comment,
-        }));
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Cancelled,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                issue: issue.clone(),
+                comment,
+            }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Cancelled,
+            }));
         Ok(issue)
     }
 
@@ -373,7 +399,7 @@ impl IssueService {
         // Only `failed`, `completed`, and `cancelled` can be reopened
         let keep_session_id = match issue.status {
             IssueStatus::Failed | IssueStatus::Cancelled => false, // clear session_id → fresh session on next start
-            IssueStatus::Completed => true,                        // keep session_id → resume history on next start
+            IssueStatus::Completed => true, // keep session_id → resume history on next start
             _ => {
                 return Err(Error::BadRequest(format!(
                     "cannot reopen issue {id}: only failed, completed, or cancelled issues can be reopened (current status: {})",
@@ -393,10 +419,11 @@ impl IssueService {
                     body: comment_text,
                 };
                 issue.comments.push(new_comment.clone());
-                self.event_bus.send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                    issue: issue.clone(),
-                    comment: new_comment,
-                }));
+                self.event_bus
+                    .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                        issue: issue.clone(),
+                        comment: new_comment,
+                    }));
             }
         }
 
@@ -406,11 +433,12 @@ impl IssueService {
         }
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
-        self.event_bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
-            issue: issue.clone(),
-            from,
-            to: IssueStatus::Open,
-        }));
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::Open,
+            }));
         Ok(issue)
     }
 
@@ -432,8 +460,15 @@ impl IssueService {
 
         for session in orphans {
             // 1. Mark the session failed.
-            if let Err(e) = self.db.update_session_status(session.id, SessionStatus::Failed).await {
-                eprintln!("[orphan_sweep] failed to update session {} to failed: {e}", session.id);
+            if let Err(e) = self
+                .db
+                .update_session_status(session.id, SessionStatus::Failed)
+                .await
+            {
+                eprintln!(
+                    "[orphan_sweep] failed to update session {} to failed: {e}",
+                    session.id
+                );
                 // Continue — try the rest.
             }
 
@@ -499,7 +534,10 @@ mod tests {
     #[async_trait]
     impl db::SessionDb for MemoryDb {
         async fn create_session(&self, session: &Session) -> db::Result<()> {
-            self.sessions.lock().unwrap().insert(session.id, session.clone());
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(session.id, session.clone());
             Ok(())
         }
 
@@ -555,7 +593,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list_content_blocks(&self, _turn_id: Uuid) -> db::Result<Vec<(Role, ContentBlock)>> {
+        async fn list_content_blocks(
+            &self,
+            _turn_id: Uuid,
+        ) -> db::Result<Vec<(Role, ContentBlock)>> {
             Ok(vec![])
         }
 
@@ -567,7 +608,10 @@ mod tests {
     #[async_trait]
     impl db::IssueDb for MemoryDb {
         async fn create_issue(&self, issue: &Issue) -> db::Result<()> {
-            self.issues.lock().unwrap().insert(issue.id.clone(), issue.clone());
+            self.issues
+                .lock()
+                .unwrap()
+                .insert(issue.id.clone(), issue.clone());
             Ok(())
         }
 
@@ -689,7 +733,10 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
 
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
-        let result = svc.complete_issue("ab12".into(), "Looks good".into()).await.unwrap();
+        let result = svc
+            .complete_issue("ab12".into(), "Looks good".into())
+            .await
+            .unwrap();
 
         assert_eq!(result.status, IssueStatus::Completed);
         assert_eq!(result.comments.len(), 1);
@@ -854,7 +901,10 @@ mod tests {
         assert_eq!(fetched_issue.status, IssueStatus::Failed);
         assert_eq!(fetched_issue.comments.len(), 1);
         assert_eq!(fetched_issue.comments[0].author, "system");
-        assert_eq!(fetched_issue.comments[0].body, "session lost on server restart");
+        assert_eq!(
+            fetched_issue.comments[0].body,
+            "session lost on server restart"
+        );
     }
 
     // --- create_issue ---
@@ -864,14 +914,17 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let issue = svc.create_issue(CreateIssueInput {
-            title: "Fix the bug".into(),
-            body: "Details".into(),
-            assignee: None,
-            parent_id: None,
-            blocked_on: vec![],
-            branch: None,
-        }).await.unwrap();
+        let issue = svc
+            .create_issue(CreateIssueInput {
+                title: "Fix the bug".into(),
+                body: "Details".into(),
+                assignee: None,
+                parent_id: None,
+                blocked_on: vec![],
+                branch: None,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(issue.status, IssueStatus::Open);
         assert_eq!(issue.id.len(), 4);
@@ -886,14 +939,17 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let issue = svc.create_issue(CreateIssueInput {
-            title: "My task".into(),
-            body: "B".into(),
-            assignee: None,
-            parent_id: None,
-            blocked_on: vec![],
-            branch: Some("my-explicit-branch".into()),
-        }).await.unwrap();
+        let issue = svc
+            .create_issue(CreateIssueInput {
+                title: "My task".into(),
+                body: "B".into(),
+                assignee: None,
+                parent_id: None,
+                blocked_on: vec![],
+                branch: Some("my-explicit-branch".into()),
+            })
+            .await
+            .unwrap();
 
         assert_eq!(issue.branch, "my-explicit-branch");
     }
@@ -903,23 +959,29 @@ mod tests {
         let db = Arc::new(MemoryDb::new());
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let parent = svc.create_issue(CreateIssueInput {
-            title: "Parent".into(),
-            body: "B".into(),
-            assignee: None,
-            parent_id: None,
-            blocked_on: vec![],
-            branch: Some("parent-branch".into()),
-        }).await.unwrap();
+        let parent = svc
+            .create_issue(CreateIssueInput {
+                title: "Parent".into(),
+                body: "B".into(),
+                assignee: None,
+                parent_id: None,
+                blocked_on: vec![],
+                branch: Some("parent-branch".into()),
+            })
+            .await
+            .unwrap();
 
-        let child = svc.create_issue(CreateIssueInput {
-            title: "Child".into(),
-            body: "B".into(),
-            assignee: None,
-            parent_id: Some(parent.id.clone()),
-            blocked_on: vec![],
-            branch: None,
-        }).await.unwrap();
+        let child = svc
+            .create_issue(CreateIssueInput {
+                title: "Child".into(),
+                body: "B".into(),
+                assignee: None,
+                parent_id: Some(parent.id.clone()),
+                blocked_on: vec![],
+                branch: None,
+            })
+            .await
+            .unwrap();
 
         assert_eq!(child.branch, "parent-branch");
     }
@@ -933,14 +995,20 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
-            title: Some("New title".into()),
-            body: None,
-            assignee: None,
-            parent_id: None,
-            blocked_on: None,
-            branch: None,
-        }).await.unwrap();
+        let updated = svc
+            .edit_issue(
+                "ab12".into(),
+                EditIssueInput {
+                    title: Some("New title".into()),
+                    body: None,
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: None,
+                    branch: None,
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(updated.title, "New title");
         assert_eq!(updated.body, "Test body");
@@ -954,14 +1022,20 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
-            title: None,
-            body: None,
-            assignee: None,
-            parent_id: Some(None),
-            blocked_on: None,
-            branch: None,
-        }).await.unwrap();
+        let updated = svc
+            .edit_issue(
+                "ab12".into(),
+                EditIssueInput {
+                    title: None,
+                    body: None,
+                    assignee: None,
+                    parent_id: Some(None),
+                    blocked_on: None,
+                    branch: None,
+                },
+            )
+            .await
+            .unwrap();
 
         assert!(updated.parent_id.is_none());
     }
@@ -974,14 +1048,20 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let updated = svc.edit_issue("ab12".into(), EditIssueInput {
-            title: Some("Renamed".into()),
-            body: None,
-            assignee: None,
-            parent_id: None,
-            blocked_on: None,
-            branch: None,
-        }).await.unwrap();
+        let updated = svc
+            .edit_issue(
+                "ab12".into(),
+                EditIssueInput {
+                    title: Some("Renamed".into()),
+                    body: None,
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: None,
+                    branch: None,
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(updated.parent_id, Some("parent1".into()));
     }
@@ -995,7 +1075,10 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let updated = svc.add_comment("ab12".into(), "user".into(), "Great issue".into()).await.unwrap();
+        let updated = svc
+            .add_comment("ab12".into(), "user".into(), "Great issue".into())
+            .await
+            .unwrap();
 
         assert_eq!(updated.comments.len(), 1);
         assert_eq!(updated.comments[0].author, "user");
@@ -1016,7 +1099,9 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.finish_issue("ab12", Some("Done! All tests pass.".into())).await.unwrap();
+        svc.finish_issue("ab12", Some("Done! All tests pass.".into()))
+            .await
+            .unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
@@ -1064,7 +1149,9 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.finish_issue("ab12", Some("summary".into())).await.unwrap();
+        svc.finish_issue("ab12", Some("summary".into()))
+            .await
+            .unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.comments[0].author, "agent");
@@ -1080,7 +1167,9 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.fail_issue("ab12", "timeout exceeded".into()).await.unwrap();
+        svc.fail_issue("ab12", "timeout exceeded".into())
+            .await
+            .unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Failed);
@@ -1121,7 +1210,10 @@ mod tests {
         let result = svc.cancel_issue("ab12".into()).await.unwrap();
 
         assert_eq!(result.status, IssueStatus::Cancelled);
-        assert!(result.session_id.is_some(), "session_id should be preserved");
+        assert!(
+            result.session_id.is_some(),
+            "session_id should be preserved"
+        );
     }
 
     #[tokio::test]
@@ -1218,7 +1310,9 @@ mod tests {
             parent_id: None,
             blocked_on: vec![],
             branch: None,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let ev = rx.try_recv().expect("should have received an event");
         assert!(
@@ -1262,11 +1356,16 @@ mod tests {
         let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
-        svc.complete_issue("ab12".into(), "All done".into()).await.unwrap();
+        svc.complete_issue("ab12".into(), "All done".into())
+            .await
+            .unwrap();
 
         let ev1 = rx.try_recv().expect("should have received first event");
         assert!(
-            matches!(ev1, events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })),
+            matches!(
+                ev1,
+                events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })
+            ),
             "first event should be CommentAdded, got: {ev1:?}"
         );
 
@@ -1292,7 +1391,9 @@ mod tests {
         let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
         let mut rx = bus.subscribe();
 
-        svc.add_comment("ab12".into(), "tester".into(), "Great issue".into()).await.unwrap();
+        svc.add_comment("ab12".into(), "tester".into(), "Great issue".into())
+            .await
+            .unwrap();
 
         let ev = rx.try_recv().expect("should have received an event");
         assert!(
@@ -1373,7 +1474,10 @@ mod tests {
 
         let ev1 = rx.try_recv().expect("should have received first event");
         assert!(
-            matches!(ev1, events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })),
+            matches!(
+                ev1,
+                events::SystemEvent::Issue(events::IssueEvent::CommentAdded { .. })
+            ),
             "first event should be CommentAdded, got: {ev1:?}"
         );
 

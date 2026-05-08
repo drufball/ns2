@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-
 /// A single git worktree entry, parsed from `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeEntry {
@@ -75,19 +74,17 @@ pub async fn ensure_worktree(
             );
         }
         Err(ref e) => {
-            tracing::warn!("failed to run git worktree add for branch '{}': {e}", branch);
+            tracing::warn!(
+                "failed to run git worktree add for branch '{}': {e}",
+                branch
+            );
         }
     }
 
     // Second attempt: branch already exists in git — check it out into the worktree.
     let output = tokio::process::Command::new("git")
         .current_dir(git_root)
-        .args([
-            "worktree",
-            "add",
-            &worktree_path.to_string_lossy(),
-            branch,
-        ])
+        .args(["worktree", "add", &worktree_path.to_string_lossy(), branch])
         .output()
         .await;
 
@@ -152,8 +149,8 @@ pub async fn detect_remote_default_branch(git_root: &Path) -> String {
 pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<WorktreeEntry> {
     // Canonicalize the base path so that symlink chains (e.g. /var → /private/var on macOS)
     // don't prevent the prefix filter from matching git's output.
-    let canonical_base = std::fs::canonicalize(worktree_base)
-        .unwrap_or_else(|_| worktree_base.to_path_buf());
+    let canonical_base =
+        std::fs::canonicalize(worktree_base).unwrap_or_else(|_| worktree_base.to_path_buf());
 
     let output = match tokio::process::Command::new("git")
         .current_dir(git_root)
@@ -182,7 +179,7 @@ pub async fn list_worktrees(git_root: &Path, worktree_base: &Path) -> Vec<Worktr
 ///
 /// ```
 /// Blocks are separated by blank lines.
-#[must_use] 
+#[must_use]
 pub fn parse_worktree_porcelain(text: &str, worktree_base: &Path) -> Vec<WorktreeEntry> {
     let mut entries = Vec::new();
     let mut current_path: Option<PathBuf> = None;
@@ -269,7 +266,12 @@ pub async fn delete_worktree(
     // Remove the worktree directory.
     let remove_status = tokio::process::Command::new("git")
         .current_dir(git_root)
-        .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_path.to_string_lossy(),
+        ])
         .status()
         .await;
 
@@ -404,10 +406,7 @@ mod tests {
             result.is_some(),
             "ensure_worktree must succeed when remote default branch is master, not main"
         );
-        assert!(
-            worktree_path.is_dir(),
-            "worktree directory must be created"
-        );
+        assert!(worktree_path.is_dir(), "worktree directory must be created");
     }
 
     // ── parse_worktree_porcelain ──────────────────────────────────────────────
@@ -422,7 +421,8 @@ mod tests {
     #[test]
     fn parse_worktree_porcelain_single_block_under_base_is_included() {
         let base = PathBuf::from("/worktrees");
-        let text = "worktree /worktrees/feat/my-branch\nHEAD abc123\nbranch refs/heads/feat/my-branch\n\n";
+        let text =
+            "worktree /worktrees/feat/my-branch\nHEAD abc123\nbranch refs/heads/feat/my-branch\n\n";
         let entries = parse_worktree_porcelain(text, &base);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch, "feat/my-branch");
@@ -434,7 +434,10 @@ mod tests {
         let base = PathBuf::from("/worktrees");
         let text = "worktree /other/path\nHEAD abc123\nbranch refs/heads/main\n\n";
         let entries = parse_worktree_porcelain(text, &base);
-        assert!(entries.is_empty(), "main worktree outside base should be filtered out");
+        assert!(
+            entries.is_empty(),
+            "main worktree outside base should be filtered out"
+        );
     }
 
     #[test]
@@ -524,7 +527,10 @@ mod tests {
         assert!(result1.is_some(), "first ensure_worktree should succeed");
 
         let result2 = ensure_worktree(local_dir.path(), &worktree_path, branch).await;
-        assert!(result2.is_some(), "second ensure_worktree should succeed (reuse)");
+        assert!(
+            result2.is_some(),
+            "second ensure_worktree should succeed (reuse)"
+        );
         assert!(worktree_path.is_dir(), "worktree dir should still exist");
     }
 
@@ -569,7 +575,9 @@ mod tests {
         let worktree_path = wt_base.path().join(branch);
 
         // Create the worktree with a new commit not on main.
-        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch)
+            .await
+            .unwrap();
 
         // Add a commit to the worktree branch so it has unmerged commits.
         std::fs::write(worktree_path.join("new_file.txt"), "content").unwrap();
@@ -579,7 +587,13 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["-c", "commit.gpgsign=false", "commit", "-m", "unmerged commit"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "unmerged commit",
+            ])
             .current_dir(&worktree_path)
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -601,7 +615,9 @@ mod tests {
         let branch = "feat/force-delete";
         let worktree_path = wt_base.path().join(branch);
 
-        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch)
+            .await
+            .unwrap();
 
         // Add an unmerged commit.
         std::fs::write(worktree_path.join("extra.txt"), "data").unwrap();
@@ -635,7 +651,9 @@ mod tests {
         let worktree_path = wt_base.path().join(branch);
 
         // Create the worktree (branches off origin/main, so it is already merged into main).
-        ensure_worktree(local_dir.path(), &worktree_path, branch).await.unwrap();
+        ensure_worktree(local_dir.path(), &worktree_path, branch)
+            .await
+            .unwrap();
 
         // The branch has no unique commits → it IS an ancestor of main → merged.
         let result = delete_worktree(local_dir.path(), wt_base.path(), branch, false).await;

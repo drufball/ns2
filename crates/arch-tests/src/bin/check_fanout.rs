@@ -27,35 +27,133 @@ use std::{
 
 const KEYWORD_EXCLUSIONS: &[&str] = &[
     // Rust keywords
-    "crate", "super", "self", "use", "pub", "mod", "fn", "let", "mut", "impl",
-    "trait", "struct", "enum", "type", "where", "for", "if", "else", "match",
-    "return", "async", "await", "move", "ref", "in", "loop", "while", "break",
-    "continue", "extern", "unsafe", "dyn", "box", "as",
+    "crate",
+    "super",
+    "self",
+    "use",
+    "pub",
+    "mod",
+    "fn",
+    "let",
+    "mut",
+    "impl",
+    "trait",
+    "struct",
+    "enum",
+    "type",
+    "where",
+    "for",
+    "if",
+    "else",
+    "match",
+    "return",
+    "async",
+    "await",
+    "move",
+    "ref",
+    "in",
+    "loop",
+    "while",
+    "break",
+    "continue",
+    "extern",
+    "unsafe",
+    "dyn",
+    "box",
+    "as",
     // Standard library crate name and its sub-modules that appear as path prefix segments
     "std",
-    "collections", "convert", "path", "sync", "io", "fmt", "str", "ops", "mem",
-    "net", "time", "error", "iter", "ffi", "env", "os", "fs", "process",
-    "thread", "any", "cmp", "borrow", "marker", "clone", "hash", "num", "pin",
-    "task", "future",
+    "collections",
+    "convert",
+    "path",
+    "sync",
+    "io",
+    "fmt",
+    "str",
+    "ops",
+    "mem",
+    "net",
+    "time",
+    "error",
+    "iter",
+    "ffi",
+    "env",
+    "os",
+    "fs",
+    "process",
+    "thread",
+    "any",
+    "cmp",
+    "borrow",
+    "marker",
+    "clone",
+    "hash",
+    "num",
+    "pin",
+    "task",
+    "future",
     // axum/tower sub-module segments
-    "extract", "response", "routing", "http", "sse", "body", "stream", "wrappers",
-    "sqlite", "json", "middleware",
+    "extract",
+    "response",
+    "routing",
+    "http",
+    "sse",
+    "body",
+    "stream",
+    "wrappers",
+    "sqlite",
+    "json",
+    "middleware",
     // tokio sub-modules
-    "mpsc", "broadcast", "watch", "oneshot", "signal",
+    "mpsc",
+    "broadcast",
+    "watch",
+    "oneshot",
+    "signal",
     // turbofish method names commonly used with ::<Type>
-    "collect", "parse", "into", "from", "default", "new", "unwrap", "expect",
-    "ok", "err", "map", "filter", "fold", "iter", "clone", "to_string", "len",
-    "push", "get",
+    "collect",
+    "parse",
+    "into",
+    "from",
+    "default",
+    "new",
+    "unwrap",
+    "expect",
+    "ok",
+    "err",
+    "map",
+    "filter",
+    "fold",
+    "iter",
+    "clone",
+    "to_string",
+    "len",
+    "push",
+    "get",
     // numeric types that can appear in turbofish
-    "usize", "isize", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32",
-    "i64", "i128", "f32", "f64",
+    "usize",
+    "isize",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "f32",
+    "f64",
 ];
 
 // ── Workspace helpers ─────────────────────────────────────────────────────────
 
 fn get_workspace_crates(root: &Path) -> HashSet<String> {
     let cargo_toml = root.join("Cargo.toml");
-    let Ok(text) = fs::read_to_string(&cargo_toml) else { return HashSet::new() };
+    let Ok(text) = fs::read_to_string(&cargo_toml) else {
+        return HashSet::new();
+    };
     let mut names = HashSet::new();
     let mut in_members = false;
     let member_re = Regex::new(r#""crates/([^"]+)""#).unwrap();
@@ -80,10 +178,13 @@ fn get_workspace_crates(root: &Path) -> HashSet<String> {
 
 fn get_crate_cargo_deps(crate_root: &Path) -> HashSet<String> {
     let cargo_toml = crate_root.join("Cargo.toml");
-    let Ok(text) = fs::read_to_string(&cargo_toml) else { return HashSet::new() };
+    let Ok(text) = fs::read_to_string(&cargo_toml) else {
+        return HashSet::new();
+    };
     let mut deps = HashSet::new();
     let mut in_deps = false;
-    let deps_header_re = Regex::new(r"^\[(dependencies|dev-dependencies|build-dependencies)\]").unwrap();
+    let deps_header_re =
+        Regex::new(r"^\[(dependencies|dev-dependencies|build-dependencies)\]").unwrap();
     let dep_entry_re = Regex::new(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*=").unwrap();
     for line in text.lines() {
         let stripped = line.trim();
@@ -150,7 +251,9 @@ fn fanout_from_str(text: &str) -> (usize, HashSet<String>) {
 }
 
 fn compute_fanout(path: &Path) -> (usize, HashSet<String>) {
-    let Ok(text) = fs::read_to_string(path) else { return (0, HashSet::new()) };
+    let Ok(text) = fs::read_to_string(path) else {
+        return (0, HashSet::new());
+    };
     fanout_from_str(&text)
 }
 
@@ -159,7 +262,9 @@ fn compute_fanout(path: &Path) -> (usize, HashSet<String>) {
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) -> Vec<String> {
     let src_dir = crate_root.join("src");
-    let Ok(rel) = rs_path.strip_prefix(&src_dir) else { return vec![] };
+    let Ok(rel) = rs_path.strip_prefix(&src_dir) else {
+        return vec![];
+    };
 
     let parts: Vec<String> = rel
         .components()
@@ -186,7 +291,10 @@ fn module_names_for_file(rs_path: &Path, crate_root: &Path, crate_name: &str) ->
         .chain(parts.iter().cloned())
         .collect::<Vec<_>>()
         .join("::");
-    let short_name = parts.last().cloned().unwrap_or_else(|| crate_name.to_string());
+    let short_name = parts
+        .last()
+        .cloned()
+        .unwrap_or_else(|| crate_name.to_string());
 
     vec![module_path, short_name]
 }
@@ -217,14 +325,10 @@ fn compute_fanin(
             Regex::new(&format!(r"\buse\s+{}(\s*::|;|\s*\{{)", regex::escape(name))).unwrap(),
         );
         // fully-qualified usage — we'll handle lookbehind manually below
-        rs_patterns.push(
-            Regex::new(&format!(r"{}::", regex::escape(name))).unwrap(),
-        );
+        rs_patterns.push(Regex::new(&format!(r"{}::", regex::escape(name))).unwrap());
         // mod <leaf>;
         let leaf = name.split("::").last().unwrap_or(name);
-        rs_patterns.push(
-            Regex::new(&format!(r"\bmod\s+{}\s*;", regex::escape(leaf))).unwrap(),
-        );
+        rs_patterns.push(Regex::new(&format!(r"\bmod\s+{}\s*;", regex::escape(leaf))).unwrap());
     }
 
     // Patterns that need lookbehind-manual-check (the `name::` qualified patterns)
@@ -239,7 +343,9 @@ fn compute_fanin(
         if other.as_path() == target {
             continue;
         }
-        let Ok(text) = fs::read_to_string(other) else { continue };
+        let Ok(text) = fs::read_to_string(other) else {
+            continue;
+        };
         let text_bytes = text.as_bytes();
 
         for (pi, pat) in rs_patterns.iter().enumerate() {
@@ -249,7 +355,9 @@ fn compute_fanin(
                 // Find the module name this pattern corresponds to
                 // Pattern index 1 -> module_names[0], 4 -> module_names[1], etc.
                 let mod_idx = (pi - 1) / 3;
-                let mod_name = qualified_names.get(mod_idx).map_or("", std::string::String::as_str);
+                let mod_name = qualified_names
+                    .get(mod_idx)
+                    .map_or("", std::string::String::as_str);
 
                 let search_str = format!("{mod_name}::");
                 // Manual scan for `mod_name::` not preceded by `:` or word char
@@ -320,9 +428,17 @@ fn compute_fanin(
 // ── Git churn ─────────────────────────────────────────────────────────────────
 
 fn git_churn(path: &Path, root: &Path) -> usize {
-    let Ok(rel) = path.strip_prefix(root) else { return 0 };
+    let Ok(rel) = path.strip_prefix(root) else {
+        return 0;
+    };
     let output = Command::new("git")
-        .args(["log", "--since=90 days ago", "--oneline", "--", &rel.to_string_lossy()])
+        .args([
+            "log",
+            "--since=90 days ago",
+            "--oneline",
+            "--",
+            &rel.to_string_lossy(),
+        ])
         .current_dir(root)
         .output();
     match output {
@@ -337,7 +453,9 @@ fn git_churn(path: &Path, root: &Path) -> usize {
 // ── File collection helpers ───────────────────────────────────────────────────
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
@@ -370,15 +488,16 @@ struct FileMetrics {
 
 impl FileMetrics {
     #[allow(clippy::cast_precision_loss)]
-    fn compute(
-        path: String,
-        lines: usize,
-        fanout: usize,
-        fanin: usize,
-        churn: usize,
-    ) -> Self {
+    fn compute(path: String, lines: usize, fanout: usize, fanin: usize, churn: usize) -> Self {
         let score_v2 = ((fanin + fanout) as f64) * (churn as f64);
-        Self { path, lines, fanout, fanin, churn, score_v2 }
+        Self {
+            path,
+            lines,
+            fanout,
+            fanin,
+            churn,
+            score_v2,
+        }
     }
 }
 
@@ -432,7 +551,10 @@ fn main() {
     let root = root.canonicalize().unwrap_or(root);
 
     if !root.join("Cargo.toml").exists() {
-        eprintln!("ERROR: {} does not look like a Rust workspace (no Cargo.toml)", root.display());
+        eprintln!(
+            "ERROR: {} does not look like a Rust workspace (no Cargo.toml)",
+            root.display()
+        );
         process::exit(1);
     }
 
@@ -469,7 +591,11 @@ fn main() {
 
         let rel_from_src: Vec<String> = f
             .strip_prefix(&src_dir)
-            .map(|r| r.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect())
+            .map(|r| {
+                r.components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         let is_root = rel_from_src == ["lib.rs"] || rel_from_src == ["main.rs"];
 
@@ -487,14 +613,17 @@ fn main() {
             .unwrap_or(f.as_path())
             .to_string_lossy()
             .to_string();
-        let lines = fs::read_to_string(f)
-            .map_or(0, |t| t.lines().count());
+        let lines = fs::read_to_string(f).map_or(0, |t| t.lines().count());
         let (fanout, _) = compute_fanout(f);
         let fanin = compute_fanin(
             f,
             &all_rs,
-            module_map.get(f).map_or(&[] as &[String], std::vec::Vec::as_slice),
-            crate_name_map.get(f).map_or("", std::string::String::as_str),
+            module_map
+                .get(f)
+                .map_or(&[] as &[String], std::vec::Vec::as_slice),
+            crate_name_map
+                .get(f)
+                .map_or("", std::string::String::as_str),
             *is_crate_root_map.get(f).unwrap_or(&false),
             &root,
         );
@@ -502,7 +631,11 @@ fn main() {
         results.push(FileMetrics::compute(rel, lines, fanout, fanin, churn));
     }
 
-    results.sort_by(|a, b| b.score_v2.partial_cmp(&a.score_v2).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score_v2
+            .partial_cmp(&a.score_v2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Full table
     let sep = "=".repeat(110);
@@ -516,7 +649,11 @@ fn main() {
     let mut violations: Vec<&FileMetrics> = Vec::new();
 
     for r in &results {
-        let flag = if r.score_v2 >= threshold { " <-- RISK" } else { "" };
+        let flag = if r.score_v2 >= threshold {
+            " <-- RISK"
+        } else {
+            ""
+        };
         println!(
             "{:<55} {:>6} {:>5} {:>5} {:>7} {:>13.1}{}",
             r.path, r.lines, r.fanout, r.fanin, r.churn, r.score_v2, flag
@@ -612,7 +749,10 @@ use self::inner::Bar;
 let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 ";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "std and collections should both be excluded, got: {crates:?}");
+        assert_eq!(
+            count, 0,
+            "std and collections should both be excluded, got: {crates:?}"
+        );
     }
 
     #[test]
@@ -631,8 +771,14 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         let src = "use serde_json::value::Value;";
         let (_, crates) = fanout_from_str(src);
         // serde_json is the crate; `value` is excluded by KEYWORD_EXCLUSIONS
-        assert!(crates.contains("serde_json"), "serde_json should count, got: {crates:?}");
-        assert!(!crates.contains("value"), "sub-module value must not count: {crates:?}");
+        assert!(
+            crates.contains("serde_json"),
+            "serde_json should count, got: {crates:?}"
+        );
+        assert!(
+            !crates.contains("value"),
+            "sub-module value must not count: {crates:?}"
+        );
     }
 
     #[test]
@@ -644,7 +790,10 @@ let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap:
         // the lookbehind check and `foo` won't be added.
         let src = "Afoo::bar();"; // `foo` is preceded by `A` (alphanumeric)
         let (_, crates) = fanout_from_str(src);
-        assert!(!crates.contains("foo"), "should be skipped due to preceding alphanumeric: {crates:?}");
+        assert!(
+            !crates.contains("foo"),
+            "should be skipped due to preceding alphanumeric: {crates:?}"
+        );
     }
 
     // ── keyword exclusion list completeness ───────────────────────────────────
@@ -693,7 +842,10 @@ let _rt = tokio::runtime::Runtime::new();
         // `u64` in turbofish context
         let src = r"let x = value.parse::<u64>().unwrap();";
         let (count, crates) = fanout_from_str(src);
-        assert_eq!(count, 0, "numeric type turbofish must not count, got: {crates:?}");
+        assert_eq!(
+            count, 0,
+            "numeric type turbofish must not count, got: {crates:?}"
+        );
     }
 
     // ── module_names_for_file ─────────────────────────────────────────────────

@@ -1,5 +1,5 @@
-use std::fmt::Write as _;
 use serde::Deserialize;
+use std::fmt::Write as _;
 
 // ── Hook types ───────────────────────────────────────────────────────────────
 
@@ -71,7 +71,10 @@ fn parse_hooks_yaml(yaml_block: &str) -> AgentHooks {
                 hooks: e
                     .hooks
                     .into_iter()
-                    .map(|c| HookCommand { command: c.command, timeout: c.timeout })
+                    .map(|c| HookCommand {
+                        command: c.command,
+                        timeout: c.timeout,
+                    })
                     .collect(),
             })
             .collect()
@@ -116,8 +119,16 @@ fn extract_hooks_subblock(frontmatter: &str) -> Option<String> {
                 .map(|l| l.len() - l.trim_start().len())
                 .min()
                 .unwrap_or(0);
-            let dedented: Vec<&str> =
-                sub_lines.iter().map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l }).collect();
+            let dedented: Vec<&str> = sub_lines
+                .iter()
+                .map(|l| {
+                    if l.len() >= min_indent {
+                        &l[min_indent..]
+                    } else {
+                        l
+                    }
+                })
+                .collect();
             return Some(dedented.join("\n"));
         }
     }
@@ -134,12 +145,12 @@ pub struct AgentDef {
     pub hooks: AgentHooks,
 }
 
-#[must_use] 
+#[must_use]
 pub fn agents_dir() -> Option<std::path::PathBuf> {
     workspace::git_root_sync().map(|root| root.join(".ns2").join("agents"))
 }
 
-#[must_use] 
+#[must_use]
 pub fn parse_agent_content(content: &str) -> Option<AgentDef> {
     let content = content.trim_start();
     let rest = content.strip_prefix("---\n")?;
@@ -184,7 +195,7 @@ pub fn parse_agent_content(content: &str) -> Option<AgentDef> {
 /// Note: `name` and `description` are written verbatim. Newlines or colons in those
 /// fields will produce malformed frontmatter. Callers (e.g. CLI flags) are responsible
 /// for ensuring single-line values.
-#[must_use] 
+#[must_use]
 pub fn format_agent_file(def: &AgentDef) -> String {
     let mut frontmatter = format!("---\nname: {}\ndescription: {}", def.name, def.description);
     if def.include_project_config {
@@ -238,7 +249,7 @@ fn format_hooks(hooks: &AgentHooks) -> String {
     out
 }
 
-#[must_use] 
+#[must_use]
 pub fn load_agent(dir: &std::path::Path, name: &str) -> Option<AgentDef> {
     let path = dir.join(format!("{name}.md"));
     let content = std::fs::read_to_string(path).ok()?;
@@ -248,7 +259,9 @@ pub fn load_agent(dir: &std::path::Path, name: &str) -> Option<AgentDef> {
 #[must_use]
 #[allow(clippy::option_if_let_else, clippy::single_match_else)]
 pub fn list_agents(dir: &std::path::Path) -> Vec<AgentDef> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     let mut agents: Vec<AgentDef> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
@@ -305,14 +318,16 @@ pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
         while let Some(at_pos) = rest.find('@') {
             let after_at = &rest[at_pos + 1..];
             // Extract the path: non-whitespace characters ending with `.md`
-            let path_candidate: String =
-                after_at.chars().take_while(|c| !c.is_whitespace()).collect();
+            let path_candidate: String = after_at
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
             if path_candidate.ends_with(".md")
-                    && !path_candidate.is_empty()
-                    && seen.insert(path_candidate.clone())
-                {
-                    imports.push(path_candidate);
-                }
+                && !path_candidate.is_empty()
+                && seen.insert(path_candidate.clone())
+            {
+                imports.push(path_candidate);
+            }
             // Advance past the `@` we just processed
             rest = &rest[at_pos + 1..];
         }
@@ -352,11 +367,13 @@ pub fn load_project_config(git_root: &std::path::Path) -> Option<String> {
 ///
 /// Returns `AgentHooks::default()` if the file is absent, unreadable, or has no `hooks` key.
 /// Any parse error is logged as a warning to stderr and returns default.
-#[must_use] 
+#[must_use]
 pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
     let path = git_root.join(".claude").join("settings.json");
 
-    let Ok(content) = std::fs::read_to_string(&path) else { return AgentHooks::default() };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return AgentHooks::default();
+    };
 
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -366,7 +383,9 @@ pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
         }
     };
 
-    let Some(hooks_value) = value.get("hooks") else { return AgentHooks::default() };
+    let Some(hooks_value) = value.get("hooks") else {
+        return AgentHooks::default();
+    };
 
     // Deserialise via the same RawHooks shape used for YAML frontmatter.
     let raw: RawHooks = match serde_json::from_value(hooks_value.clone()) {
@@ -385,7 +404,10 @@ pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
                 hooks: e
                     .hooks
                     .into_iter()
-                    .map(|c| HookCommand { command: c.command, timeout: c.timeout })
+                    .map(|c| HookCommand {
+                        command: c.command,
+                        timeout: c.timeout,
+                    })
                     .collect(),
             })
             .collect()
@@ -404,7 +426,7 @@ pub fn load_project_hooks(git_root: &std::path::Path) -> AgentHooks {
 /// 1. Start with all agent entries as-is.
 /// 2. For each project entry, append it only if no agent entry has the same matcher value.
 ///    (Agent entries always win for matching matchers.)
-#[must_use] 
+#[must_use]
 pub fn merge_hooks(agent: AgentHooks, project: AgentHooks) -> AgentHooks {
     let merge_entries = |mut base: Vec<HookEntry>, additions: Vec<HookEntry>| -> Vec<HookEntry> {
         for proj_entry in additions {
@@ -444,7 +466,8 @@ mod tests {
 
     #[test]
     fn parse_agent_content_extracts_name_and_description() {
-        let content = "---\nname: coding\ndescription: A coding agent\n---\n\nSystem prompt here.\n";
+        let content =
+            "---\nname: coding\ndescription: A coding agent\n---\n\nSystem prompt here.\n";
         let def = parse_agent_content(content).unwrap();
         assert_eq!(def.name, "coding");
         assert_eq!(def.description, "A coding agent");
@@ -534,7 +557,11 @@ mod tests {
         std::fs::write(dir.join("ignored.txt"), "not an agent").unwrap();
 
         let agents = list_agents(dir);
-        assert_eq!(agents.len(), 2, "expected exactly 2 agents (ignoring .txt file)");
+        assert_eq!(
+            agents.len(),
+            2,
+            "expected exactly 2 agents (ignoring .txt file)"
+        );
         assert_eq!(agents[0].name, "alpha");
         assert_eq!(agents[1].name, "zebra");
     }
@@ -553,13 +580,20 @@ mod tests {
     fn agents_dir_matches_git_root_join() {
         let expected = workspace::git_root_sync().map(|r| r.join(".ns2").join("agents"));
         let actual = agents_dir();
-        assert_eq!(actual, expected, "agents_dir() must equal git_root_sync().join('.ns2').join('agents')");
+        assert_eq!(
+            actual, expected,
+            "agents_dir() must equal git_root_sync().join('.ns2').join('agents')"
+        );
     }
 
     #[test]
     fn agents_dir_returns_absolute_path() {
         let Some(dir) = agents_dir() else { return };
-        assert!(dir.is_absolute(), "agents_dir() must return an absolute path, got: {}", dir.display());
+        assert!(
+            dir.is_absolute(),
+            "agents_dir() must return an absolute path, got: {}",
+            dir.display()
+        );
     }
 
     #[test]
@@ -573,7 +607,10 @@ mod tests {
     fn format_agent_file_starts_with_frontmatter_delimiter() {
         let def = make_def_no_hooks("agent");
         let formatted = format_agent_file(&def);
-        assert!(formatted.starts_with("---\n"), "formatted output must start with '---\\n'");
+        assert!(
+            formatted.starts_with("---\n"),
+            "formatted output must start with '---\\n'"
+        );
     }
 
     #[test]
@@ -585,7 +622,8 @@ mod tests {
 
     #[test]
     fn parse_agent_content_body_with_horizontal_rule_preserved() {
-        let content = "---\nname: agent\ndescription: desc\n---\n\nSection one.\n\n---\n\nSection two.\n";
+        let content =
+            "---\nname: agent\ndescription: desc\n---\n\nSection one.\n\n---\n\nSection two.\n";
         let def = parse_agent_content(content).unwrap();
         assert_eq!(def.name, "agent");
         assert_eq!(def.body, "Section one.\n\n---\n\nSection two.");
@@ -631,7 +669,10 @@ mod tests {
             "---\nname: agent\ndescription: desc\ninclude_project_config: true\n---\n\nBody.\n";
         let def = parse_agent_content(content).unwrap();
         assert_eq!(def.name, "agent");
-        assert!(def.include_project_config, "include_project_config must be true");
+        assert!(
+            def.include_project_config,
+            "include_project_config must be true"
+        );
 
         let formatted = format_agent_file(&def);
         assert!(
@@ -639,7 +680,10 @@ mod tests {
             "formatted output must contain 'include_project_config: true' when true"
         );
         let reparsed = parse_agent_content(&formatted).unwrap();
-        assert!(reparsed.include_project_config, "re-parsed value must be true");
+        assert!(
+            reparsed.include_project_config,
+            "re-parsed value must be true"
+        );
     }
 
     #[test]
@@ -668,7 +712,10 @@ mod tests {
     fn load_project_config_returns_none_when_claude_md_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
         let result = load_project_config(tmp.path());
-        assert!(result.is_none(), "must return None when CLAUDE.md is absent");
+        assert!(
+            result.is_none(),
+            "must return None when CLAUDE.md is absent"
+        );
     }
 
     #[test]
@@ -678,7 +725,10 @@ mod tests {
         std::fs::write(tmp.path().join("CLAUDE.md"), claude_content).unwrap();
 
         let result = load_project_config(tmp.path()).unwrap();
-        assert_eq!(result, claude_content, "result must equal CLAUDE.md content when no @-imports");
+        assert_eq!(
+            result, claude_content,
+            "result must equal CLAUDE.md content when no @-imports"
+        );
     }
 
     #[test]
@@ -710,7 +760,10 @@ mod tests {
 
         let result = load_project_config(tmp.path()).unwrap();
         let count = result.matches("Shared content.").count();
-        assert_eq!(count, 1, "imported file content must appear exactly once (deduped), got {count}");
+        assert_eq!(
+            count, 1,
+            "imported file content must appear exactly once (deduped), got {count}"
+        );
     }
 
     #[test]
@@ -754,7 +807,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let hooks = load_project_hooks(tmp.path());
         assert!(hooks.pre_tool_use.is_empty(), "pre_tool_use must be empty");
-        assert!(hooks.post_tool_use.is_empty(), "post_tool_use must be empty");
+        assert!(
+            hooks.post_tool_use.is_empty(),
+            "post_tool_use must be empty"
+        );
         assert!(hooks.stop.is_empty(), "stop must be empty");
     }
 
@@ -816,7 +872,10 @@ mod tests {
         assert_eq!(hooks.post_tool_use.len(), 1, "expected 1 PostToolUse entry");
         assert_eq!(hooks.post_tool_use[0].matcher.as_deref(), Some(".*"));
         assert_eq!(hooks.post_tool_use[0].hooks[0].command, "/post.sh");
-        assert_eq!(hooks.post_tool_use[0].hooks[0].timeout, 60, "default timeout must be 60");
+        assert_eq!(
+            hooks.post_tool_use[0].hooks[0].timeout, 60,
+            "default timeout must be 60"
+        );
     }
 
     /// Parses Stop entries (no matcher field) correctly.
@@ -842,7 +901,10 @@ mod tests {
 
         let hooks = load_project_hooks(tmp.path());
         assert_eq!(hooks.stop.len(), 1, "expected 1 Stop entry");
-        assert!(hooks.stop[0].matcher.is_none(), "Stop entry must have no matcher");
+        assert!(
+            hooks.stop[0].matcher.is_none(),
+            "Stop entry must have no matcher"
+        );
         assert_eq!(hooks.stop[0].hooks[0].command, "/stop.sh");
     }
 
@@ -851,10 +913,17 @@ mod tests {
     fn load_project_hooks_returns_default_on_invalid_json() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-        std::fs::write(tmp.path().join(".claude/settings.json"), "not valid json { {").unwrap();
+        std::fs::write(
+            tmp.path().join(".claude/settings.json"),
+            "not valid json { {",
+        )
+        .unwrap();
 
         let hooks = load_project_hooks(tmp.path());
-        assert!(hooks.pre_tool_use.is_empty(), "must return default on parse error");
+        assert!(
+            hooks.pre_tool_use.is_empty(),
+            "must return default on parse error"
+        );
     }
 
     /// Returns default when JSON is valid but has no `hooks` key.
@@ -869,7 +938,10 @@ mod tests {
         .unwrap();
 
         let hooks = load_project_hooks(tmp.path());
-        assert!(hooks.pre_tool_use.is_empty(), "must return default when no hooks key");
+        assert!(
+            hooks.pre_tool_use.is_empty(),
+            "must return default when no hooks key"
+        );
         assert!(hooks.post_tool_use.is_empty());
         assert!(hooks.stop.is_empty());
     }
@@ -882,7 +954,10 @@ mod tests {
         let agent = AgentHooks {
             pre_tool_use: vec![HookEntry {
                 matcher: Some("bash".to_string()),
-                hooks: vec![HookCommand { command: "/agent-pre.sh".to_string(), timeout: 10 }],
+                hooks: vec![HookCommand {
+                    command: "/agent-pre.sh".to_string(),
+                    timeout: 10,
+                }],
             }],
             ..AgentHooks::default()
         };
@@ -900,20 +975,30 @@ mod tests {
         let agent = AgentHooks {
             pre_tool_use: vec![HookEntry {
                 matcher: Some("bash".to_string()),
-                hooks: vec![HookCommand { command: "/agent-pre.sh".to_string(), timeout: 10 }],
+                hooks: vec![HookCommand {
+                    command: "/agent-pre.sh".to_string(),
+                    timeout: 10,
+                }],
             }],
             ..AgentHooks::default()
         };
         let project = AgentHooks {
             pre_tool_use: vec![HookEntry {
                 matcher: Some("read".to_string()),
-                hooks: vec![HookCommand { command: "/proj-pre.sh".to_string(), timeout: 60 }],
+                hooks: vec![HookCommand {
+                    command: "/proj-pre.sh".to_string(),
+                    timeout: 60,
+                }],
             }],
             ..AgentHooks::default()
         };
 
         let merged = merge_hooks(agent, project);
-        assert_eq!(merged.pre_tool_use.len(), 2, "expected 2 entries: agent + project");
+        assert_eq!(
+            merged.pre_tool_use.len(),
+            2,
+            "expected 2 entries: agent + project"
+        );
         // Agent entry first
         assert_eq!(merged.pre_tool_use[0].matcher.as_deref(), Some("bash"));
         assert_eq!(merged.pre_tool_use[0].hooks[0].command, "/agent-pre.sh");
@@ -928,20 +1013,30 @@ mod tests {
         let agent = AgentHooks {
             post_tool_use: vec![HookEntry {
                 matcher: Some(".*".to_string()),
-                hooks: vec![HookCommand { command: "/agent-post.sh".to_string(), timeout: 10 }],
+                hooks: vec![HookCommand {
+                    command: "/agent-post.sh".to_string(),
+                    timeout: 10,
+                }],
             }],
             ..AgentHooks::default()
         };
         let project = AgentHooks {
             post_tool_use: vec![HookEntry {
                 matcher: Some(".*".to_string()),
-                hooks: vec![HookCommand { command: "/proj-post.sh".to_string(), timeout: 60 }],
+                hooks: vec![HookCommand {
+                    command: "/proj-post.sh".to_string(),
+                    timeout: 60,
+                }],
             }],
             ..AgentHooks::default()
         };
 
         let merged = merge_hooks(agent, project);
-        assert_eq!(merged.post_tool_use.len(), 1, "duplicate project entry must be dropped");
+        assert_eq!(
+            merged.post_tool_use.len(),
+            1,
+            "duplicate project entry must be dropped"
+        );
         assert_eq!(merged.post_tool_use[0].hooks[0].command, "/agent-post.sh");
     }
 
@@ -952,13 +1047,20 @@ mod tests {
         let project = AgentHooks {
             stop: vec![HookEntry {
                 matcher: None,
-                hooks: vec![HookCommand { command: "/proj-stop.sh".to_string(), timeout: 60 }],
+                hooks: vec![HookCommand {
+                    command: "/proj-stop.sh".to_string(),
+                    timeout: 60,
+                }],
             }],
             ..AgentHooks::default()
         };
 
         let merged = merge_hooks(agent, project);
-        assert_eq!(merged.stop.len(), 1, "project stop entry must be appended when agent has none");
+        assert_eq!(
+            merged.stop.len(),
+            1,
+            "project stop entry must be appended when agent has none"
+        );
         assert_eq!(merged.stop[0].hooks[0].command, "/proj-stop.sh");
     }
 
@@ -968,20 +1070,30 @@ mod tests {
         let agent = AgentHooks {
             stop: vec![HookEntry {
                 matcher: None,
-                hooks: vec![HookCommand { command: "/agent-stop.sh".to_string(), timeout: 10 }],
+                hooks: vec![HookCommand {
+                    command: "/agent-stop.sh".to_string(),
+                    timeout: 10,
+                }],
             }],
             ..AgentHooks::default()
         };
         let project = AgentHooks {
             stop: vec![HookEntry {
                 matcher: None,
-                hooks: vec![HookCommand { command: "/proj-stop.sh".to_string(), timeout: 60 }],
+                hooks: vec![HookCommand {
+                    command: "/proj-stop.sh".to_string(),
+                    timeout: 60,
+                }],
             }],
             ..AgentHooks::default()
         };
 
         let merged = merge_hooks(agent, project);
-        assert_eq!(merged.stop.len(), 1, "duplicate None-matcher stop entries must be dropped");
+        assert_eq!(
+            merged.stop.len(),
+            1,
+            "duplicate None-matcher stop entries must be dropped"
+        );
         assert_eq!(merged.stop[0].hooks[0].command, "/agent-stop.sh");
     }
 
@@ -1001,8 +1113,14 @@ mod tests {
     fn parse_agent_content_missing_hooks_defaults_to_empty() {
         let content = "---\nname: agent\ndescription: desc\n---\n\nBody.\n";
         let def = parse_agent_content(content).unwrap();
-        assert!(def.hooks.pre_tool_use.is_empty(), "pre_tool_use must be empty");
-        assert!(def.hooks.post_tool_use.is_empty(), "post_tool_use must be empty");
+        assert!(
+            def.hooks.pre_tool_use.is_empty(),
+            "pre_tool_use must be empty"
+        );
+        assert!(
+            def.hooks.post_tool_use.is_empty(),
+            "post_tool_use must be empty"
+        );
         assert!(def.hooks.stop.is_empty(), "stop must be empty");
     }
 
@@ -1119,14 +1237,26 @@ Body.
 
         // PreToolUse
         assert_eq!(reparsed.hooks.pre_tool_use.len(), 1);
-        assert_eq!(reparsed.hooks.pre_tool_use[0].matcher.as_deref(), Some("bash"));
-        assert_eq!(reparsed.hooks.pre_tool_use[0].hooks[0].command, "/path/to/script.sh");
+        assert_eq!(
+            reparsed.hooks.pre_tool_use[0].matcher.as_deref(),
+            Some("bash")
+        );
+        assert_eq!(
+            reparsed.hooks.pre_tool_use[0].hooks[0].command,
+            "/path/to/script.sh"
+        );
         assert_eq!(reparsed.hooks.pre_tool_use[0].hooks[0].timeout, 10);
 
         // PostToolUse
         assert_eq!(reparsed.hooks.post_tool_use.len(), 1);
-        assert_eq!(reparsed.hooks.post_tool_use[0].matcher.as_deref(), Some(".*"));
-        assert_eq!(reparsed.hooks.post_tool_use[0].hooks[0].command, "/other/script.sh");
+        assert_eq!(
+            reparsed.hooks.post_tool_use[0].matcher.as_deref(),
+            Some(".*")
+        );
+        assert_eq!(
+            reparsed.hooks.post_tool_use[0].hooks[0].command,
+            "/other/script.sh"
+        );
         assert_eq!(reparsed.hooks.post_tool_use[0].hooks[0].timeout, 60);
 
         // Stop
@@ -1159,15 +1289,24 @@ Body.
             hooks: AgentHooks {
                 pre_tool_use: vec![HookEntry {
                     matcher: Some("bash".to_string()),
-                    hooks: vec![HookCommand { command: "/pre.sh".to_string(), timeout: 5 }],
+                    hooks: vec![HookCommand {
+                        command: "/pre.sh".to_string(),
+                        timeout: 5,
+                    }],
                 }],
                 post_tool_use: vec![HookEntry {
                     matcher: Some(".*".to_string()),
-                    hooks: vec![HookCommand { command: "/post.sh".to_string(), timeout: 60 }],
+                    hooks: vec![HookCommand {
+                        command: "/post.sh".to_string(),
+                        timeout: 60,
+                    }],
                 }],
                 stop: vec![HookEntry {
                     matcher: None,
-                    hooks: vec![HookCommand { command: "/stop.sh".to_string(), timeout: 20 }],
+                    hooks: vec![HookCommand {
+                        command: "/stop.sh".to_string(),
+                        timeout: 20,
+                    }],
                 }],
             },
         };
@@ -1176,7 +1315,10 @@ Body.
         let loaded = load_agent(tmp.path(), "hooked").unwrap();
 
         assert_eq!(loaded.hooks.pre_tool_use.len(), 1);
-        assert_eq!(loaded.hooks.pre_tool_use[0].matcher.as_deref(), Some("bash"));
+        assert_eq!(
+            loaded.hooks.pre_tool_use[0].matcher.as_deref(),
+            Some("bash")
+        );
         assert_eq!(loaded.hooks.pre_tool_use[0].hooks[0].command, "/pre.sh");
         assert_eq!(loaded.hooks.pre_tool_use[0].hooks[0].timeout, 5);
 

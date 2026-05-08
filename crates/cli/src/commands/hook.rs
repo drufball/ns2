@@ -1,5 +1,5 @@
-use serde_json::json;
 use crate::client::{handle_connection_error, print_error_response};
+use serde_json::json;
 
 // ── Helper: parse "field=value" ───────────────────────────────────────────────
 
@@ -99,7 +99,9 @@ pub async fn run_new(
             })
         }
         other => {
-            eprintln!("Error: unknown action type '{other}'. Use: send-message, create-issue, run-shell");
+            eprintln!(
+                "Error: unknown action type '{other}'. Use: send-message, create-issue, run-shell"
+            );
             std::process::exit(1);
         }
     };
@@ -113,9 +115,14 @@ pub async fn run_new(
         req_body["filter"] = filter_json;
     }
 
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         print_error_response(resp).await;
     }
@@ -124,20 +131,22 @@ pub async fn run_new(
         std::process::exit(1);
     });
     let hook_id = hook["id"].as_str().unwrap_or("?");
-    eprintln!("Created hook: {} ({})", hook["name"].as_str().unwrap_or(""), hook_id);
+    eprintln!(
+        "Created hook: {} ({})",
+        hook["name"].as_str().unwrap_or(""),
+        hook_id
+    );
     println!("{hook_id}");
 }
 
 fn parse_target(target: Option<&str>) -> (&'static str, String) {
     match target {
-        Some(t) if t.starts_with("issue:") => {
-            ("issue", t["issue:".len()..].to_string())
-        }
-        Some(t) if t.starts_with("session:") => {
-            ("session", t["session:".len()..].to_string())
-        }
+        Some(t) if t.starts_with("issue:") => ("issue", t["issue:".len()..].to_string()),
+        Some(t) if t.starts_with("session:") => ("session", t["session:".len()..].to_string()),
         Some(t) => {
-            eprintln!("Error: --target must be in the form 'issue:<id>' or 'session:<id>', got: {t}");
+            eprintln!(
+                "Error: --target must be in the form 'issue:<id>' or 'session:<id>', got: {t}"
+            );
             std::process::exit(1);
         }
         None => {
@@ -149,11 +158,7 @@ fn parse_target(target: Option<&str>) -> (&'static str, String) {
 
 // ── run_list ──────────────────────────────────────────────────────────────────
 
-pub async fn run_list(
-    server: &str,
-    enabled_only: bool,
-    source_type: Option<String>,
-) {
+pub async fn run_list(server: &str, enabled_only: bool, source_type: Option<String>) {
     let client = reqwest::Client::new();
     let mut params: Vec<String> = vec![];
     if enabled_only {
@@ -181,11 +186,18 @@ pub async fn run_list(
     if hooks.is_empty() {
         println!("No hooks found.");
     } else {
-        println!("{:<6}  {:<20}  {:<10}  {:<12}  source", "id", "name", "enabled", "action");
+        println!(
+            "{:<6}  {:<20}  {:<10}  {:<12}  source",
+            "id", "name", "enabled", "action"
+        );
         for hook in &hooks {
             let id = hook["id"].as_str().unwrap_or("?");
             let name = hook["name"].as_str().unwrap_or("?");
-            let enabled = if hook["enabled"].as_bool().unwrap_or(false) { "yes" } else { "no" };
+            let enabled = if hook["enabled"].as_bool().unwrap_or(false) {
+                "yes"
+            } else {
+                "no"
+            };
             let action_type = hook["action"]["type"].as_str().unwrap_or("?");
             let source_type_str = hook["source"]["type"].as_str().unwrap_or("?");
             println!("{id:<6}  {name:<20}  {enabled:<10}  {action_type:<12}  {source_type_str}");
@@ -289,7 +301,10 @@ pub async fn run_logs(server: &str, id: String, limit: usize) {
     if execs.is_empty() {
         println!("No executions found.");
     } else {
-        println!("{:<36}  {:<25}  {:<10}  result", "id", "triggered_at", "status");
+        println!(
+            "{:<36}  {:<25}  {:<10}  result",
+            "id", "triggered_at", "status"
+        );
         for exec in &execs {
             let exec_id = exec["id"].as_str().unwrap_or("?");
             let triggered_at = exec["triggered_at"].as_str().unwrap_or("?");

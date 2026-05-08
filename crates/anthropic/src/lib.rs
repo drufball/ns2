@@ -43,7 +43,7 @@ pub struct Client {
 }
 
 impl Client {
-    #[must_use] 
+    #[must_use]
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
@@ -52,7 +52,7 @@ impl Client {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
         Self {
             api_key,
@@ -67,15 +67,30 @@ impl Client {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiEvent {
-    MessageStart { message: ApiMessage },
-    ContentBlockStart { index: u32, content_block: ApiContentBlock },
+    MessageStart {
+        message: ApiMessage,
+    },
+    ContentBlockStart {
+        index: u32,
+        content_block: ApiContentBlock,
+    },
     Ping,
-    ContentBlockDelta { index: u32, delta: ApiDelta },
-    ContentBlockStop { index: u32 },
-    MessageDelta { delta: ApiMessageDelta, usage: ApiUsage },
+    ContentBlockDelta {
+        index: u32,
+        delta: ApiDelta,
+    },
+    ContentBlockStop {
+        index: u32,
+    },
+    MessageDelta {
+        delta: ApiMessageDelta,
+        usage: ApiUsage,
+    },
     MessageStop,
     #[allow(dead_code)]
-    Error { error: ApiError },
+    Error {
+        error: ApiError,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +112,10 @@ enum ApiContentBlock {
         #[allow(dead_code)]
         text: String,
     },
-    ToolUse { id: String, name: String },
+    ToolUse {
+        id: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,9 +177,18 @@ struct ApiRequestMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ApiContent {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 // --- Block assembler ---
@@ -202,7 +229,14 @@ impl BlockAssembler {
                 index,
                 content_block: ApiContentBlock::ToolUse { id, name },
             } => {
-                self.tool_uses.insert(index, ToolUseAccumulator { id, name, partial_json: String::new() });
+                self.tool_uses.insert(
+                    index,
+                    ToolUseAccumulator {
+                        id,
+                        name,
+                        partial_json: String::new(),
+                    },
+                );
             }
             ApiEvent::ContentBlockDelta {
                 index,
@@ -224,7 +258,11 @@ impl BlockAssembler {
                         .map_err(|e| Error::Parse(format!("invalid tool input JSON: {e}")))?;
                     self.finished_tool_uses.push((
                         index,
-                        ContentBlock::ToolUse { id: acc.id, name: acc.name, input },
+                        ContentBlock::ToolUse {
+                            id: acc.id,
+                            name: acc.name,
+                            input,
+                        },
                     ));
                 }
             }
@@ -275,9 +313,13 @@ impl AnthropicClient for Client {
                         ContentBlock::ToolUse { id, name, input } => {
                             ApiContent::ToolUse { id, name, input }
                         }
-                        ContentBlock::ToolResult { tool_use_id, content } => {
-                            ApiContent::ToolResult { tool_use_id, content }
-                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                        } => ApiContent::ToolResult {
+                            tool_use_id,
+                            content,
+                        },
                     })
                     .collect();
                 ApiRequestMessage {
@@ -315,7 +357,10 @@ impl AnthropicClient for Client {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Api { status, message: text });
+            return Err(Error::Api {
+                status,
+                message: text,
+            });
         }
 
         // Parse SSE stream
@@ -356,7 +401,9 @@ pub struct StubClient;
 impl AnthropicClient for StubClient {
     async fn complete(&self, _request: MessageRequest) -> Result<MessageResponse> {
         Ok(MessageResponse {
-            content: vec![types::ContentBlock::Text { text: "stub".into() }],
+            content: vec![types::ContentBlock::Text {
+                text: "stub".into(),
+            }],
             stop_reason: "end_turn".into(),
             input_tokens: 1,
             output_tokens: 1,

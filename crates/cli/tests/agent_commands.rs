@@ -19,19 +19,21 @@ fn agent_new_creates_file_with_correct_content() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "reviewer",
-            "--description", "Reviews pull requests",
-            "--body", "You are a careful code reviewer.",
+            "agent",
+            "new",
+            "--name",
+            "reviewer",
+            "--description",
+            "Reviews pull requests",
+            "--body",
+            "You are a careful code reviewer.",
         ])
         .assert()
         .success()
         .stderr(predicate::str::contains("Created agent 'reviewer'"));
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join(".ns2/agents/reviewer.md"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(harness.repo_dir.path().join(".ns2/agents/reviewer.md")).unwrap();
     assert!(content.contains("name: reviewer"));
     assert!(content.contains("description: Reviews pull requests"));
     assert!(content.contains("You are a careful code reviewer."));
@@ -43,10 +45,14 @@ fn agent_list_shows_created_agent() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "reviewer",
-            "--description", "Reviews pull requests",
-            "--body", "You are a careful code reviewer.",
+            "agent",
+            "new",
+            "--name",
+            "reviewer",
+            "--description",
+            "Reviews pull requests",
+            "--body",
+            "You are a careful code reviewer.",
         ])
         .assert()
         .success();
@@ -66,20 +72,28 @@ fn agent_list_sorted_alphabetically() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "zebra",
-            "--description", "Last agent",
-            "--body", "body",
+            "agent",
+            "new",
+            "--name",
+            "zebra",
+            "--description",
+            "Last agent",
+            "--body",
+            "body",
         ])
         .assert()
         .success();
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "alpha",
-            "--description", "First agent",
-            "--body", "body",
+            "agent",
+            "new",
+            "--name",
+            "alpha",
+            "--description",
+            "First agent",
+            "--body",
+            "body",
         ])
         .assert()
         .success();
@@ -87,7 +101,10 @@ fn agent_list_sorted_alphabetically() {
     let stdout = harness.ns2_stdout(&["agent", "list"]);
     let alpha_pos = stdout.find("alpha").unwrap();
     let zebra_pos = stdout.find("zebra").unwrap();
-    assert!(alpha_pos < zebra_pos, "alpha must appear before zebra in listing");
+    assert!(
+        alpha_pos < zebra_pos,
+        "alpha must appear before zebra in listing"
+    );
 }
 
 #[test]
@@ -96,10 +113,14 @@ fn agent_edit_description_only_preserves_body() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "coder",
-            "--description", "Original description",
-            "--body", "Original body text.",
+            "agent",
+            "new",
+            "--name",
+            "coder",
+            "--description",
+            "Original description",
+            "--body",
+            "Original body text.",
         ])
         .assert()
         .success();
@@ -107,17 +128,18 @@ fn agent_edit_description_only_preserves_body() {
     harness
         .ns2()
         .args([
-            "agent", "edit",
-            "--name", "coder",
-            "--description", "Updated description",
+            "agent",
+            "edit",
+            "--name",
+            "coder",
+            "--description",
+            "Updated description",
         ])
         .assert()
         .success();
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join(".ns2/agents/coder.md"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(harness.repo_dir.path().join(".ns2/agents/coder.md")).unwrap();
     assert!(content.contains("Updated description"));
     assert!(content.contains("Original body text."));
 }
@@ -128,10 +150,14 @@ fn agent_edit_body_only_preserves_description() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "coder",
-            "--description", "Original description",
-            "--body", "Original body text.",
+            "agent",
+            "new",
+            "--name",
+            "coder",
+            "--description",
+            "Original description",
+            "--body",
+            "Original body text.",
         ])
         .assert()
         .success();
@@ -139,17 +165,18 @@ fn agent_edit_body_only_preserves_description() {
     harness
         .ns2()
         .args([
-            "agent", "edit",
-            "--name", "coder",
-            "--body", "Updated body text.",
+            "agent",
+            "edit",
+            "--name",
+            "coder",
+            "--body",
+            "Updated body text.",
         ])
         .assert()
         .success();
 
-    let content = std::fs::read_to_string(
-        harness.repo_dir.path().join(".ns2/agents/coder.md"),
-    )
-    .unwrap();
+    let content =
+        std::fs::read_to_string(harness.repo_dir.path().join(".ns2/agents/coder.md")).unwrap();
     assert!(content.contains("Original description"));
     assert!(content.contains("Updated body text."));
 }
@@ -160,10 +187,14 @@ fn agent_edit_without_flags_fails() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "coder",
-            "--description", "desc",
-            "--body", "body",
+            "agent",
+            "new",
+            "--name",
+            "coder",
+            "--description",
+            "desc",
+            "--body",
+            "body",
         ])
         .assert()
         .success();
@@ -182,10 +213,14 @@ fn agent_new_duplicate_name_fails() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "coder",
-            "--description", "desc",
-            "--body", "body",
+            "agent",
+            "new",
+            "--name",
+            "coder",
+            "--description",
+            "desc",
+            "--body",
+            "body",
         ])
         .assert()
         .success();
@@ -193,10 +228,14 @@ fn agent_new_duplicate_name_fails() {
     harness
         .ns2()
         .args([
-            "agent", "new",
-            "--name", "coder",
-            "--description", "desc",
-            "--body", "body",
+            "agent",
+            "new",
+            "--name",
+            "coder",
+            "--description",
+            "desc",
+            "--body",
+            "body",
         ])
         .assert()
         .failure()
@@ -208,11 +247,7 @@ fn agent_new_requires_name() {
     let harness = common::TestHarness::new();
     harness
         .ns2()
-        .args([
-            "agent", "new",
-            "--description", "desc",
-            "--body", "body",
-        ])
+        .args(["agent", "new", "--description", "desc", "--body", "body"])
         .assert()
         .failure();
 }

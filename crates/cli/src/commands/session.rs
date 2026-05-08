@@ -1,8 +1,10 @@
+use crate::client::{
+    handle_connection_error, print_error_response, resolve_session_id, stream_events,
+};
+use crate::render::render_session_line;
 use std::collections::HashMap;
 use types::{Session, SessionStatus};
 use uuid::Uuid;
-use crate::client::{handle_connection_error, print_error_response, resolve_session_id, stream_events};
-use crate::render::{render_session_line};
 
 pub const fn session_is_terminal(status: &SessionStatus) -> bool {
     matches!(
@@ -86,9 +88,14 @@ pub async fn run_new(
         "initial_message": message,
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&url).json(&body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         eprintln!("Error: {}", resp.status());
         std::process::exit(1);
@@ -108,7 +115,13 @@ pub async fn run_new(
     }
 }
 
-pub async fn run_tail(server: &str, id: Option<String>, name: Option<String>, turns: Option<usize>, timeout: Option<u64>) {
+pub async fn run_tail(
+    server: &str,
+    id: Option<String>,
+    name: Option<String>,
+    turns: Option<usize>,
+    timeout: Option<u64>,
+) {
     let session_id = resolve_session_id(server, id, name).await;
     let mut url = format!("{server}/events?session_id={session_id}");
     if let Some(n) = turns {
@@ -116,7 +129,10 @@ pub async fn run_tail(server: &str, id: Option<String>, name: Option<String>, tu
     }
     if let Some(secs) = timeout {
         let duration = tokio::time::Duration::from_secs(secs);
-        if tokio::time::timeout(duration, stream_events(&url, false)).await.is_err() {
+        if tokio::time::timeout(duration, stream_events(&url, false))
+            .await
+            .is_err()
+        {
             eprintln!("Timeout expired.");
             std::process::exit(1);
         }
@@ -130,9 +146,14 @@ pub async fn run_send(server: &str, id: Option<String>, name: Option<String>, me
     let url = format!("{server}/sessions/{session_id}/messages");
     let body = serde_json::json!({ "message": message });
     let client = reqwest::Client::new();
-    let resp = client.post(&url).json(&body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         eprintln!("Error sending message: {}", resp.status());
         std::process::exit(1);
@@ -174,9 +195,8 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
         }
     }
 
-    let deadline = timeout.map(|secs| {
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
-    });
+    let deadline =
+        timeout.map(|secs| tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs));
 
     let mut terminal_statuses: HashMap<String, SessionStatus> = HashMap::new();
     // Track snippet text per session id for the progress display.
@@ -215,7 +235,9 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
                 std::process::exit(1);
             });
             // Cache the name on first fetch.
-            names.entry(id.clone()).or_insert_with(|| session.name.clone());
+            names
+                .entry(id.clone())
+                .or_insert_with(|| session.name.clone());
 
             if session_is_terminal(&session.status) {
                 terminal_statuses.insert(id.clone(), session.status);
@@ -250,7 +272,9 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
                     .get(id.as_str())
                     .cloned()
                     .unwrap_or(SessionStatus::Running);
-                let name = names.get(id.as_str()).map_or("", std::string::String::as_str);
+                let name = names
+                    .get(id.as_str())
+                    .map_or("", std::string::String::as_str);
                 let snippet = snippets.get(id.as_str()).map(std::string::String::as_str);
                 let line = render_session_line(id, name, snippet, &status, tick);
                 writeln!(out, "{line}").ok();
@@ -278,7 +302,9 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     // (The progress lines on stderr already show the final state.)
     let mut any_failed = false;
     for id in &ids {
-        let status = terminal_statuses.get(id.as_str()).expect("all ids terminal");
+        let status = terminal_statuses
+            .get(id.as_str())
+            .expect("all ids terminal");
         println!("{id}  {status}");
         if *status == SessionStatus::Failed {
             any_failed = true;

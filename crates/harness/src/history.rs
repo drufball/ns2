@@ -1,8 +1,8 @@
 use chrono::Utc;
+use events::SessionEvent;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use types::{ContentBlock, ContentBlockDelta, Role, Turn};
-use events::SessionEvent;
 use uuid::Uuid;
 
 /// Load conversation history from the DB for a session.
@@ -53,19 +53,28 @@ pub async fn persist_user_message(
         created_at: Utc::now(),
     };
     db.create_turn(&user_turn).await?;
-    let user_block = ContentBlock::Text { text: message.to_string() };
-    db.create_content_block(user_turn.id, 0, &Role::User, &user_block).await?;
-    let _ = event_tx.send(SessionEvent::TurnStarted { turn: user_turn.clone() });
+    let user_block = ContentBlock::Text {
+        text: message.to_string(),
+    };
+    db.create_content_block(user_turn.id, 0, &Role::User, &user_block)
+        .await?;
+    let _ = event_tx.send(SessionEvent::TurnStarted {
+        turn: user_turn.clone(),
+    });
     let _ = event_tx.send(SessionEvent::ContentBlockDelta {
         turn_id: user_turn.id,
         index: 0,
-        delta: ContentBlockDelta::TextDelta { text: message.to_string() },
+        delta: ContentBlockDelta::TextDelta {
+            text: message.to_string(),
+        },
     });
     let _ = event_tx.send(SessionEvent::ContentBlockDone {
         turn_id: user_turn.id,
         index: 0,
         block: user_block,
     });
-    let _ = event_tx.send(SessionEvent::TurnDone { turn_id: user_turn.id });
+    let _ = event_tx.send(SessionEvent::TurnDone {
+        turn_id: user_turn.id,
+    });
     Ok(user_turn)
 }

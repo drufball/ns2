@@ -4,7 +4,10 @@ pub fn run_list() {
         std::process::exit(1);
     });
     if !dir.exists() {
-        println!("No agents found (directory does not exist: {})", dir.display());
+        println!(
+            "No agents found (directory does not exist: {})",
+            dir.display()
+        );
         return;
     }
     let agent_list = agents::list_agents(&dir);

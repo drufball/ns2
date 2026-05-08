@@ -6,10 +6,7 @@ use std::path::{Path, PathBuf};
 /// considering only normal (non-dev, non-build) dependencies.
 fn build_dep_graph() -> HashMap<String, HashSet<String>> {
     let metadata = MetadataCommand::new()
-        .manifest_path(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../Cargo.toml"),
-        )
+        .manifest_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"))
         .exec()
         .expect("failed to run cargo metadata");
 
@@ -197,7 +194,15 @@ fn agents_has_no_upper_layer_deps() {
 #[test]
 fn specs_has_no_upper_layer_deps() {
     let graph = build_dep_graph();
-    for forbidden in &["db", "anthropic", "agents", "harness", "server", "tui", "cli"] {
+    for forbidden in &[
+        "db",
+        "anthropic",
+        "agents",
+        "harness",
+        "server",
+        "tui",
+        "cli",
+    ] {
         assert_no_dep(&graph, "specs", forbidden);
     }
 }
@@ -209,9 +214,7 @@ fn specs_has_no_upper_layer_deps() {
 /// Return the names of all workspace packages that directly depend on `ext_crate`.
 fn direct_users_of(ext_crate: &str) -> Vec<String> {
     let metadata = MetadataCommand::new()
-        .manifest_path(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"),
-        )
+        .manifest_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"))
         .exec()
         .expect("cargo metadata failed");
 
@@ -252,8 +255,10 @@ fn only_db_uses_sqlx_directly() {
 #[test]
 fn only_server_uses_axum_directly() {
     let users = direct_users_of("axum");
-    let violations: Vec<&String> =
-        users.iter().filter(|name| name.as_str() != "server").collect();
+    let violations: Vec<&String> = users
+        .iter()
+        .filter(|name| name.as_str() != "server")
+        .collect();
     assert!(
         violations.is_empty(),
         "External crate ownership violation: only `server` may depend on axum directly.\n\
@@ -331,8 +336,7 @@ fn load_coverage_ignores() -> CoverageIgnores {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("coverage-ignores.toml");
     let contents = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    toml::from_str(&contents)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    toml::from_str(&contents).unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
 }
 
 /// Walk all `.rs` files under `root`, skipping the `arch-tests` crate directory,
@@ -357,9 +361,13 @@ fn collect_coverage_off_files(
     arch_tests_dir: &Path,
     found: &mut Vec<String>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let Ok(path) = entry.path().canonicalize() else { continue };
+        let Ok(path) = entry.path().canonicalize() else {
+            continue;
+        };
         if path.is_dir() {
             // Skip the arch-tests crate entirely to avoid false positives.
             if path.starts_with(arch_tests_dir) {
@@ -367,7 +375,9 @@ fn collect_coverage_off_files(
             }
             collect_coverage_off_files(&path, workspace_root, arch_tests_dir, found);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             if contents.contains("#[coverage(off)]") {
                 // Convert to a workspace-relative path with forward slashes.
                 let rel = path

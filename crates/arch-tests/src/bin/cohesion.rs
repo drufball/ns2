@@ -17,17 +17,15 @@
 //!
 //! Usage: cohesion <path/to/file.rs> [path2.rs ...]
 
+use proc_macro2::Span;
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    fs,
+    env, fs,
     path::Path,
 };
 use syn::{
-    visit::Visit,
-    File, Ident, ImplItem, ItemImpl, Type, TypePath, ExprMethodCall, ExprPath,
+    visit::Visit, ExprMethodCall, ExprPath, File, Ident, ImplItem, ItemImpl, Type, TypePath,
 };
-use proc_macro2::Span;
 
 // ── Name collector ────────────────────────────────────────────────────────────
 
@@ -76,13 +74,17 @@ impl<'ast> Visit<'ast> for NameCollector {
 }
 
 fn names_in_block(block: &syn::Block) -> HashSet<String> {
-    let mut c = NameCollector { names: HashSet::new() };
+    let mut c = NameCollector {
+        names: HashSet::new(),
+    };
     c.visit_block(block);
     c.names
 }
 
 fn names_in_sig(sig: &syn::Signature) -> HashSet<String> {
-    let mut c = NameCollector { names: HashSet::new() };
+    let mut c = NameCollector {
+        names: HashSet::new(),
+    };
     for param in &sig.inputs {
         if let syn::FnArg::Typed(pt) = param {
             c.visit_type(&pt.ty);
@@ -99,8 +101,8 @@ fn names_in_sig(sig: &syn::Signature) -> HashSet<String> {
 #[derive(Debug)]
 struct FnInfo {
     display_name: String,
-    refs: HashSet<String>,   // names referenced in body + signature
-    line: usize,             // 1-indexed start line
+    refs: HashSet<String>, // names referenced in body + signature
+    line: usize,           // 1-indexed start line
 }
 
 struct FileLocals {
@@ -126,16 +128,32 @@ fn extract(file: &File) -> (Vec<FnInfo>, FileLocals) {
     // Pass 1: collect every name defined at file scope
     for item in &file.items {
         match item {
-            syn::Item::Fn(f)     => { defined.insert(f.sig.ident.to_string()); }
-            syn::Item::Struct(s) => { defined.insert(s.ident.to_string()); }
-            syn::Item::Enum(e)   => { defined.insert(e.ident.to_string()); }
-            syn::Item::Type(t)   => { defined.insert(t.ident.to_string()); }
-            syn::Item::Const(c)  => { defined.insert(c.ident.to_string()); }
-            syn::Item::Static(s) => { defined.insert(s.ident.to_string()); }
+            syn::Item::Fn(f) => {
+                defined.insert(f.sig.ident.to_string());
+            }
+            syn::Item::Struct(s) => {
+                defined.insert(s.ident.to_string());
+            }
+            syn::Item::Enum(e) => {
+                defined.insert(e.ident.to_string());
+            }
+            syn::Item::Type(t) => {
+                defined.insert(t.ident.to_string());
+            }
+            syn::Item::Const(c) => {
+                defined.insert(c.ident.to_string());
+            }
+            syn::Item::Static(s) => {
+                defined.insert(s.ident.to_string());
+            }
             syn::Item::Impl(imp) => {
-                if let Some(n) = impl_type_name(imp) { defined.insert(n); }
+                if let Some(n) = impl_type_name(imp) {
+                    defined.insert(n);
+                }
                 for ii in &imp.items {
-                    if let ImplItem::Fn(m) = ii { defined.insert(m.sig.ident.to_string()); }
+                    if let ImplItem::Fn(m) = ii {
+                        defined.insert(m.sig.ident.to_string());
+                    }
                 }
             }
             _ => {}
@@ -165,7 +183,9 @@ fn extract(file: &File) -> (Vec<FnInfo>, FileLocals) {
                             .cloned()
                             .collect();
                         // All methods on the same impl share their self-type name
-                        if let Some(ref n) = type_name { refs.insert(n.clone()); }
+                        if let Some(ref n) = type_name {
+                            refs.insert(n.clone());
+                        }
                         let display = type_name.as_ref().map_or_else(
                             || format!("impl::{}", m.sig.ident),
                             |n| format!("{}::{}", n, m.sig.ident),
@@ -187,35 +207,52 @@ fn extract(file: &File) -> (Vec<FnInfo>, FileLocals) {
 
 // ── LCOM4 via union-find ──────────────────────────────────────────────────────
 
-struct UnionFind { parent: Vec<usize>, rank: Vec<usize> }
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
 
 impl UnionFind {
     fn new(n: usize) -> Self {
-        Self { parent: (0..n).collect(), rank: vec![0; n] }
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
     }
     fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x { self.parent[x] = self.find(self.parent[x]); }
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]);
+        }
         self.parent[x]
     }
     fn union(&mut self, a: usize, b: usize) {
         let (ra, rb) = (self.find(a), self.find(b));
-        if ra == rb { return; }
+        if ra == rb {
+            return;
+        }
         match self.rank[ra].cmp(&self.rank[rb]) {
-            std::cmp::Ordering::Less    => self.parent[ra] = rb,
+            std::cmp::Ordering::Less => self.parent[ra] = rb,
             std::cmp::Ordering::Greater => self.parent[rb] = ra,
-            std::cmp::Ordering::Equal   => { self.parent[rb] = ra; self.rank[ra] += 1; }
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = ra;
+                self.rank[ra] += 1;
+            }
         }
     }
     fn components(&mut self, n: usize) -> Vec<Vec<usize>> {
         let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n { groups.entry(self.find(i)).or_default().push(i); }
+        for i in 0..n {
+            groups.entry(self.find(i)).or_default().push(i);
+        }
         groups.into_values().collect()
     }
 }
 
 fn lcom4(functions: &[FnInfo], locals: &FileLocals) -> Vec<Vec<usize>> {
     let n = functions.len();
-    if n == 0 { return vec![]; }
+    if n == 0 {
+        return vec![];
+    }
 
     let mut uf = UnionFind::new(n);
     let mut name_to_fns: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -229,7 +266,9 @@ fn lcom4(functions: &[FnInfo], locals: &FileLocals) -> Vec<Vec<usize>> {
     }
 
     for fns in name_to_fns.values() {
-        for w in fns.windows(2) { uf.union(w[0], w[1]); }
+        for w in fns.windows(2) {
+            uf.union(w[0], w[1]);
+        }
     }
 
     uf.components(n)
@@ -241,9 +280,9 @@ struct Metrics {
     n_fns: usize,
     n_lines: usize,
     n_components: usize,
-    cohesion_score: f64,   // 1 - (C-1)/(N-1), 0..1
-    orphan_ratio: f64,     // fraction of singletons
-    concern_score: f64,    // compound: components * sqrt(lines/100)
+    cohesion_score: f64, // 1 - (C-1)/(N-1), 0..1
+    orphan_ratio: f64,   // fraction of singletons
+    concern_score: f64,  // compound: components * sqrt(lines/100)
     flagged: bool,
 }
 
@@ -256,8 +295,8 @@ impl Metrics {
         } else {
             1.0 - ((n_components as f64 - 1.0) / (n_fns as f64 - 1.0))
         };
-        let orphan_ratio = components.iter().filter(|c| c.len() == 1).count() as f64
-            / n_fns.max(1) as f64;
+        let orphan_ratio =
+            components.iter().filter(|c| c.len() == 1).count() as f64 / n_fns.max(1) as f64;
         // Concern score weights component count by file size.
         // sqrt(lines/100): a 100-line file contributes weight 1, 3900-line file ≈ 6.2
         let size_weight = ((n_lines as f64) / 100.0).sqrt();
@@ -267,7 +306,15 @@ impl Metrics {
         // agents/src/lib.rs ≈ 20.7 is flagged, and the three target files all score > 30)
         let flagged = concern_score > threshold;
 
-        Self { n_fns, n_lines, n_components, cohesion_score, orphan_ratio, concern_score, flagged }
+        Self {
+            n_fns,
+            n_lines,
+            n_components,
+            cohesion_score,
+            orphan_ratio,
+            concern_score,
+            flagged,
+        }
     }
 }
 
@@ -281,9 +328,18 @@ fn print_report(path: &str, functions: &[FnInfo], components: &[Vec<usize>], m: 
     println!("  Lines of code      : {}", m.n_lines);
     println!("  Functions/methods  : {}", m.n_fns);
     println!("  LCOM4 components   : {}", m.n_components);
-    println!("  Cohesion score     : {:.3}  (1.0=perfect, 0.0=fully scattered)", m.cohesion_score);
-    println!("  Orphan ratio       : {:.3}  (fraction of singleton clusters)", m.orphan_ratio);
-    println!("  Concern score      : {:.1}  (components × √(lines/100); >10 = flag)", m.concern_score);
+    println!(
+        "  Cohesion score     : {:.3}  (1.0=perfect, 0.0=fully scattered)",
+        m.cohesion_score
+    );
+    println!(
+        "  Orphan ratio       : {:.3}  (fraction of singleton clusters)",
+        m.orphan_ratio
+    );
+    println!(
+        "  Concern score      : {:.1}  (components × √(lines/100); >10 = flag)",
+        m.concern_score
+    );
     println!();
 
     if m.n_components == 1 {
@@ -300,7 +356,12 @@ fn print_report(path: &str, functions: &[FnInfo], components: &[Vec<usize>], m: 
         let mut fns: Vec<&FnInfo> = cluster.iter().map(|&i| &functions[i]).collect();
         fns.sort_by_key(|f| f.line);
         let singleton_note = if cluster.len() == 1 { "  [orphan]" } else { "" };
-        println!("  Cluster {} ({} fns){}:", ci + 1, fns.len(), singleton_note);
+        println!(
+            "  Cluster {} ({} fns){}:",
+            ci + 1,
+            fns.len(),
+            singleton_note
+        );
         for f in &fns {
             println!("    line {:>5}  {}", f.line, f.display_name);
         }
@@ -349,13 +410,19 @@ fn main() {
     for path_str in &file_args {
         let content = match fs::read_to_string(path_str) {
             Ok(c) => c,
-            Err(e) => { eprintln!("Error reading {path_str}: {e}"); continue; }
+            Err(e) => {
+                eprintln!("Error reading {path_str}: {e}");
+                continue;
+            }
         };
         let n_lines = content.lines().count();
 
         let file: File = match syn::parse_str(&content) {
             Ok(f) => f,
-            Err(e) => { eprintln!("Parse error in {path_str}: {e}"); continue; }
+            Err(e) => {
+                eprintln!("Parse error in {path_str}: {e}");
+                continue;
+            }
         };
 
         let (functions, locals) = extract(&file);
@@ -390,8 +457,14 @@ fn main() {
             let flag = if r.m.flagged { " ← FLAGGED" } else { "" };
             println!(
                 "{:<45} {:>6} {:>6} {:>6} {:>8.3} {:>8.3} {:>12.1}{}",
-                r.short_name, r.m.n_lines, r.m.n_fns, r.m.n_components,
-                r.m.cohesion_score, r.m.orphan_ratio, r.m.concern_score, flag
+                r.short_name,
+                r.m.n_lines,
+                r.m.n_fns,
+                r.m.n_components,
+                r.m.cohesion_score,
+                r.m.orphan_ratio,
+                r.m.concern_score,
+                flag
             );
         }
     }
@@ -463,10 +536,7 @@ mod tests {
         // component {0,2,4} and singletons {1}, {3}
         let comps = uf.components(5);
         assert_eq!(comps.len(), 3);
-        let mut large: Vec<usize> = comps
-            .into_iter()
-            .max_by_key(std::vec::Vec::len)
-            .unwrap();
+        let mut large: Vec<usize> = comps.into_iter().max_by_key(std::vec::Vec::len).unwrap();
         large.sort_unstable();
         assert_eq!(large, vec![0, 2, 4]);
     }
@@ -514,10 +584,7 @@ mod tests {
 
     #[test]
     fn lcom4_two_functions_sharing_no_local_are_two_components() {
-        let fns = vec![
-            make_fn("foo", &["Aaa"]),
-            make_fn("bar", &["Bbb"]),
-        ];
+        let fns = vec![make_fn("foo", &["Aaa"]), make_fn("bar", &["Bbb"])];
         let locals = make_locals(&["Aaa", "Bbb"]);
         let comps = lcom4(&fns, &locals);
         assert_eq!(comps.len(), 2);
@@ -526,10 +593,7 @@ mod tests {
     #[test]
     fn lcom4_external_refs_do_not_connect_functions() {
         // Both fns reference "String" but it is not a file-local name.
-        let fns = vec![
-            make_fn("foo", &["String"]),
-            make_fn("bar", &["String"]),
-        ];
+        let fns = vec![make_fn("foo", &["String"]), make_fn("bar", &["String"])];
         let locals = make_locals(&[]); // "String" is not local
         let comps = lcom4(&fns, &locals);
         assert_eq!(comps.len(), 2);
@@ -670,8 +734,14 @@ mod tests {
         let file = parse("struct Foo; impl Foo { fn new() -> Foo { Foo } fn run(&self) {} }");
         let (fns, locals) = extract(&file);
         let names: Vec<&str> = fns.iter().map(|f| f.display_name.as_str()).collect();
-        assert!(names.iter().any(|n| n.contains("new")), "expected new method: {names:?}");
-        assert!(names.iter().any(|n| n.contains("run")), "expected run method: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("new")),
+            "expected new method: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("run")),
+            "expected run method: {names:?}"
+        );
         assert!(locals.defined.contains("Foo"));
     }
 
@@ -680,7 +750,11 @@ mod tests {
         let file = parse("struct Bar; fn foo() { let _x = Bar; }");
         let (fns, _) = extract(&file);
         assert_eq!(fns.len(), 1);
-        assert!(fns[0].refs.contains("Bar"), "refs should contain Bar: {:?}", fns[0].refs);
+        assert!(
+            fns[0].refs.contains("Bar"),
+            "refs should contain Bar: {:?}",
+            fns[0].refs
+        );
     }
 
     // ── impl_type_name ────────────────────────────────────────────────────────

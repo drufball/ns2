@@ -1,12 +1,17 @@
-use std::collections::HashMap;
-use serde_json::json;
-use types::{Issue, IssueStatus};
-use events::SystemEvent;
 use crate::client::{handle_connection_error, print_error_response};
-use crate::render::{format_issue_show, format_issue_event, print_issue_row, render_issue_tree, IssueTreeNode};
+use crate::render::{
+    format_issue_event, format_issue_show, print_issue_row, render_issue_tree, IssueTreeNode,
+};
+use events::SystemEvent;
+use serde_json::json;
+use std::collections::HashMap;
+use types::{Issue, IssueStatus};
 
 pub const fn issue_is_terminal(status: &IssueStatus) -> bool {
-    matches!(status, IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled)
+    matches!(
+        status,
+        IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled
+    )
 }
 
 /// Check whether every node in the issue tree (roots AND all descendants) is terminal.
@@ -52,9 +57,14 @@ pub async fn run_new(
         "blocked_on": blocked_on,
         "branch": branch,
     });
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         print_error_response(resp).await;
     }
@@ -81,7 +91,14 @@ pub async fn run_new(
             eprintln!("Error parsing response: {e}");
             std::process::exit(1);
         });
-        eprintln!("Started issue {}. Session: {}", started.id, started.session_id.map(|id| id.to_string()).unwrap_or_default());
+        eprintln!(
+            "Started issue {}. Session: {}",
+            started.id,
+            started
+                .session_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -155,9 +172,14 @@ pub async fn run_comment(server: &str, id: String, body: String, author: String)
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/comments");
     let req_body = json!({ "author": author, "body": body });
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
@@ -185,16 +207,27 @@ pub async fn run_start(server: &str, id: String) {
         eprintln!("Error parsing response: {e}");
         std::process::exit(1);
     });
-    eprintln!("Started issue {id}. Session: {}", issue.session_id.map(|id| id.to_string()).unwrap_or_default());
+    eprintln!(
+        "Started issue {id}. Session: {}",
+        issue
+            .session_id
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+    );
 }
 
 pub async fn run_complete(server: &str, id: String, comment: String) {
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/complete");
     let req_body = json!({ "comment": comment });
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             eprintln!("Error: issue not found: {id}");
@@ -209,9 +242,14 @@ pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/reopen");
     let req_body = json!({ "comment": comment });
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         eprintln!("Error: issue not found: {id}");
         std::process::exit(1);
@@ -237,7 +275,13 @@ pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start
             eprintln!("Error parsing response: {e}");
             std::process::exit(1);
         });
-        eprintln!("Started issue {id}. Session: {}", started.session_id.map(|id| id.to_string()).unwrap_or_default());
+        eprintln!(
+            "Started issue {id}. Session: {}",
+            started
+                .session_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -280,7 +324,10 @@ pub async fn run_list(
     if issues.is_empty() {
         println!("No issues found.");
     } else {
-        println!("{:<6}  {:<30}  {:<10}  {:<12}  {:<25}  created_at", "id", "title", "status", "assignee", "branch");
+        println!(
+            "{:<6}  {:<30}  {:<10}  {:<12}  {:<25}  created_at",
+            "id", "title", "status", "assignee", "branch"
+        );
         for issue in &issues {
             print_issue_row(issue);
         }
@@ -367,7 +414,11 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
             }
         }
 
-        Some(IssueTreeNode { issue, snippet: None, children })
+        Some(IssueTreeNode {
+            issue,
+            snippet: None,
+            children,
+        })
     }
 
     // Helper: fetch last text snippet for a running issue with a session.
@@ -386,10 +437,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     }
 
     // Recursively attach snippets to running nodes.
-    fn attach_snippets(
-        node: &mut IssueTreeNode,
-        snippets: &HashMap<uuid::Uuid, Option<String>>,
-    ) {
+    fn attach_snippets(node: &mut IssueTreeNode, snippets: &HashMap<uuid::Uuid, Option<String>>) {
         if node.issue.status == IssueStatus::Running {
             if let Some(session_id) = node.issue.session_id {
                 if let Some(snippet_opt) = snippets.get(&session_id) {
@@ -420,9 +468,8 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
     }
 
     let client = reqwest::Client::new();
-    let deadline = timeout.map(|secs| {
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs)
-    });
+    let deadline =
+        timeout.map(|secs| tokio::time::Instant::now() + tokio::time::Duration::from_secs(secs));
 
     let mut tick: usize = 0;
     let mut prev_line_count = 0usize;
@@ -434,7 +481,9 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
         let mut roots: Vec<IssueTreeNode> = Vec::new();
         let mut fetch_error = false;
         for id in &ids {
-            if let Some(node) = fetch_issue_tree(&client, server, id).await { roots.push(node) } else {
+            if let Some(node) = fetch_issue_tree(&client, server, id).await {
+                roots.push(node);
+            } else {
                 eprintln!("Error: issue not found: {id}");
                 fetch_error = true;
             }
@@ -616,9 +665,14 @@ pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
         },
     });
 
-    let resp = client.post(&url).json(&req_body).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
+    let resp = client
+        .post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
     if !resp.status().is_success() {
         print_error_response(resp).await;
     }
@@ -627,7 +681,11 @@ pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
         std::process::exit(1);
     });
     let hook_id = hook["id"].as_str().unwrap_or("?");
-    eprintln!("Created hook: {} ({})", hook["name"].as_str().unwrap_or(""), hook_id);
+    eprintln!(
+        "Created hook: {} ({})",
+        hook["name"].as_str().unwrap_or(""),
+        hook_id
+    );
     println!("{hook_id}");
 }
 
@@ -655,7 +713,11 @@ mod tests {
     }
 
     fn make_node(status: types::IssueStatus, children: Vec<IssueTreeNode>) -> IssueTreeNode {
-        IssueTreeNode { issue: make_issue(status), snippet: None, children }
+        IssueTreeNode {
+            issue: make_issue(status),
+            snippet: None,
+            children,
+        }
     }
 
     #[test]

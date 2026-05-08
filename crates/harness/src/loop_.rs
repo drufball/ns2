@@ -4,12 +4,12 @@ use crate::hooks::{run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hoo
 use crate::prompt::build_system_prompt;
 use crate::retry::{complete_with_retry, is_rate_limit, max_retries};
 use crate::HarnessConfig;
+use chrono::Utc;
+use events::SessionEvent;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use types::{ContentBlock, Role, SessionStatus, Turn};
-use events::SessionEvent;
 use uuid::Uuid;
-use chrono::Utc;
 
 /// Run the tool dispatch loop for a single LLM turn sequence.
 /// `messages` should already contain the full history including the new user message.
@@ -81,7 +81,8 @@ pub async fn run_tool_dispatch_loop(
                     delta: types::ContentBlockDelta::TextDelta { text: text.clone() },
                 });
             }
-            db.create_content_block(turn.id, i64::from(index), &Role::Assistant, block).await?;
+            db.create_content_block(turn.id, i64::from(index), &Role::Assistant, block)
+                .await?;
             let _ = event_tx.send(SessionEvent::ContentBlockDone {
                 turn_id: turn.id,
                 index,
@@ -95,7 +96,9 @@ pub async fn run_tool_dispatch_loop(
             "tool_use" => { /* dispatch tools below */ }
             "end_turn" => {
                 // Run Stop hooks; if any exit non-zero, return their stdout as an injected message
-                if let Some(injected) = run_stop_hooks(hooks, config.session.id, config.cwd.as_deref()).await {
+                if let Some(injected) =
+                    run_stop_hooks(hooks, config.session.id, config.cwd.as_deref()).await
+                {
                     return Ok(Some(injected));
                 }
                 break;
@@ -128,15 +131,25 @@ pub async fn run_tool_dispatch_loop(
                     blocked
                 } else {
                     // Run the actual tool
-                    let tool_output = match config.tools.iter().find(|t| t.definition().name == *name) {
-                        Some(tool) => match tool.execute(input.clone(), config.cwd.as_deref()).await {
-                            Ok(output) => output,
-                            Err(e) => format!("Error: {e}"),
-                        },
-                        None => format!("Error: unknown tool '{name}'"),
-                    };
+                    let tool_output =
+                        match config.tools.iter().find(|t| t.definition().name == *name) {
+                            Some(tool) => {
+                                match tool.execute(input.clone(), config.cwd.as_deref()).await {
+                                    Ok(output) => output,
+                                    Err(e) => format!("Error: {e}"),
+                                }
+                            }
+                            None => format!("Error: unknown tool '{name}'"),
+                        };
                     // Run PostToolUse hooks (exit code ignored)
-                    run_post_tool_use_hooks(hooks, name, input, &tool_output, config.cwd.as_deref()).await;
+                    run_post_tool_use_hooks(
+                        hooks,
+                        name,
+                        input,
+                        &tool_output,
+                        config.cwd.as_deref(),
+                    )
+                    .await;
                     tool_output
                 };
                 tool_result_blocks.push(ContentBlock::ToolResult {
@@ -154,7 +167,9 @@ pub async fn run_tool_dispatch_loop(
             created_at: Utc::now(),
         };
         db.create_turn(&tool_result_turn).await?;
-        let _ = event_tx.send(SessionEvent::TurnStarted { turn: tool_result_turn.clone() });
+        let _ = event_tx.send(SessionEvent::TurnStarted {
+            turn: tool_result_turn.clone(),
+        });
 
         for (index, block) in tool_result_blocks.iter().enumerate() {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
@@ -167,7 +182,9 @@ pub async fn run_tool_dispatch_loop(
             });
         }
 
-        let _ = event_tx.send(SessionEvent::TurnDone { turn_id: tool_result_turn.id });
+        let _ = event_tx.send(SessionEvent::TurnDone {
+            turn_id: tool_result_turn.id,
+        });
 
         // Add tool result turn to history and loop
         messages.push((Role::User, tool_result_blocks));
@@ -212,7 +229,9 @@ pub async fn run(
     } else {
         workspace::git_root().await
     };
-    let agents_dir = effective_root.as_ref().map(|r| r.join(".ns2").join("agents"));
+    let agents_dir = effective_root
+        .as_ref()
+        .map(|r| r.join(".ns2").join("agents"));
 
     // Build a preamble that tells the agent where it is running.
     // If the git root cannot be determined, the preamble is omitted (no failure).
@@ -239,7 +258,8 @@ pub async fn run(
             Some(def) => {
                 let agent_hooks = def.hooks;
                 if def.include_project_config {
-                    let project_hooks = effective_root.as_deref()
+                    let project_hooks = effective_root
+                        .as_deref()
                         .map(agents::load_project_hooks)
                         .unwrap_or_default();
                     agents::merge_hooks(agent_hooks, project_hooks)
@@ -252,10 +272,13 @@ pub async fn run(
 
     loop {
         // Wait for the next user message. When the sender is dropped, recv() returns None → exit.
-        let Some(message) = msg_rx.recv().await else { break };
+        let Some(message) = msg_rx.recv().await else {
+            break;
+        };
 
         // Transition session to Running
-        db.update_session_status(config.session.id, SessionStatus::Running).await?;
+        db.update_session_status(config.session.id, SessionStatus::Running)
+            .await?;
 
         // Persist user message and emit events
         persist_user_message(&db, config.session.id, &message, &event_tx).await?;
@@ -281,20 +304,15 @@ pub async fn run(
                 None => break, // normal completion
                 Some(injected) => {
                     // Stop hook rejected; inject the message and continue
-                    persist_user_message(
-                        &db,
-                        config.session.id,
-                        &injected,
-                        &event_tx,
-                    )
-                    .await?;
+                    persist_user_message(&db, config.session.id, &injected, &event_tx).await?;
                     current_history = load_history(&db, config.session.id).await?;
                 }
             }
         }
 
         // Mark session completed and emit done event
-        db.update_session_status(config.session.id, SessionStatus::Completed).await?;
+        db.update_session_status(config.session.id, SessionStatus::Completed)
+            .await?;
         let _ = event_tx.send(SessionEvent::Done);
 
         // Loop back to wait for next message

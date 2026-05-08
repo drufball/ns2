@@ -28,4 +28,4 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 bytes = "1"
 
 [dev-dependencies]
-bytes = "1"
+http-body-util = "0.1"

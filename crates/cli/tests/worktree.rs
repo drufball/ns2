@@ -45,7 +45,10 @@ fn worktree_create_creates_directory() {
 
     let wt_path = h.worktree_base().join("feature").join("wt-alpha");
     assert!(wt_path.is_dir(), "worktree directory should exist");
-    assert!(wt_path.join(".git").is_file(), "worktree .git should be a file");
+    assert!(
+        wt_path.join(".git").is_file(),
+        "worktree .git should be a file"
+    );
 }
 
 #[test]
@@ -64,8 +67,14 @@ fn worktree_list_shows_created_worktrees() {
         .success();
 
     let out = h.ns2_stdout(&["worktree", "list"]);
-    assert!(out.contains("feature/wt-one"), "list should show feature/wt-one");
-    assert!(out.contains("feature/wt-two"), "list should show feature/wt-two");
+    assert!(
+        out.contains("feature/wt-one"),
+        "list should show feature/wt-one"
+    );
+    assert!(
+        out.contains("feature/wt-two"),
+        "list should show feature/wt-two"
+    );
 }
 
 #[test]
@@ -103,7 +112,10 @@ fn worktree_delete_merged_branch() {
         .assert()
         .success();
 
-    assert!(!wt_path.exists(), "worktree directory should be gone after delete");
+    assert!(
+        !wt_path.exists(),
+        "worktree directory should be gone after delete"
+    );
 }
 
 #[test]
@@ -137,7 +149,13 @@ fn worktree_delete_unmerged_fails() {
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(["-C", wt_path.to_str().unwrap(), "commit", "-m", "unmerged commit"])
+        .args([
+            "-C",
+            wt_path.to_str().unwrap(),
+            "commit",
+            "-m",
+            "unmerged commit",
+        ])
         .env("HOME", h.home_dir.path())
         .output()
         .unwrap();
@@ -167,17 +185,32 @@ fn worktree_delete_force_deletes_unmerged() {
         .output()
         .unwrap();
     std::process::Command::new("git")
-        .args(["-C", wt_path.to_str().unwrap(), "commit", "-m", "unmerged commit"])
+        .args([
+            "-C",
+            wt_path.to_str().unwrap(),
+            "commit",
+            "-m",
+            "unmerged commit",
+        ])
         .env("HOME", h.home_dir.path())
         .output()
         .unwrap();
 
     h.ns2()
-        .args(["worktree", "delete", "--branch", "feature/wt-alpha", "--force"])
+        .args([
+            "worktree",
+            "delete",
+            "--branch",
+            "feature/wt-alpha",
+            "--force",
+        ])
         .assert()
         .success();
 
-    assert!(!wt_path.exists(), "worktree directory should be gone after force delete");
+    assert!(
+        !wt_path.exists(),
+        "worktree directory should be gone after force delete"
+    );
 }
 
 #[test]
@@ -188,20 +221,34 @@ fn issue_start_creates_worktree_for_issue_with_branch() {
     write_agent(&h, "swe");
 
     let id = h.ns2_stdout(&[
-        "issue", "new",
-        "--title", "Add dashboard",
-        "--body", "body",
-        "--assignee", "swe",
+        "issue",
+        "new",
+        "--title",
+        "Add dashboard",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
     ]);
 
     let json = h.http_get(&format!("/issues/{id}"));
     let branch = extract_json_str(&json, "branch");
 
-    h.ns2().args(["issue", "start", "--id", &id]).assert().success();
-    h.ns2().args(["issue", "wait", "--id", &id]).assert().success();
+    h.ns2()
+        .args(["issue", "start", "--id", &id])
+        .assert()
+        .success();
+    h.ns2()
+        .args(["issue", "wait", "--id", &id])
+        .assert()
+        .success();
 
     let branch_path = h.worktree_base().join(&branch);
-    assert!(branch_path.is_dir(), "worktree directory should exist at {}", branch_path.display());
+    assert!(
+        branch_path.is_dir(),
+        "worktree directory should exist at {}",
+        branch_path.display()
+    );
     assert!(
         branch_path.join(".git").is_file(),
         "worktree .git should be a file at {}",
@@ -217,36 +264,69 @@ fn issue_start_reuses_existing_worktree() {
     write_agent(&h, "swe");
 
     let id_a = h.ns2_stdout(&[
-        "issue", "new",
-        "--title", "Issue A",
-        "--body", "body",
-        "--assignee", "swe",
-        "--branch", "feature/shared",
+        "issue",
+        "new",
+        "--title",
+        "Issue A",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
+        "--branch",
+        "feature/shared",
     ]);
-    h.ns2().args(["issue", "start", "--id", &id_a]).assert().success();
-    h.ns2().args(["issue", "wait", "--id", &id_a]).assert().success();
+    h.ns2()
+        .args(["issue", "start", "--id", &id_a])
+        .assert()
+        .success();
+    h.ns2()
+        .args(["issue", "wait", "--id", &id_a])
+        .assert()
+        .success();
 
     let id_b = h.ns2_stdout(&[
-        "issue", "new",
-        "--title", "Issue B",
-        "--body", "body",
-        "--assignee", "swe",
-        "--branch", "feature/shared",
+        "issue",
+        "new",
+        "--title",
+        "Issue B",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
+        "--branch",
+        "feature/shared",
     ]);
-    h.ns2().args(["issue", "start", "--id", &id_b]).assert().success();
-    h.ns2().args(["issue", "wait", "--id", &id_b]).assert().success();
+    h.ns2()
+        .args(["issue", "start", "--id", &id_b])
+        .assert()
+        .success();
+    h.ns2()
+        .args(["issue", "wait", "--id", &id_b])
+        .assert()
+        .success();
 
     let wt_path = h.worktree_base().join("feature").join("shared");
     assert!(wt_path.is_dir(), "worktree should exist");
 
     let git_list = std::process::Command::new("git")
-        .args(["-C", h.repo_dir.path().to_str().unwrap(), "worktree", "list"])
+        .args([
+            "-C",
+            h.repo_dir.path().to_str().unwrap(),
+            "worktree",
+            "list",
+        ])
         .env("HOME", h.home_dir.path())
         .output()
         .unwrap();
     let git_list_out = String::from_utf8_lossy(&git_list.stdout);
-    let count = git_list_out.lines().filter(|l| l.contains("feature/shared")).count();
-    assert!(count <= 1, "git worktree list should not have duplicate entries for feature/shared");
+    let count = git_list_out
+        .lines()
+        .filter(|l| l.contains("feature/shared"))
+        .count();
+    assert!(
+        count <= 1,
+        "git worktree list should not have duplicate entries for feature/shared"
+    );
 }
 
 #[test]
@@ -257,17 +337,27 @@ fn worktree_not_deleted_after_session_completes() {
     write_agent(&h, "swe");
 
     let id = h.ns2_stdout(&[
-        "issue", "new",
-        "--title", "Persist worktree",
-        "--body", "body",
-        "--assignee", "swe",
+        "issue",
+        "new",
+        "--title",
+        "Persist worktree",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
     ]);
 
     let json = h.http_get(&format!("/issues/{id}"));
     let branch = extract_json_str(&json, "branch");
 
-    h.ns2().args(["issue", "start", "--id", &id]).assert().success();
-    h.ns2().args(["issue", "wait", "--id", &id]).assert().success();
+    h.ns2()
+        .args(["issue", "start", "--id", &id])
+        .assert()
+        .success();
+    h.ns2()
+        .args(["issue", "wait", "--id", &id])
+        .assert()
+        .success();
 
     let branch_path = h.worktree_base().join(&branch);
     assert!(

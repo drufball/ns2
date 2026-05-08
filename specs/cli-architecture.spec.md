@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/**/*.rs
-verified: 2026-04-29T17:14:17Z
+verified: 2026-05-06T18:51:59Z
 ---
 
 # CLI Architecture

@@ -141,13 +141,11 @@ fn count_code_loc(path: &Path) -> (usize, usize) {
 }
 
 fn is_test_file(rel: &str) -> bool {
-    rel.contains("/tests/")
-        || rel.ends_with("_test.rs")
-        || {
-            // bare filename starts with test_
-            let fname = rel.rsplit('/').next().unwrap_or(rel);
-            fname.starts_with("test_")
-        }
+    rel.contains("/tests/") || rel.ends_with("_test.rs") || {
+        // bare filename starts with test_
+        let fname = rel.rsplit('/').next().unwrap_or(rel);
+        fname.starts_with("test_")
+    }
 }
 
 fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
@@ -158,7 +156,9 @@ fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
@@ -202,10 +202,11 @@ fn main() {
             }
             "--test-threshold" => {
                 i += 1;
-                test_threshold = Some(args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-                    eprintln!("--test-threshold requires a numeric argument");
-                    usage()
-                }));
+                test_threshold =
+                    Some(args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("--test-threshold requires a numeric argument");
+                        usage()
+                    }));
             }
             "--dir" => {
                 i += 1;
@@ -257,9 +258,7 @@ fn main() {
     }
 
     if violations.is_empty() {
-        println!(
-            "LOC check passed (threshold: src={threshold}, test={test_threshold})."
-        );
+        println!("LOC check passed (threshold: src={threshold}, test={test_threshold}).");
     } else {
         println!(
             "LOC check FAILED — {} file(s) exceed the limit (threshold: src={}, test={}):",
@@ -290,7 +289,13 @@ mod tests {
             .min()
             .unwrap_or(0);
         s.lines()
-            .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l })
+            .map(|l| {
+                if l.len() >= min_indent {
+                    &l[min_indent..]
+                } else {
+                    l
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -303,29 +308,34 @@ mod tests {
 
     #[test]
     fn only_line_comments_returns_zero() {
-        let content = dedent("
+        let content = dedent(
+            "
             // This is a comment
             // So is this
             //! doc comment
-        ");
+        ",
+        );
         assert_eq!(count_code_loc_str(&content), (0, 0));
     }
 
     #[test]
     fn only_real_code_lines_counted() {
-        let content = dedent("
+        let content = dedent(
+            "
             fn foo() {
                 let x = 1;
                 let y = 2;
             }
-        ");
+        ",
+        );
         // 4 non-blank lines: fn, let x, let y, }
         assert_eq!(count_code_loc_str(&content), (4, 0));
     }
 
     #[test]
     fn mixed_code_blanks_comments() {
-        let content = dedent("
+        let content = dedent(
+            "
             // top comment
 
             fn bar() {
@@ -333,32 +343,37 @@ mod tests {
                 let z = 3; // trailing comment — still code
             }
 
-        ");
+        ",
+        );
         // Code lines: `fn bar() {`, `let z = 3;`, `}`  → 3
         assert_eq!(count_code_loc_str(&content), (3, 0));
     }
 
     #[test]
     fn block_comment_spanning_multiple_lines_not_counted() {
-        let content = dedent("
+        let content = dedent(
+            "
             /*
              * This is a block comment.
              * It spans several lines.
              */
             fn baz() {}
-        ");
+        ",
+        );
         // Only `fn baz() {}` is code.
         assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
     fn block_comment_open_line_with_code_before_counts_once() {
-        let content = dedent("
+        let content = dedent(
+            "
             let a = 1; /* start of block
              * still in block
              */
             let b = 2;
-        ");
+        ",
+        );
         // `let a = 1;` (code before /*) + `let b = 2;` → 2
         assert_eq!(count_code_loc_str(&content), (2, 0));
     }
@@ -377,40 +392,47 @@ mod tests {
 
     #[test]
     fn code_after_closing_block_comment_counted() {
-        let content = dedent("
+        let content = dedent(
+            "
             /*
              * block
              */ let x = 1;
-        ");
+        ",
+        );
         // The line with */ and trailing code should count as 1.
         assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
     fn nested_block_comment_delimiter_does_not_reopen() {
-        let content = dedent("
+        let content = dedent(
+            "
             /* outer /* still outer
              */
             real_code();
-        ");
+        ",
+        );
         assert_eq!(count_code_loc_str(&content), (1, 0));
     }
 
     #[test]
     fn multiple_block_comments_in_one_file() {
-        let content = dedent("
+        let content = dedent(
+            "
             /* comment one */
             let a = 1;
             /* comment two */
             let b = 2;
-        ");
+        ",
+        );
         // Two pure inline block comments (not counted) + two code lines → 2
         assert_eq!(count_code_loc_str(&content), (2, 0));
     }
 
     #[test]
     fn cfg_test_mod_excluded_from_prod_loc() {
-        let content = dedent("
+        let content = dedent(
+            "
             fn foo() {
                 let x = 1;
             }
@@ -422,7 +444,8 @@ mod tests {
                     assert_eq!(1, 1);
                 }
             }
-        ");
+        ",
+        );
         let (prod, _test) = count_code_loc_str(&content);
         // prod code: `fn foo() {`, `let x = 1;`, `}` = 3 lines
         assert_eq!(prod, 3);
@@ -430,14 +453,16 @@ mod tests {
 
     #[test]
     fn cfg_test_mod_counted_in_test_loc() {
-        let content = dedent("
+        let content = dedent(
+            "
             fn foo() {}
             #[cfg(test)]
             mod tests {
                 #[test]
                 fn bar() {}
             }
-        ");
+        ",
+        );
         let (_prod, test) = count_code_loc_str(&content);
         // test lines: `#[cfg(test)]`, `mod tests {`, `#[test]`, `fn bar() {}`, `}` = 5
         assert_eq!(test, 5);
@@ -445,11 +470,13 @@ mod tests {
 
     #[test]
     fn prod_code_counted_normally_when_no_test_mod() {
-        let content = dedent("
+        let content = dedent(
+            "
             fn foo() {
                 let x = 1;
             }
-        ");
+        ",
+        );
         let (prod, test) = count_code_loc_str(&content);
         assert_eq!(prod, 3);
         assert_eq!(test, 0);

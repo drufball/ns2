@@ -125,9 +125,18 @@ pub struct Turn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,7 +374,9 @@ mod tests {
 
     #[test]
     fn content_block_text_serde_round_trip() {
-        let block = ContentBlock::Text { text: "hello".into() };
+        let block = ContentBlock::Text {
+            text: "hello".into(),
+        };
         let json = serde_json::to_string(&block).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(v["type"], "text");
@@ -413,7 +424,9 @@ mod tests {
 
     #[test]
     fn content_block_delta_text_delta_serde_round_trip() {
-        let delta = ContentBlockDelta::TextDelta { text: "chunk".into() };
+        let delta = ContentBlockDelta::TextDelta {
+            text: "chunk".into(),
+        };
         let json = serde_json::to_string(&delta).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(v["type"], "text_delta");
@@ -424,7 +437,9 @@ mod tests {
 
     #[test]
     fn content_block_delta_input_json_delta_serde_round_trip() {
-        let delta = ContentBlockDelta::InputJsonDelta { partial_json: "{\"k\":".into() };
+        let delta = ContentBlockDelta::InputJsonDelta {
+            partial_json: "{\"k\":".into(),
+        };
         let json = serde_json::to_string(&delta).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(v["type"], "input_json_delta");

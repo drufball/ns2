@@ -64,7 +64,8 @@ impl EventsQuery {
                 SystemEvent::Issue(ie) => {
                     let issue_id = match ie {
                         IssueEvent::Created(i) => &i.id,
-                        IssueEvent::StatusChanged { issue, .. } | IssueEvent::CommentAdded { issue, .. } => &issue.id,
+                        IssueEvent::StatusChanged { issue, .. }
+                        | IssueEvent::CommentAdded { issue, .. } => &issue.id,
                     };
                     if issue_id != iid {
                         return false;
@@ -166,18 +167,16 @@ pub async fn events(
     let live_stream: futures::future::Either<_, _> = if session_already_done {
         futures::future::Either::Right(stream::empty())
     } else {
-        futures::future::Either::Left(
-            BroadcastStream::new(rx).filter_map(move |result| {
-                let params = params_for_live.clone();
-                async move {
-                    match result {
-                        Ok(ev) if params.matches(&ev) => Some(Ok::<_, Infallible>(ev_to_sse(&ev))),
-                        Ok(_) => None,
-                        Err(_lagged) => None,
-                    }
+        futures::future::Either::Left(BroadcastStream::new(rx).filter_map(move |result| {
+            let params = params_for_live.clone();
+            async move {
+                match result {
+                    Ok(ev) if params.matches(&ev) => Some(Ok::<_, Infallible>(ev_to_sse(&ev))),
+                    Ok(_) => None,
+                    Err(_lagged) => None,
                 }
-            }),
-        )
+            }
+        }))
     };
 
     Sse::new(history_stream.chain(live_stream))
@@ -188,10 +187,10 @@ pub async fn events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use events::{EventBus, IssueEvent, SystemEvent};
     use types::{Issue, IssueStatus};
     use uuid::Uuid;
-    use chrono::Utc;
 
     fn make_issue(id: &str) -> Issue {
         Issue {
@@ -214,7 +213,12 @@ mod tests {
 
     #[test]
     fn matches_no_filter_accepts_all() {
-        let q = EventsQuery { session_id: None, issue_id: None, types: None, last_turns: None };
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+        };
         let ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
         assert!(q.matches(&ev));
     }
@@ -228,13 +232,19 @@ mod tests {
             last_turns: None,
         };
         let issue_ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
-        assert!(!q.matches(&issue_ev), "issue event must not pass types=session filter");
+        assert!(
+            !q.matches(&issue_ev),
+            "issue event must not pass types=session filter"
+        );
 
         let session_ev = SystemEvent::Session {
             session_id: Uuid::new_v4(),
             event: SessionEvent::Done,
         };
-        assert!(q.matches(&session_ev), "session event must pass types=session filter");
+        assert!(
+            q.matches(&session_ev),
+            "session event must pass types=session filter"
+        );
     }
 
     #[test]
@@ -249,10 +259,16 @@ mod tests {
             session_id: Uuid::new_v4(),
             event: SessionEvent::Done,
         };
-        assert!(!q.matches(&session_ev), "session event must not pass types=issue filter");
+        assert!(
+            !q.matches(&session_ev),
+            "session event must not pass types=issue filter"
+        );
 
         let issue_ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
-        assert!(q.matches(&issue_ev), "issue event must pass types=issue filter");
+        assert!(
+            q.matches(&issue_ev),
+            "issue event must pass types=issue filter"
+        );
     }
 
     #[test]
@@ -294,8 +310,14 @@ mod tests {
         let issue_ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
 
         assert!(q.matches(&matching), "event for target session must pass");
-        assert!(!q.matches(&not_matching), "event for other session must not pass");
-        assert!(!q.matches(&issue_ev), "issue event must not pass session_id filter");
+        assert!(
+            !q.matches(&not_matching),
+            "event for other session must not pass"
+        );
+        assert!(
+            !q.matches(&issue_ev),
+            "issue event must not pass session_id filter"
+        );
     }
 
     #[test]
@@ -315,8 +337,14 @@ mod tests {
         };
 
         assert!(q.matches(&matching), "event for target issue must pass");
-        assert!(!q.matches(&not_matching), "event for other issue must not pass");
-        assert!(!q.matches(&session_ev), "session event must not pass issue_id filter");
+        assert!(
+            !q.matches(&not_matching),
+            "event for other issue must not pass"
+        );
+        assert!(
+            !q.matches(&session_ev),
+            "session event must not pass issue_id filter"
+        );
     }
 
     // ── Live stream passes filtered events ────────────────────────────────────
@@ -330,7 +358,10 @@ mod tests {
         bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue("ab12"))));
         // Emit a session event
         let sid = Uuid::new_v4();
-        bus.send(SystemEvent::Session { session_id: sid, event: SessionEvent::Done });
+        bus.send(SystemEvent::Session {
+            session_id: sid,
+            event: SessionEvent::Done,
+        });
 
         let q = EventsQuery {
             session_id: None,
@@ -351,6 +382,191 @@ mod tests {
         assert!(matches!(received[0], SystemEvent::Session { .. }));
     }
 
+    // ── Route-level integration tests ─────────────────────────────────────────
+
+    /// Builds an in-memory `AppState` for route-level tests.
+    /// Delegates to the shared `test_state()` helper in `crate::tests`.
+    async fn make_route_state() -> crate::state::AppState {
+        crate::tests::test_state().await
+    }
+
+    /// Helper: collect SSE body chunks with a deadline, returning all raw bytes received.
+    ///
+    /// Stops collecting when `deadline` elapses, returning whatever bytes arrived.
+    async fn collect_sse_body_with_timeout(
+        body: axum::body::Body,
+        timeout: std::time::Duration,
+    ) -> String {
+        use http_body_util::BodyExt;
+        use std::pin::pin;
+
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut body = pin!(body);
+        let mut collected = String::new();
+
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut deadline => break,
+                frame = body.frame() => {
+                    match frame {
+                        Some(Ok(f)) => {
+                            if let Ok(data) = f.into_data() {
+                                collected.push_str(&String::from_utf8_lossy(&data));
+                            }
+                        }
+                        Some(Err(_)) | None => break,
+                    }
+                }
+            }
+        }
+
+        collected
+    }
+
+    /// Route-level test: `GET /events?issue_id=ab12` must block events for cd34.
+    ///
+    /// This verifies that `params.matches(&ev)` is actually wired into the
+    /// live-stream branch of the `events` handler (not just unit-tested in
+    /// isolation).  A subscription to `issue_id=ab12` must only see events whose
+    /// `issue.id` matches; an event for `cd34` must be silently dropped.
+    #[tokio::test]
+    async fn route_live_stream_filter_blocks_events_for_different_issue_id() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Send the SSE request; the handler subscribes to the bus during this call.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events?issue_id=ab12")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Now pump the bus: one matching event and one non-matching event.
+        // These go into the broadcast channel, ready for the stream to consume.
+        state
+            .event_bus
+            .send(SystemEvent::Issue(IssueEvent::Created(make_issue("ab12"))));
+        state
+            .event_bus
+            .send(SystemEvent::Issue(IssueEvent::Created(make_issue("cd34"))));
+
+        // Collect whatever arrives within a short window (the two events should be
+        // immediately available since they're already in the broadcast queue).
+        let raw =
+            collect_sse_body_with_timeout(resp.into_body(), std::time::Duration::from_millis(200))
+                .await;
+
+        // Parse the data: lines from the SSE output
+        let data_lines: Vec<&str> = raw.lines().filter(|l| l.starts_with("data: ")).collect();
+
+        // Exactly one event should have arrived: the ab12 one.
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "only 1 data line expected (issue_id=ab12 filter); got: {data_lines:?}\nraw={raw:?}"
+        );
+
+        // Verify it is the ab12 event, not cd34.
+        let json = &data_lines[0]["data: ".len()..];
+        let ev: SystemEvent =
+            serde_json::from_str(json).expect("SSE data must be valid SystemEvent JSON");
+        match ev {
+            SystemEvent::Issue(IssueEvent::Created(ref issue)) => {
+                assert_eq!(
+                    issue.id, "ab12",
+                    "received event must be for issue ab12, not cd34"
+                );
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    /// Route-level test: a terminal session returns historical events + Done and
+    /// then the stream closes (does NOT hang open).
+    ///
+    /// This verifies that the `session_already_done` path in the `events` handler
+    /// actually sets `session_already_done = true`, emits `SessionEvent::Done`,
+    /// and then attaches an empty stream so the response body finishes.
+    #[tokio::test]
+    async fn route_terminal_session_returns_done_event_and_stream_closes() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Pre-populate a completed session in the DB.
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "done-route-test".into(),
+            status: types::SessionStatus::Completed,
+            agent: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, types::SessionStatus::Completed)
+            .await
+            .unwrap();
+
+        // Open the SSE stream for the completed session.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events?session_id={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // For a terminal session the stream must close on its own (history +
+        // Done then empty live-stream).  We use to_bytes with a generous timeout
+        // to confirm it terminates rather than hanging.
+        let body_bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .expect("SSE stream for completed session must close within 2 s")
+        .expect("body read error");
+
+        let raw = std::str::from_utf8(&body_bytes).unwrap();
+
+        // Assert: a Done event is present in the SSE output.
+        let has_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<SystemEvent>(json).is_ok_and(|ev| {
+                matches!(
+                    ev,
+                    SystemEvent::Session {
+                        event: SessionEvent::Done,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            has_done,
+            "completed session SSE stream must contain a Done event; raw={raw:?}"
+        );
+    }
+
     // ── issue_id filter: only emits events for the matching issue ─────────────
 
     #[tokio::test]
@@ -362,7 +578,9 @@ mod tests {
         let other_id = "cd34";
 
         // Emit events for two different issues
-        bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue(target_id))));
+        bus.send(SystemEvent::Issue(IssueEvent::Created(make_issue(
+            target_id,
+        ))));
         bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(other_id),
             from: IssueStatus::Open,
@@ -403,9 +621,13 @@ mod tests {
                 SystemEvent::Issue(ie) => {
                     let issue_id = match ie {
                         IssueEvent::Created(i) => &i.id,
-                        IssueEvent::StatusChanged { issue, .. } | IssueEvent::CommentAdded { issue, .. } => &issue.id,
+                        IssueEvent::StatusChanged { issue, .. }
+                        | IssueEvent::CommentAdded { issue, .. } => &issue.id,
                     };
-                    assert_eq!(issue_id, target_id, "all received events must be for target issue");
+                    assert_eq!(
+                        issue_id, target_id,
+                        "all received events must be for target issue"
+                    );
                 }
                 _ => panic!("received non-issue event"),
             }

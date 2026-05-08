@@ -31,7 +31,10 @@ fn orphan_session_marked_failed_on_restart() {
     h.start_server();
 
     let out = h.ns2_stdout(&["session", "list", "--id", &uuid]);
-    assert!(out.contains("failed"), "orphaned session must be 'failed' after restart, got: {out}");
+    assert!(
+        out.contains("failed"),
+        "orphaned session must be 'failed' after restart, got: {out}"
+    );
 }
 
 #[test]
@@ -40,7 +43,16 @@ fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
     write_swe_agent(&h);
     h.start_server();
 
-    let issue_id = h.ns2_stdout(&["issue", "new", "--title", "Test", "--body", "body", "--assignee", "swe"]);
+    let issue_id = h.ns2_stdout(&[
+        "issue",
+        "new",
+        "--title",
+        "Test",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
+    ]);
     h.ns2_stdout(&["issue", "start", "--id", &issue_id]);
     h.ns2_stdout(&["issue", "wait", "--id", &issue_id]);
 
@@ -84,7 +96,16 @@ fn reopen_failed_issue_transitions_to_open() {
     write_swe_agent(&h);
     h.start_server();
 
-    let issue_id = h.ns2_stdout(&["issue", "new", "--title", "Reopenable", "--body", "body", "--assignee", "swe"]);
+    let issue_id = h.ns2_stdout(&[
+        "issue",
+        "new",
+        "--title",
+        "Reopenable",
+        "--body",
+        "body",
+        "--assignee",
+        "swe",
+    ]);
 
     h.http_patch(
         &format!("/issues/{issue_id}/status"),
@@ -127,5 +148,7 @@ fn reopen_nonexistent_issue_fails() {
         .args(["issue", "reopen", "--id", "zzzz"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("issue not found").or(predicate::str::contains("not found")));
+        .stderr(
+            predicate::str::contains("issue not found").or(predicate::str::contains("not found")),
+        );
 }

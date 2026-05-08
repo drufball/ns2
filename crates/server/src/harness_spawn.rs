@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use events::{SessionEvent, SystemEvent};
+use std::sync::Arc;
 use types::SessionStatus;
 
 use crate::state::AppState;
@@ -50,10 +50,11 @@ pub fn spawn_harness_sync(
                 match event {
                     SystemEvent::Session {
                         session_id: sid,
-                        event: SessionEvent::ContentBlockDelta {
-                            delta: types::ContentBlockDelta::TextDelta { text },
-                            ..
-                        },
+                        event:
+                            SessionEvent::ContentBlockDelta {
+                                delta: types::ContentBlockDelta::TextDelta { text },
+                                ..
+                            },
                     } if sid == session_id => {
                         current_turn_text.push_str(&text);
                     }
@@ -150,4 +151,372 @@ pub fn spawn_harness_sync(
     });
 
     msg_tx_ret
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::{IssueStatus, Session, SessionStatus};
+    use uuid::Uuid;
+
+    /// Create a minimal `Session` and persist it to the DB.
+    async fn make_session(state: &crate::state::AppState) -> Session {
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "test-session".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        session
+    }
+
+    /// Create a minimal issue with `Running` status in the DB.
+    async fn make_running_issue(state: &crate::state::AppState, id: &str, title: &str) {
+        let issue = types::Issue {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+    }
+
+    /// A Done event for session2 must NOT finish issue1 (whose watcher is bound
+    /// to session1).  Only a Done event for session1 should transition issue1 to
+    /// Completed.
+    ///
+    /// This test calls `spawn_harness_sync` directly so the production
+    /// session-id filter guard in `harness_spawn.rs` is exercised — not a
+    /// hand-rolled re-implementation.
+    #[tokio::test]
+    async fn test_harness_spawn_done_only_finishes_own_issue() {
+        let state = crate::tests::test_state().await;
+
+        // Create two sessions and two running issues.
+        let session1 = make_session(&state).await;
+        let session2 = make_session(&state).await;
+        make_running_issue(&state, "hs-d-i1", "Issue 1").await;
+        make_running_issue(&state, "hs-d-i2", "Issue 2").await;
+
+        // Register watchers via the production spawn_harness_sync.
+        // The harness task starts but idles (no message sent to _tx1/_tx2) —
+        // only the issue-watcher task matters for this test.
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("hs-d-i1".into()));
+        let _tx2 = spawn_harness_sync(&state, session2.clone(), Some("hs-d-i2".into()));
+
+        // Give the watcher tasks a moment to subscribe to the event bus.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Emit Done for session2 — issue1's watcher must ignore it because the
+        // production filter guards on `sid == session_id`.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::Done,
+        });
+
+        // Brief pause to let the event propagate.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // issue1 must still be Running: the session2 Done should have been ignored.
+        let issue1 = state.db.get_issue("hs-d-i1".into()).await.unwrap();
+        assert_eq!(
+            issue1.status,
+            IssueStatus::Running,
+            "issue1 must remain Running after a Done event for a different session"
+        );
+
+        // Emit Done for session1 — now issue1's watcher should respond.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Done,
+        });
+
+        // Wait for issue1 to become Completed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("hs-d-i1".into()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue1 did not become Completed within 3s"
+            );
+        }
+
+        let issue1_final = state.db.get_issue("hs-d-i1".into()).await.unwrap();
+        assert_eq!(
+            issue1_final.status,
+            IssueStatus::Completed,
+            "issue1 must be Completed after its own session's Done event"
+        );
+
+        // issue2 should also be Completed (its watcher received session2's Done above).
+        let issue2_final = state.db.get_issue("hs-d-i2".into()).await.unwrap();
+        assert_eq!(
+            issue2_final.status,
+            IssueStatus::Completed,
+            "issue2 must be Completed after its own session's Done event"
+        );
+    }
+
+    /// An Error event for a different session must NOT fail issue1.  Only an
+    /// Error event for issue1's own session should mark it Failed.
+    ///
+    /// This test calls `spawn_harness_sync` directly so the production
+    /// session-id filter guard in `harness_spawn.rs` is exercised — not a
+    /// hand-rolled re-implementation.
+    #[tokio::test]
+    async fn test_harness_spawn_error_only_fails_own_issue() {
+        let state = crate::tests::test_state().await;
+
+        let session1 = make_session(&state).await;
+        let session2 = make_session(&state).await;
+        make_running_issue(&state, "hs-e-i1", "Error Filter Issue").await;
+
+        // Spawn watcher for issue1 → session1 via the real spawn_harness_sync.
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("hs-e-i1".into()));
+
+        // Give the watcher a moment to subscribe.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Emit Error for the unrelated session2 — watcher must ignore it.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::Error {
+                message: "error from unrelated session".into(),
+            },
+        });
+
+        // Brief pause to let the event propagate.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // issue1 must still be Running.
+        let issue1 = state.db.get_issue("hs-e-i1".into()).await.unwrap();
+        assert_eq!(
+            issue1.status,
+            IssueStatus::Running,
+            "issue1 must remain Running after an Error event for a different session"
+        );
+
+        // Emit Error for session1 — watcher should now fail issue1.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Error {
+                message: "real failure".into(),
+            },
+        });
+
+        // Wait for issue1 to become Failed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("hs-e-i1".into()).await.unwrap();
+            if fetched.status == IssueStatus::Failed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue1 did not become Failed within 3s"
+            );
+        }
+
+        let issue1_final = state.db.get_issue("hs-e-i1".into()).await.unwrap();
+        assert_eq!(
+            issue1_final.status,
+            IssueStatus::Failed,
+            "issue1 must be Failed after its own session's Error event"
+        );
+    }
+
+    /// `ContentBlockDelta` for session2 must NOT accumulate into issue1's turn
+    /// text.  `TurnDone` for session2 must NOT flush session2's text into
+    /// issue1's `last_turn_text`.  The completion comment for issue1 should
+    /// only contain text from session1's `ContentBlockDelta` events.
+    ///
+    /// This exercises the `sid == session_id` guard on `ContentBlockDelta` and
+    /// the `sid == session_id && !current_turn_text.is_empty()` guard on
+    /// `TurnDone`.
+    #[tokio::test]
+    async fn test_content_block_delta_and_turn_done_filtered_by_session() {
+        let state = crate::tests::test_state().await;
+
+        let session1 = make_session(&state).await;
+        let session2 = make_session(&state).await;
+        make_running_issue(&state, "cbd-i1", "Issue with delta").await;
+
+        // Spawn only a watcher for session1/issue1.
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("cbd-i1".into()));
+
+        // Give the watcher time to subscribe.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let turn_id = uuid::Uuid::new_v4();
+
+        // Emit ContentBlockDelta for session2 — issue1's watcher must ignore it.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "session2 text SHOULD NOT APPEAR".into(),
+                },
+            },
+        });
+
+        // Emit TurnDone for session2 — issue1's watcher must ignore it.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session2.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Now emit ContentBlockDelta for session1 — this SHOULD be accumulated.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "session1 summary text".into(),
+                },
+            },
+        });
+
+        // Emit TurnDone for session1 — this SHOULD flush current_turn_text into last_turn_text.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Emit Done for session1 — the watcher should use last_turn_text as the summary.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Done,
+        });
+
+        // Wait for issue1 to become Completed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("cbd-i1".into()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue cbd-i1 did not become Completed within 3s"
+            );
+        }
+
+        // The completion comment should contain session1's text, not session2's.
+        let issue1_final = state.db.get_issue("cbd-i1".into()).await.unwrap();
+        assert_eq!(issue1_final.status, IssueStatus::Completed);
+
+        // The summary comment is added by finish_issue — check the comments.
+        let has_session1_text = issue1_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("session1 summary text"));
+        let has_session2_text = issue1_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("session2 text SHOULD NOT APPEAR"));
+
+        assert!(
+            has_session1_text,
+            "expected completion comment to contain session1's text, got: {:?}",
+            issue1_final.comments
+        );
+        assert!(
+            !has_session2_text,
+            "completion comment must NOT contain session2's text, got: {:?}",
+            issue1_final.comments
+        );
+    }
+
+    /// When `TurnDone` fires but `current_turn_text` is empty (no
+    /// `ContentBlockDelta` was accumulated), `last_turn_text` must remain
+    /// unchanged — the `!current_turn_text.is_empty()` guard is exercised.
+    /// The subsequent `Done` should produce a completion with no summary.
+    #[tokio::test]
+    async fn test_turn_done_empty_text_does_not_overwrite_last_turn_text() {
+        let state = crate::tests::test_state().await;
+
+        let session1 = make_session(&state).await;
+        make_running_issue(&state, "cbd-i2", "Issue empty turn").await;
+
+        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("cbd-i2".into()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let turn_id = uuid::Uuid::new_v4();
+
+        // First turn: emit delta + TurnDone so last_turn_text = "first turn text"
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::ContentBlockDelta {
+                turn_id,
+                index: 0,
+                delta: types::ContentBlockDelta::TextDelta {
+                    text: "first turn text".into(),
+                },
+            },
+        });
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id },
+        });
+
+        // Second turn: emit TurnDone with NO preceding delta — should NOT overwrite last_turn_text.
+        let turn_id2 = uuid::Uuid::new_v4();
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::TurnDone { turn_id: turn_id2 },
+        });
+
+        // Emit Done — the summary should still be "first turn text".
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session1.id,
+            event: SessionEvent::Done,
+        });
+
+        // Wait for issue to become Completed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("cbd-i2".into()).await.unwrap();
+            if fetched.status == IssueStatus::Completed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue cbd-i2 did not become Completed within 3s"
+            );
+        }
+
+        let issue_final = state.db.get_issue("cbd-i2".into()).await.unwrap();
+        let has_first_turn = issue_final
+            .comments
+            .iter()
+            .any(|c| c.body.contains("first turn text"));
+        assert!(
+            has_first_turn,
+            "expected comment to contain 'first turn text', got: {:?}",
+            issue_final.comments
+        );
+    }
 }

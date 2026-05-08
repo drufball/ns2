@@ -6,8 +6,8 @@ pub use types::{
 // ── Filter evaluation ─────────────────────────────────────────────────────────
 
 pub mod evaluate {
-    use events::{IssueEvent, SessionEvent, SystemEvent};
     use super::{FieldCondition, Hook, HookFilter, HookSource, Op};
+    use events::{IssueEvent, SessionEvent, SystemEvent};
 
     /// Map a `SystemEvent` to its canonical event-type string(s).
     #[must_use]
@@ -16,14 +16,26 @@ pub mod evaluate {
             SystemEvent::Issue(IssueEvent::Created(_)) => vec!["issue.created"],
             SystemEvent::Issue(IssueEvent::StatusChanged { .. }) => vec!["issue.status_changed"],
             SystemEvent::Issue(IssueEvent::CommentAdded { .. }) => vec!["issue.comment_added"],
-            SystemEvent::Session { event: SessionEvent::Done, .. } => vec!["session.done"],
-            SystemEvent::Session { event: SessionEvent::TurnDone { .. }, .. } => {
+            SystemEvent::Session {
+                event: SessionEvent::Done,
+                ..
+            } => vec!["session.done"],
+            SystemEvent::Session {
+                event: SessionEvent::TurnDone { .. },
+                ..
+            } => {
                 vec!["session.turn_done"]
             }
-            SystemEvent::Session { event: SessionEvent::Error { .. }, .. } => {
+            SystemEvent::Session {
+                event: SessionEvent::Error { .. },
+                ..
+            } => {
                 vec!["session.error"]
             }
-            SystemEvent::Session { event: SessionEvent::TurnStarted { .. }, .. } => {
+            SystemEvent::Session {
+                event: SessionEvent::TurnStarted { .. },
+                ..
+            } => {
                 vec!["session.turn_started"]
             }
             SystemEvent::Session { .. }
@@ -97,7 +109,7 @@ pub mod evaluate {
         }
     }
 
-    fn glob_match(pattern: &str, text: &str) -> bool {
+    pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
         if pattern == "*" {
             return true;
         }
@@ -144,11 +156,11 @@ pub mod template {
 // ── Action execution ──────────────────────────────────────────────────────────
 
 pub mod execute {
+    use super::template::render_template;
+    use super::{ExecutionStatus, Hook, HookAction, HookExecution, MessageTarget};
     use chrono::Utc;
     use db::HookStore;
     use events::SystemEvent;
-    use super::{Hook, HookAction, HookExecution, ExecutionStatus, MessageTarget};
-    use super::template::render_template;
 
     pub async fn run_action(
         hook: &Hook,
@@ -185,13 +197,16 @@ pub mod execute {
         let _ = hook_store.update_execution(&exec).await;
     }
 
-    async fn execute_action_inner(
+    pub(crate) async fn execute_action_inner(
         hook: &Hook,
         event_json: &serde_json::Value,
         issue_svc: &issues::IssueService,
     ) -> Result<String, String> {
         match &hook.action {
-            HookAction::SendMessage { target: MessageTarget::Issue(id), body } => {
+            HookAction::SendMessage {
+                target: MessageTarget::Issue(id),
+                body,
+            } => {
                 let rendered = render_template(body, event_json);
                 issue_svc
                     .add_comment(id.clone(), "ns2-hook".to_string(), rendered)
@@ -199,9 +214,10 @@ pub mod execute {
                     .map(|_| "comment added".to_string())
                     .map_err(|e| e.to_string())
             }
-            HookAction::SendMessage { target: MessageTarget::Session(_), .. } => {
-                Ok("session messaging not yet implemented".to_string())
-            }
+            HookAction::SendMessage {
+                target: MessageTarget::Session(_),
+                ..
+            } => Ok("session messaging not yet implemented".to_string()),
             HookAction::CreateIssue { .. } => {
                 Ok("create_issue action not yet implemented".to_string())
             }
@@ -227,9 +243,9 @@ pub fn generate_hook_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use events::{IssueEvent, SessionEvent, SystemEvent};
-    use types::{Issue, IssueStatus, IssueComment};
     use chrono::Utc;
+    use events::{IssueEvent, SessionEvent, SystemEvent};
+    use types::{Issue, IssueComment, IssueStatus};
     use uuid::Uuid;
 
     fn make_issue() -> Issue {
@@ -302,10 +318,15 @@ mod tests {
     #[test]
     fn matches_issue_comment_added() {
         let hook = make_internal_hook(vec!["issue.comment_added"], None);
-        let comment =
-            IssueComment { author: "user".into(), created_at: Utc::now(), body: "hi".into() };
-        let event =
-            SystemEvent::Issue(IssueEvent::CommentAdded { issue: make_issue(), comment });
+        let comment = IssueComment {
+            author: "user".into(),
+            created_at: Utc::now(),
+            body: "hi".into(),
+        };
+        let event = SystemEvent::Issue(IssueEvent::CommentAdded {
+            issue: make_issue(),
+            comment,
+        });
         assert!(evaluate::matches_event(&hook, &event));
     }
 
@@ -324,7 +345,9 @@ mod tests {
         let hook = make_internal_hook(vec!["session.turn_done"], None);
         let event = SystemEvent::Session {
             session_id: Uuid::new_v4(),
-            event: SessionEvent::TurnDone { turn_id: Uuid::new_v4() },
+            event: SessionEvent::TurnDone {
+                turn_id: Uuid::new_v4(),
+            },
         };
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -334,7 +357,9 @@ mod tests {
         let hook = make_internal_hook(vec!["session.error"], None);
         let event = SystemEvent::Session {
             session_id: Uuid::new_v4(),
-            event: SessionEvent::Error { message: "oops".into() },
+            event: SessionEvent::Error {
+                message: "oops".into(),
+            },
         };
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -501,19 +526,673 @@ mod tests {
         assert!(rendered.is_empty(), "expected empty, got: {rendered:?}");
     }
 
+    // ── Op::Contains on arrays ────────────────────────────────────────────────
+
+    #[test]
+    fn field_condition_contains_array_matches() {
+        // blocked_on: vec!["dep-1", "urgent"] — looking for "urgent"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.blocked_on".into(),
+                op: Op::Contains,
+                value: serde_json::json!("urgent"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.blocked_on = vec!["dep-1".into(), "urgent".into()];
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_contains_array_no_match() {
+        // blocked_on: vec!["bug"] — looking for "enhancement"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.blocked_on".into(),
+                op: Op::Contains,
+                value: serde_json::json!("enhancement"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.blocked_on = vec!["bug".into()];
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    // ── Op::Matches (via matches_event) ───────────────────────────────────────
+
+    #[test]
+    fn field_condition_matches_exact() {
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("Test"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_exact_no_match() {
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("notexact"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_prefix_wildcard() {
+        // pattern "Test*" matches "Test" (the issue title)
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("Test*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "Test issue".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_prefix_wildcard_no_match() {
+        // pattern "foo*" does not match "barfoo"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "barfoo".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_suffix_wildcard() {
+        // pattern "*bar" matches "foobar"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foobar".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_suffix_wildcard_no_match() {
+        // pattern "*bar" does not match "foobaz"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foobaz".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_middle_wildcard() {
+        // pattern "foo*bar" matches "foo-baz-bar"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foo-baz-bar".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_middle_wildcard_no_match() {
+        // pattern "foo*bar" does not match "foo-baz-baz"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("foo*bar"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "foo-baz-baz".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn field_condition_matches_star_matches_anything() {
+        // pattern "*" matches "anything"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.title".into(),
+                op: Op::Matches,
+                value: serde_json::json!("*"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let mut issue = make_issue();
+        issue.title = "anything".into();
+        let event = SystemEvent::Issue(IssueEvent::Created(issue));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    // ── glob_match direct tests ───────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_star_matches_anything() {
+        assert!(evaluate::glob_match("*", "anything"));
+        assert!(evaluate::glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_match_prefix_wildcard() {
+        assert!(evaluate::glob_match("foo*", "foobar"));
+        assert!(!evaluate::glob_match("foo*", "barfoo"));
+    }
+
+    #[test]
+    fn glob_match_suffix_wildcard() {
+        assert!(evaluate::glob_match("*bar", "foobar"));
+        assert!(!evaluate::glob_match("*bar", "foobaz"));
+    }
+
+    #[test]
+    fn glob_match_middle_wildcard() {
+        assert!(evaluate::glob_match("foo*bar", "foo-baz-bar"));
+        assert!(!evaluate::glob_match("foo*bar", "foo-baz-baz"));
+    }
+
+    #[test]
+    fn glob_match_exact() {
+        assert!(evaluate::glob_match("exact", "exact"));
+        assert!(!evaluate::glob_match("exact", "notexact"));
+    }
+
+    #[test]
+    fn glob_match_double_wildcard_match() {
+        assert!(evaluate::glob_match("a*b*c", "aXbYc"));
+    }
+
+    #[test]
+    fn glob_match_double_wildcard_no_match() {
+        assert!(!evaluate::glob_match("a*b*c", "aXbYd"));
+    }
+
+    #[test]
+    fn glob_match_double_wildcard_order_matters() {
+        assert!(!evaluate::glob_match("a*b*c", "aXcYb"));
+    }
+
+    #[test]
+    fn glob_match_triple_wildcard() {
+        assert!(evaluate::glob_match("*a*b*", "XaYbZ"));
+    }
+
     // ── Hook ID generation ────────────────────────────────────────────────────
 
     #[test]
     fn generate_hook_id_is_4_chars() {
         let id = generate_hook_id();
         assert_eq!(id.len(), 4);
-        assert!(id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 
     #[test]
     fn generate_hook_id_is_unique() {
-        let ids: std::collections::HashSet<String> =
-            (0..100).map(|_| generate_hook_id()).collect();
+        let ids: std::collections::HashSet<String> = (0..100).map(|_| generate_hook_id()).collect();
         assert!(ids.len() > 90);
+    }
+
+    #[test]
+    fn generate_hook_id_uses_full_alphabet() {
+        let ids: Vec<String> = (0..10_000).map(|_| generate_hook_id()).collect();
+        let chars: std::collections::HashSet<char> = ids.concat().chars().collect();
+        assert!(
+            chars.len() >= 30,
+            "expected at least 30 distinct chars, got {}",
+            chars.len()
+        );
+    }
+
+    // ── execute module tests ──────────────────────────────────────────────────
+
+    mod execute_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+
+        // ── Helper: build an IssueService backed by an in-memory SQLite db ────────
+
+        async fn make_issue_service() -> issues::IssueService {
+            let (db, _hook_store) = db::connect("sqlite::memory:").await.unwrap();
+            issues::IssueService::new(db)
+        }
+
+        // ── Stub HookStore ────────────────────────────────────────────────────────
+
+        /// Captures all calls to `create_execution` / `update_execution` for assertions.
+        struct SpyHookStore {
+            created: Mutex<Vec<HookExecution>>,
+            updated: Mutex<Vec<HookExecution>>,
+        }
+
+        impl SpyHookStore {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    created: Mutex::new(vec![]),
+                    updated: Mutex::new(vec![]),
+                })
+            }
+        }
+
+        #[async_trait]
+        impl db::HookStore for SpyHookStore {
+            async fn create_hook(&self, _hook: &types::Hook) -> db::Result<()> {
+                Ok(())
+            }
+
+            async fn list_hooks(
+                &self,
+                _enabled: Option<bool>,
+                _source_type: Option<&str>,
+            ) -> db::Result<Vec<types::Hook>> {
+                Ok(vec![])
+            }
+
+            async fn get_hook(&self, _id: &str) -> db::Result<types::Hook> {
+                Err(db::Error::NotFound)
+            }
+
+            async fn update_hook(&self, _hook: &types::Hook) -> db::Result<()> {
+                Ok(())
+            }
+
+            async fn delete_hook(&self, _id: &str) -> db::Result<()> {
+                Ok(())
+            }
+
+            async fn create_execution(&self, exec: &HookExecution) -> db::Result<()> {
+                self.created.lock().unwrap().push(exec.clone());
+                Ok(())
+            }
+
+            async fn update_execution(&self, exec: &HookExecution) -> db::Result<()> {
+                self.updated.lock().unwrap().push(exec.clone());
+                Ok(())
+            }
+
+            async fn list_executions(
+                &self,
+                _hook_id: &str,
+                _limit: usize,
+            ) -> db::Result<Vec<HookExecution>> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Hook factory for execute tests ────────────────────────────────────────
+
+        fn make_send_message_hook(issue_id: &str, body: &str) -> Hook {
+            Hook {
+                id: "exec01".into(),
+                name: "exec-hook".into(),
+                source: HookSource::Internal {
+                    event_types: vec!["issue.created".into()],
+                },
+                filter: None,
+                action: HookAction::SendMessage {
+                    target: MessageTarget::Issue(issue_id.into()),
+                    body: body.into(),
+                },
+                enabled: true,
+                created_by: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn make_hook_with_action(action: HookAction) -> Hook {
+            Hook {
+                id: "exec02".into(),
+                name: "exec-hook-2".into(),
+                source: HookSource::Internal {
+                    event_types: vec!["issue.created".into()],
+                },
+                filter: None,
+                action,
+                enabled: true,
+                created_by: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn dummy_event() -> events::SystemEvent {
+            events::SystemEvent::Issue(events::IssueEvent::Created(types::Issue {
+                id: "dummy".into(),
+                title: "Dummy".into(),
+                body: "Body".into(),
+                status: types::IssueStatus::Open,
+                branch: "main".into(),
+                assignee: None,
+                session_id: None,
+                parent_id: None,
+                blocked_on: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }))
+        }
+
+        // ── execute_action_inner tests ────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn execute_action_inner_sends_comment_to_issue() {
+            let svc = make_issue_service().await;
+
+            // Create an issue to comment on
+            let issue = svc
+                .create_issue(issues::CreateIssueInput {
+                    title: "Watch01".into(),
+                    body: "body".into(),
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: vec![],
+                    branch: None,
+                })
+                .await
+                .unwrap();
+            let issue_id = issue.id.clone();
+
+            let hook = make_send_message_hook(&issue_id, "hello");
+            let event_json = serde_json::to_value(dummy_event()).unwrap();
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(result.is_ok(), "expected Ok, got {result:?}");
+            assert_eq!(result.unwrap(), "comment added");
+
+            // Verify the comment was actually added to the issue
+            let updated = svc
+                .add_comment(issue_id.clone(), "check".into(), "verify".into())
+                .await
+                .unwrap();
+            // The first comment should be from the hook
+            assert!(
+                updated.comments.len() >= 2,
+                "expected at least 2 comments (hook + check), got: {}",
+                updated.comments.len()
+            );
+            let hook_comment = &updated.comments[0];
+            assert_eq!(hook_comment.author, "ns2-hook");
+            assert_eq!(hook_comment.body, "hello");
+        }
+
+        #[tokio::test]
+        async fn execute_action_inner_sends_rendered_template_to_issue() {
+            let svc = make_issue_service().await;
+
+            let issue = svc
+                .create_issue(issues::CreateIssueInput {
+                    title: "Watch01".into(),
+                    body: "body".into(),
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: vec![],
+                    branch: None,
+                })
+                .await
+                .unwrap();
+            let issue_id = issue.id.clone();
+
+            let hook = make_send_message_hook(&issue_id, "issue {{ event.data.id }} changed");
+            let event_json = serde_json::json!({"data": {"id": "test-id"}});
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+            // Verify rendered comment was added
+            let updated_issue = svc
+                .add_comment(issue_id, "check".into(), "x".into())
+                .await
+                .unwrap();
+            let hook_comment = &updated_issue.comments[0];
+            assert_eq!(hook_comment.author, "ns2-hook");
+            assert_eq!(hook_comment.body, "issue test-id changed");
+        }
+
+        #[tokio::test]
+        async fn execute_action_inner_returns_err_for_nonexistent_issue() {
+            let svc = make_issue_service().await;
+
+            let hook = make_send_message_hook("no-such-issue", "hello");
+            let event_json = serde_json::json!({});
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(
+                result.is_err(),
+                "expected Err for nonexistent issue, got {result:?}"
+            );
+            let err_msg = result.unwrap_err();
+            assert!(!err_msg.is_empty(), "error message should not be empty");
+        }
+
+        #[tokio::test]
+        async fn execute_action_inner_session_target_returns_ok_not_implemented() {
+            let svc = make_issue_service().await;
+
+            let hook = make_hook_with_action(HookAction::SendMessage {
+                target: MessageTarget::Session("some-session".into()),
+                body: "hi".into(),
+            });
+            let event_json = serde_json::json!({});
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(result.is_ok(), "expected Ok for session target");
+            assert!(
+                result.unwrap().contains("not yet implemented"),
+                "expected 'not yet implemented' message"
+            );
+        }
+
+        #[tokio::test]
+        async fn execute_action_inner_create_issue_returns_ok_not_implemented() {
+            let svc = make_issue_service().await;
+
+            let hook = make_hook_with_action(HookAction::CreateIssue {
+                title: "New issue".into(),
+                body: "body".into(),
+                assignee: None,
+                parent: None,
+                start: false,
+            });
+            let event_json = serde_json::json!({});
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(result.is_ok(), "expected Ok for CreateIssue action");
+            assert!(
+                result.unwrap().contains("not yet implemented"),
+                "expected 'not yet implemented' message"
+            );
+        }
+
+        #[tokio::test]
+        async fn execute_action_inner_run_shell_returns_ok_not_implemented() {
+            let svc = make_issue_service().await;
+
+            let hook = make_hook_with_action(HookAction::RunShell {
+                command: "echo hello".into(),
+                timeout_secs: 30,
+                blocking: false,
+            });
+            let event_json = serde_json::json!({});
+
+            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+
+            assert!(result.is_ok(), "expected Ok for RunShell action");
+            assert!(
+                result.unwrap().contains("not yet implemented"),
+                "expected 'not yet implemented' message"
+            );
+        }
+
+        // ── run_action tests ──────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn run_action_creates_running_execution_then_updates_to_completed() {
+            let svc = make_issue_service().await;
+
+            // Create the issue the hook will comment on
+            let issue = svc
+                .create_issue(issues::CreateIssueInput {
+                    title: "Watch".into(),
+                    body: "body".into(),
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: vec![],
+                    branch: None,
+                })
+                .await
+                .unwrap();
+
+            let hook = make_send_message_hook(&issue.id, "triggered");
+            let event = dummy_event();
+            let spy = SpyHookStore::new();
+
+            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+
+            let created = spy.created.lock().unwrap();
+            assert_eq!(created.len(), 1, "create_execution should be called once");
+            assert_eq!(
+                created[0].status,
+                ExecutionStatus::Running,
+                "initial execution status must be Running"
+            );
+            assert_eq!(created[0].hook_id, "exec01");
+            drop(created);
+
+            let updated = spy.updated.lock().unwrap();
+            assert_eq!(updated.len(), 1, "update_execution should be called once");
+            assert_eq!(
+                updated[0].status,
+                ExecutionStatus::Completed,
+                "final execution status must be Completed"
+            );
+            assert_eq!(updated[0].result.as_deref(), Some("comment added"));
+            drop(updated);
+        }
+
+        #[tokio::test]
+        async fn run_action_updates_execution_to_failed_when_action_errors() {
+            let svc = make_issue_service().await;
+
+            // Targeting a nonexistent issue
+            let hook = make_send_message_hook("no-such-issue", "triggered");
+            let event = dummy_event();
+            let spy = SpyHookStore::new();
+
+            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+
+            let created = spy.created.lock().unwrap();
+            assert_eq!(created.len(), 1, "create_execution should be called once");
+            assert_eq!(created[0].status, ExecutionStatus::Running);
+            drop(created);
+
+            let updated = spy.updated.lock().unwrap();
+            assert_eq!(updated.len(), 1, "update_execution should be called once");
+            assert_eq!(
+                updated[0].status,
+                ExecutionStatus::Failed,
+                "final execution status must be Failed when action errors"
+            );
+            assert!(
+                updated[0].result.is_some(),
+                "result should contain error message"
+            );
+            drop(updated);
+        }
+
+        #[tokio::test]
+        async fn run_action_completed_at_is_set_after_run() {
+            let svc = make_issue_service().await;
+
+            let issue = svc
+                .create_issue(issues::CreateIssueInput {
+                    title: "Watch".into(),
+                    body: "body".into(),
+                    assignee: None,
+                    parent_id: None,
+                    blocked_on: vec![],
+                    branch: None,
+                })
+                .await
+                .unwrap();
+
+            let hook = make_send_message_hook(&issue.id, "ping");
+            let event = dummy_event();
+            let spy = SpyHookStore::new();
+
+            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+
+            let updated = spy.updated.lock().unwrap();
+            assert!(
+                updated[0].completed_at.is_some(),
+                "completed_at must be set after run"
+            );
+            drop(updated);
+        }
     }
 }

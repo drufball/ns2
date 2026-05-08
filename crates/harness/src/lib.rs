@@ -8,28 +8,28 @@ mod retry;
 #[cfg(test)]
 use async_trait::async_trait;
 
+pub use anthropic::StubClient;
 pub use cwd::resolve_session_cwd;
 pub use loop_::run;
-pub use anthropic::StubClient;
 
 #[cfg(test)]
 use anthropic::{AnthropicClient, MessageRequest, MessageResponse};
 #[cfg(test)]
 use chrono::Utc;
 #[cfg(test)]
-use types::{ContentBlock, Role};
+use cwd::resolve_session_cwd_with_root;
 #[cfg(test)]
 use events::SessionEvent;
 #[cfg(test)]
-use uuid::Uuid;
-#[cfg(test)]
-use cwd::resolve_session_cwd_with_root;
+use hooks::{run_hook, run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
 #[cfg(test)]
 use loop_::run_tool_dispatch_loop;
 #[cfg(test)]
 use prompt::build_system_prompt;
 #[cfg(test)]
-use hooks::{run_hook, run_post_tool_use_hooks, run_pre_tool_use_hooks, run_stop_hooks};
+use types::{ContentBlock, Role};
+#[cfg(test)]
+use uuid::Uuid;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,7 +56,6 @@ pub struct HarnessConfig {
     /// tests leave this as `None`.
     pub cwd: Option<PathBuf>,
 }
-
 
 #[cfg(test)]
 #[allow(clippy::struct_field_names)]
@@ -132,12 +131,20 @@ mod tests {
     fn permissive_mock_db() -> MockTestDb {
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
         // No linked issue → no worktree is created for regular harness tests
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
         mock_db
     }
 
@@ -209,13 +216,15 @@ mod tests {
         std::process::Command::new("git")
             .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         let local_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["clone", &origin_dir.path().to_string_lossy(), "."])
             .current_dir(local_dir.path())
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         for cmd in [
             vec!["config", "user.email", "t@t"],
@@ -224,10 +233,15 @@ mod tests {
             std::process::Command::new("git")
                 .args(&cmd)
                 .current_dir(local_dir.path())
-                .status().unwrap();
+                .status()
+                .unwrap();
         }
         std::fs::write(local_dir.path().join("README.md"), "init").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(local_dir.path()).status().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .status()
+            .unwrap();
         std::process::Command::new("git")
             .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
             .current_dir(local_dir.path())
@@ -235,8 +249,13 @@ mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "test")
             .env("GIT_COMMITTER_EMAIL", "t@t")
-            .status().unwrap();
-        std::process::Command::new("git").args(["push", "origin", "main"]).current_dir(local_dir.path()).status().unwrap();
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(local_dir.path())
+            .status()
+            .unwrap();
 
         let branch = "feature/test-cwd";
         let session_id = Uuid::new_v4();
@@ -261,8 +280,12 @@ mod tests {
             });
 
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
-        let result = resolve_session_cwd_with_root(&db, session_id, Some(local_dir.path().to_owned())).await;
-        assert!(result.is_some(), "non-empty branch + git root → cwd must be Some");
+        let result =
+            resolve_session_cwd_with_root(&db, session_id, Some(local_dir.path().to_owned())).await;
+        assert!(
+            result.is_some(),
+            "non-empty branch + git root → cwd must be Some"
+        );
         let cwd = result.unwrap();
         assert!(cwd.is_dir(), "resolved cwd must be an existing directory");
     }
@@ -297,10 +320,18 @@ mod tests {
             events.push(ev);
         }
 
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::TurnStarted { .. })));
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::ContentBlockDelta { .. })));
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::ContentBlockDone { .. })));
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::TurnDone { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::TurnStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::ContentBlockDelta { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::ContentBlockDone { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::TurnDone { .. })));
         assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
     }
 
@@ -314,11 +345,19 @@ mod tests {
             .expect_create_turn()
             .withf(move |turn| turn.session_id == session_id)
             .returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -344,17 +383,21 @@ mod tests {
 
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
         // Expect Running then Completed
         let mut seq = mockall::Sequence::new();
         mock_db
             .expect_update_session_status()
-            .withf(move |id, status| {
-                *id == session_id && *status == types::SessionStatus::Running
-            })
+            .withf(move |id, status| *id == session_id && *status == types::SessionStatus::Running)
             .times(1)
             .in_sequence(&mut seq)
             .returning(|_, _| Ok(()));
@@ -411,15 +454,21 @@ mod tests {
         }
 
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::TurnStarted { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::TurnStarted { .. })),
             "missing TurnStarted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::ContentBlockDone { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::ContentBlockDone { .. })),
             "missing ContentBlockDone"
         );
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::TurnDone { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::TurnDone { .. })),
             "missing TurnDone"
         );
         assert!(
@@ -514,8 +563,12 @@ mod tests {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
             Ok(MessageResponse {
                 content: vec![
-                    types::ContentBlock::Text { text: "block one".into() },
-                    types::ContentBlock::Text { text: "block two".into() },
+                    types::ContentBlock::Text {
+                        text: "block one".into(),
+                    },
+                    types::ContentBlock::Text {
+                        text: "block two".into(),
+                    },
                 ],
                 stop_reason: "end_turn".into(),
                 input_tokens: 5,
@@ -552,7 +605,10 @@ mod tests {
 
         // 1 user block + 2 assistant blocks = 3 ContentBlockDone events
         assert_eq!(
-            events.iter().filter(|e| matches!(e, SessionEvent::ContentBlockDone { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, SessionEvent::ContentBlockDone { .. }))
+                .count(),
             3,
             "expected 3 ContentBlockDone events (1 user + 2 assistant)"
         );
@@ -589,14 +645,18 @@ mod tests {
 
     impl ToolUseClient {
         fn new() -> Self {
-            Self { call_count: std::sync::atomic::AtomicU32::new(0) }
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
         }
     }
 
     #[async_trait]
     impl AnthropicClient for ToolUseClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 Ok(MessageResponse {
                     content: vec![ContentBlock::ToolUse {
@@ -634,7 +694,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, _cwd: Option<&std::path::Path>) -> tools::Result<String> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cwd: Option<&std::path::Path>,
+        ) -> tools::Result<String> {
             Ok("file content here".into())
         }
     }
@@ -652,7 +716,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, _cwd: Option<&std::path::Path>) -> tools::Result<String> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cwd: Option<&std::path::Path>,
+        ) -> tools::Result<String> {
             Err(tools::Error::InvalidInput("cannot read file".into()))
         }
     }
@@ -695,7 +763,11 @@ mod tests {
             .filter(|e| matches!(e, SessionEvent::ContentBlockDone { .. }))
             .collect();
         // At least: user text, assistant tool_use, tool_result, final text
-        assert!(done_blocks.len() >= 4, "expected at least 4 ContentBlockDone events, got {}", done_blocks.len());
+        assert!(
+            done_blocks.len() >= 4,
+            "expected at least 4 ContentBlockDone events, got {}",
+            done_blocks.len()
+        );
 
         // Verify a ToolUse block was emitted
         assert!(
@@ -711,7 +783,10 @@ mod tests {
         assert!(
             done_blocks.iter().any(|e| matches!(
                 e,
-                SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. }
+                SessionEvent::ContentBlockDone {
+                    block: ContentBlock::ToolResult { .. },
+                    ..
+                }
             )),
             "missing ToolResult ContentBlockDone"
         );
@@ -720,7 +795,10 @@ mod tests {
         assert!(
             done_blocks.iter().any(|e| matches!(
                 e,
-                SessionEvent::ContentBlockDone { block: ContentBlock::Text { .. }, .. }
+                SessionEvent::ContentBlockDone {
+                    block: ContentBlock::Text { .. },
+                    ..
+                }
             )),
             "missing final Text ContentBlockDone"
         );
@@ -806,10 +884,14 @@ mod tests {
     #[async_trait]
     impl AnthropicClient for TwoTurnClient {
         async fn complete(&self, request: MessageRequest) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 Ok(MessageResponse {
-                    content: vec![ContentBlock::Text { text: "First response.".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "First response.".into(),
+                    }],
                     stop_reason: "end_turn".into(),
                     input_tokens: 10,
                     output_tokens: 5,
@@ -838,12 +920,10 @@ mod tests {
 
     #[async_trait]
     impl AnthropicClient for TwoToolClient {
-        async fn complete(
-            &self,
-            _request: MessageRequest,
-        ) -> anthropic::Result<MessageResponse> {
-            let count =
-                self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match count {
                 0 => Ok(MessageResponse {
                     content: vec![ContentBlock::ToolUse {
@@ -890,7 +970,9 @@ mod tests {
             git_root: None,
             cwd: None,
         };
-        let client = Arc::new(TwoToolClient { call_count: std::sync::atomic::AtomicU32::new(0) });
+        let client = Arc::new(TwoToolClient {
+            call_count: std::sync::atomic::AtomicU32::new(0),
+        });
         let db = Arc::new(mock_db);
         let (event_tx, mut event_rx) = broadcast::channel(256);
         let (msg_tx, msg_rx) = mpsc::channel(16);
@@ -906,18 +988,30 @@ mod tests {
 
         // Should have two ToolUse blocks and two ToolResult blocks
         assert_eq!(
-            events.iter().filter(|e| matches!(
-                e,
-                SessionEvent::ContentBlockDone { block: ContentBlock::ToolUse { .. }, .. }
-            )).count(),
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    SessionEvent::ContentBlockDone {
+                        block: ContentBlock::ToolUse { .. },
+                        ..
+                    }
+                ))
+                .count(),
             2,
             "expected 2 ToolUse blocks"
         );
         assert_eq!(
-            events.iter().filter(|e| matches!(
-                e,
-                SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. }
-            )).count(),
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    SessionEvent::ContentBlockDone {
+                        block: ContentBlock::ToolResult { .. },
+                        ..
+                    }
+                ))
+                .count(),
             2,
             "expected 2 ToolResult blocks"
         );
@@ -953,11 +1047,18 @@ mod tests {
             turns_store_c.lock().unwrap().push(turn.clone());
             Ok(())
         });
-        mock_db.expect_create_content_block().returning(move |turn_id, _idx, role, block| {
-            blocks_store_c.lock().unwrap().push((turn_id, role.clone(), block.clone()));
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |turn_id, _idx, role, block| {
+                blocks_store_c
+                    .lock()
+                    .unwrap()
+                    .push((turn_id, role.clone(), block.clone()));
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(move |sid| {
             let turns: Vec<types::Turn> = turns_store_l
                 .lock()
@@ -978,7 +1079,9 @@ mod tests {
                 .collect();
             Ok(blocks)
         });
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         let client = Arc::new(TwoTurnClient::new());
         let client_ref = Arc::clone(&client);
@@ -1052,7 +1155,9 @@ mod tests {
     impl AnthropicClient for MaxTokensClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
             Ok(MessageResponse {
-                content: vec![ContentBlock::Text { text: "truncated output".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "truncated output".into(),
+                }],
                 stop_reason: "max_tokens".into(),
                 input_tokens: 10,
                 output_tokens: 4096,
@@ -1088,8 +1193,13 @@ mod tests {
         }
 
         // Must emit an Error event
-        let error_event = events.iter().find(|e| matches!(e, SessionEvent::Error { .. }));
-        assert!(error_event.is_some(), "expected a SessionEvent::Error for max_tokens");
+        let error_event = events
+            .iter()
+            .find(|e| matches!(e, SessionEvent::Error { .. }));
+        assert!(
+            error_event.is_some(),
+            "expected a SessionEvent::Error for max_tokens"
+        );
         assert!(
             matches!(error_event.unwrap(), SessionEvent::Error { message } if message.contains("max_tokens")),
             "error message should mention max_tokens"
@@ -1111,14 +1221,18 @@ mod tests {
 
     impl UnknownToolClient {
         fn new() -> Self {
-            Self { call_count: std::sync::atomic::AtomicU32::new(0) }
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
         }
     }
 
     #[async_trait]
     impl AnthropicClient for UnknownToolClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 Ok(MessageResponse {
                     content: vec![ContentBlock::ToolUse {
@@ -1132,7 +1246,9 @@ mod tests {
                 })
             } else {
                 Ok(MessageResponse {
-                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     stop_reason: "end_turn".into(),
                     input_tokens: 15,
                     output_tokens: 3,
@@ -1154,14 +1270,25 @@ mod tests {
 
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(move |turn_id, _idx, role, block| {
-            blocks_store_c.lock().unwrap().push((turn_id, role.clone(), block.clone()));
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |turn_id, _idx, role, block| {
+                blocks_store_c
+                    .lock()
+                    .unwrap()
+                    .push((turn_id, role.clone(), block.clone()));
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         // Use a tools list that has only a different tool (not "nonexistent_tool")
         let config = HarnessConfig {
@@ -1199,7 +1326,10 @@ mod tests {
                 lower.contains("unknown tool") || lower.contains("unknown")
             })
         });
-        let stored_debug = stored.iter().map(|(_, _, b)| format!("{b:?}")).collect::<Vec<_>>();
+        let stored_debug = stored
+            .iter()
+            .map(|(_, _, b)| format!("{b:?}"))
+            .collect::<Vec<_>>();
         drop(stored);
         assert!(
             tool_result_found,
@@ -1242,7 +1372,9 @@ mod tests {
         );
         // No Error events
         assert!(
-            !events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Error { .. })),
             "did not expect Error events for an empty tool list with end_turn response"
         );
     }
@@ -1270,13 +1402,22 @@ mod tests {
             turns_store_c.lock().unwrap().push(turn.clone());
             Ok(())
         });
-        mock_db.expect_create_content_block().returning(move |turn_id, _idx, role, block| {
-            blocks_store_c.lock().unwrap().push((turn_id, role.clone(), block.clone()));
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |turn_id, _idx, role, block| {
+                blocks_store_c
+                    .lock()
+                    .unwrap()
+                    .push((turn_id, role.clone(), block.clone()));
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(move |sid| {
-            let turns = turns_store_l.lock().unwrap()
+            let turns = turns_store_l
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|t| t.session_id == sid)
                 .cloned()
@@ -1284,14 +1425,18 @@ mod tests {
             Ok(turns)
         });
         mock_db.expect_list_content_blocks().returning(move |tid| {
-            let blocks = blocks_store_l.lock().unwrap()
+            let blocks = blocks_store_l
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|(id, _, _)| *id == tid)
                 .map(|(_, role, block)| (role.clone(), block.clone()))
                 .collect();
             Ok(blocks)
         });
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -1314,8 +1459,15 @@ mod tests {
             matches!(block, ContentBlock::ToolResult { .. }).then(|| role.clone())
         });
         drop(stored);
-        assert!(tool_result_role.is_some(), "expected a ToolResult block in DB");
-        assert_eq!(tool_result_role.unwrap(), types::Role::User, "ToolResult block should be stored with Role::User");
+        assert!(
+            tool_result_role.is_some(),
+            "expected a ToolResult block in DB"
+        );
+        assert_eq!(
+            tool_result_role.unwrap(),
+            types::Role::User,
+            "ToolResult block should be stored with Role::User"
+        );
     }
 
     // --- Fix 2d: sequential tool calls correct ordering ---
@@ -1326,11 +1478,10 @@ mod tests {
 
     #[async_trait]
     impl AnthropicClient for TwoToolOrderingClient {
-        async fn complete(
-            &self,
-            _request: MessageRequest,
-        ) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match count {
                 0 => Ok(MessageResponse {
                     content: vec![ContentBlock::ToolUse {
@@ -1343,7 +1494,9 @@ mod tests {
                     output_tokens: 5,
                 }),
                 _ => Ok(MessageResponse {
-                    content: vec![ContentBlock::Text { text: "All done.".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "All done.".into(),
+                    }],
                     stop_reason: "end_turn".into(),
                     input_tokens: 20,
                     output_tokens: 6,
@@ -1381,18 +1534,30 @@ mod tests {
         }
 
         // Collect event type labels in order
-        let labels: Vec<&str> = events.iter().map(|e| match e {
-            SessionEvent::TurnStarted { .. } => "TurnStarted",
-            SessionEvent::ContentBlockDelta { .. } => "ContentBlockDelta",
-            SessionEvent::ContentBlockDone { block: ContentBlock::Text { .. }, .. } => "ContentBlockDone(Text)",
-            SessionEvent::ContentBlockDone { block: ContentBlock::ToolUse { .. }, .. } => "ContentBlockDone(ToolUse)",
-            SessionEvent::ContentBlockDone { block: ContentBlock::ToolResult { .. }, .. } => "ContentBlockDone(ToolResult)",
-            SessionEvent::TurnDone { .. } => "TurnDone",
-            SessionEvent::Done => "SessionDone",
-            SessionEvent::Error { .. } => "Error",
-            SessionEvent::ToolUseStart { .. } => "ToolUseStart",
-            SessionEvent::ToolUseDone { .. } => "ToolUseDone",
-        }).collect();
+        let labels: Vec<&str> = events
+            .iter()
+            .map(|e| match e {
+                SessionEvent::TurnStarted { .. } => "TurnStarted",
+                SessionEvent::ContentBlockDelta { .. } => "ContentBlockDelta",
+                SessionEvent::ContentBlockDone {
+                    block: ContentBlock::Text { .. },
+                    ..
+                } => "ContentBlockDone(Text)",
+                SessionEvent::ContentBlockDone {
+                    block: ContentBlock::ToolUse { .. },
+                    ..
+                } => "ContentBlockDone(ToolUse)",
+                SessionEvent::ContentBlockDone {
+                    block: ContentBlock::ToolResult { .. },
+                    ..
+                } => "ContentBlockDone(ToolResult)",
+                SessionEvent::TurnDone { .. } => "TurnDone",
+                SessionEvent::Done => "SessionDone",
+                SessionEvent::Error { .. } => "Error",
+                SessionEvent::ToolUseStart { .. } => "ToolUseStart",
+                SessionEvent::ToolUseDone { .. } => "ToolUseDone",
+            })
+            .collect();
 
         let expected: &[&str] = &[
             "TurnStarted",
@@ -1426,7 +1591,9 @@ mod tests {
     impl AnthropicClient for KnownTokenClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
             Ok(MessageResponse {
-                content: vec![ContentBlock::Text { text: "response".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "response".into(),
+                }],
                 stop_reason: "end_turn".into(),
                 input_tokens: 100,
                 output_tokens: 50,
@@ -1447,11 +1614,19 @@ mod tests {
             turns_store_c.lock().unwrap().push(turn.clone());
             Ok(())
         });
-        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         let config = HarnessConfig {
             session: session.clone(),
@@ -1472,7 +1647,10 @@ mod tests {
         let stored = turns_store.lock().unwrap();
         let assistant_token_count = stored.iter().find_map(|t| t.token_count);
         drop(stored);
-        assert!(assistant_token_count.is_some(), "expected an assistant turn with token_count set");
+        assert!(
+            assistant_token_count.is_some(),
+            "expected an assistant turn with token_count set"
+        );
         assert_eq!(
             assistant_token_count,
             Some(150),
@@ -1489,7 +1667,9 @@ mod tests {
 
     impl CapturingClient {
         fn new() -> Self {
-            Self { captured_messages: std::sync::Mutex::new(vec![]) }
+            Self {
+                captured_messages: std::sync::Mutex::new(vec![]),
+            }
         }
     }
 
@@ -1536,12 +1716,26 @@ mod tests {
         };
 
         // The new run will add more turns; we track everything via a store.
-        let turns_store: Arc<Mutex<Vec<types::Turn>>> =
-            Arc::new(Mutex::new(vec![pre_user_turn.clone(), pre_assistant_turn.clone()]));
+        let turns_store: Arc<Mutex<Vec<types::Turn>>> = Arc::new(Mutex::new(vec![
+            pre_user_turn.clone(),
+            pre_assistant_turn.clone(),
+        ]));
         let blocks_store: Arc<Mutex<Vec<(Uuid, types::Role, types::ContentBlock)>>> =
             Arc::new(Mutex::new(vec![
-                (user_turn_id, types::Role::User, ContentBlock::Text { text: "hello".into() }),
-                (assistant_turn_id, types::Role::Assistant, ContentBlock::Text { text: "world".into() }),
+                (
+                    user_turn_id,
+                    types::Role::User,
+                    ContentBlock::Text {
+                        text: "hello".into(),
+                    },
+                ),
+                (
+                    assistant_turn_id,
+                    types::Role::Assistant,
+                    ContentBlock::Text {
+                        text: "world".into(),
+                    },
+                ),
             ]));
 
         let turns_store_c = Arc::clone(&turns_store);
@@ -1554,13 +1748,22 @@ mod tests {
             turns_store_c.lock().unwrap().push(turn.clone());
             Ok(())
         });
-        mock_db.expect_create_content_block().returning(move |turn_id, _idx, role, block| {
-            blocks_store_c.lock().unwrap().push((turn_id, role.clone(), block.clone()));
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |turn_id, _idx, role, block| {
+                blocks_store_c
+                    .lock()
+                    .unwrap()
+                    .push((turn_id, role.clone(), block.clone()));
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(move |sid| {
-            let turns = turns_store_l.lock().unwrap()
+            let turns = turns_store_l
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|t| t.session_id == sid)
                 .cloned()
@@ -1568,14 +1771,18 @@ mod tests {
             Ok(turns)
         });
         mock_db.expect_list_content_blocks().returning(move |tid| {
-            let blocks = blocks_store_l.lock().unwrap()
+            let blocks = blocks_store_l
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|(id, _, _)| *id == tid)
                 .map(|(_, role, block)| (role.clone(), block.clone()))
                 .collect();
             Ok(blocks)
         });
-        mock_db.expect_list_issues_by_session_id().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
 
         let client = Arc::new(CapturingClient::new());
         let client_ref = Arc::clone(&client);
@@ -1606,13 +1813,26 @@ mod tests {
         let captured = client_ref.captured_messages.lock().unwrap().clone();
         // Should have 3 messages: user "hello", assistant "world", user "follow up"
         assert_eq!(
-            captured.len(), 3,
+            captured.len(),
+            3,
             "expected 3 messages in API call (prior 2 + new 1), got {}: {:?}",
             captured.len(),
-            captured.iter().map(|(r, blocks)| {
-                let text = blocks.iter().find_map(|b| if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }).unwrap_or("?");
-                format!("{r:?}: {text}")
-            }).collect::<Vec<_>>()
+            captured
+                .iter()
+                .map(|(r, blocks)| {
+                    let text = blocks
+                        .iter()
+                        .find_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or("?");
+                    format!("{r:?}: {text}")
+                })
+                .collect::<Vec<_>>()
         );
 
         assert_eq!(captured[0].0, Role::User, "first message should be User");
@@ -1621,7 +1841,11 @@ mod tests {
             "first message should be 'hello'"
         );
 
-        assert_eq!(captured[1].0, Role::Assistant, "second message should be Assistant");
+        assert_eq!(
+            captured[1].0,
+            Role::Assistant,
+            "second message should be Assistant"
+        );
         assert!(
             matches!(&captured[1].1[0], ContentBlock::Text { text } if text == "world"),
             "second message should be 'world'"
@@ -1644,7 +1868,9 @@ mod tests {
 
     impl SystemCapturingClient {
         fn new() -> Self {
-            Self { captured_system: std::sync::Mutex::new(None) }
+            Self {
+                captured_system: std::sync::Mutex::new(None),
+            }
         }
 
         fn captured(&self) -> Option<String> {
@@ -1864,7 +2090,10 @@ mod tests {
         );
         let expected_body = format!("{agent_body}\n\n{project_content}");
         let expected = format!("{expected_preamble}{expected_body}");
-        assert_eq!(system, expected, "system prompt must be preamble + agent_body + \\n\\n + CLAUDE.md");
+        assert_eq!(
+            system, expected,
+            "system prompt must be preamble + agent_body + \\n\\n + CLAUDE.md"
+        );
     }
 
     #[tokio::test]
@@ -1874,7 +2103,11 @@ mod tests {
         std::fs::create_dir_all(&agents_dir).unwrap();
 
         // Write a CLAUDE.md that must NOT appear in the system prompt
-        std::fs::write(tmp.path().join("CLAUDE.md"), "Project config that must be ignored.").unwrap();
+        std::fs::write(
+            tmp.path().join("CLAUDE.md"),
+            "Project config that must be ignored.",
+        )
+        .unwrap();
 
         let agent_name = "harness_test_no_project_config";
         let agent_body = "You are a plain agent without project config.";
@@ -2022,13 +2255,19 @@ mod tests {
             !sys.contains("ns2 agent harness"),
             "preamble must NOT appear when effective_root is None, got: {sys}"
         );
-        assert_eq!(sys, agent_body, "system must equal agent body when there is no git root");
+        assert_eq!(
+            sys, agent_body,
+            "system must equal agent body when there is no git root"
+        );
     }
 
     // ── Hook dispatch tests (GH #33) ─────────────────────────────────────────
 
     fn hook_cmd(script: &str, timeout: u64) -> agents::HookCommand {
-        agents::HookCommand { command: script.to_string(), timeout }
+        agents::HookCommand {
+            command: script.to_string(),
+            timeout,
+        }
     }
 
     #[tokio::test]
@@ -2044,8 +2283,12 @@ mod tests {
         };
 
         let result =
-            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"}), None).await;
-        assert!(result.is_none(), "exit 0 hook must not block the tool, got: {result:?}");
+            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({"path": "/tmp/f"}), None)
+                .await;
+        assert!(
+            result.is_none(),
+            "exit 0 hook must not block the tool, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -2060,8 +2303,7 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        let result =
-            run_pre_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), None).await;
+        let result = run_pre_tool_use_hooks(&hooks, "bash", &serde_json::json!({}), None).await;
         assert!(result.is_some(), "exit 1 hook must block the tool");
         let msg = result.unwrap();
         assert!(
@@ -2082,9 +2324,11 @@ mod tests {
             ..AgentHooks::default()
         };
 
-        let result =
-            run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({}), None).await;
-        assert!(result.is_none(), "hook for 'bash' must not match tool 'read'");
+        let result = run_pre_tool_use_hooks(&hooks, "read", &serde_json::json!({}), None).await;
+        assert!(
+            result.is_none(),
+            "hook for 'bash' must not match tool 'read'"
+        );
     }
 
     #[tokio::test]
@@ -2115,7 +2359,10 @@ mod tests {
         };
 
         let result = run_stop_hooks(&hooks, Uuid::new_v4(), None).await;
-        assert!(result.is_none(), "exit 0 stop hook must allow completion, got: {result:?}");
+        assert!(
+            result.is_none(),
+            "exit 0 stop hook must allow completion, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -2178,7 +2425,10 @@ mod tests {
         };
 
         let result = run_stop_hooks(&hooks, Uuid::new_v4(), Some(tmp.path())).await;
-        assert!(result.is_some(), "hook must inject a message when running with a cwd");
+        assert!(
+            result.is_some(),
+            "hook must inject a message when running with a cwd"
+        );
         let msg = result.unwrap();
         let canonical = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(
@@ -2209,15 +2459,21 @@ mod tests {
 
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                results_store_c.lock().unwrap().push(content.clone());
-            }
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |_, _, _, block| {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    results_store_c.lock().unwrap().push(content.clone());
+                }
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
 
         let hooks = AgentHooks {
             pre_tool_use: vec![HookEntry {
@@ -2230,10 +2486,7 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        let history = vec![(
-            Role::User,
-            vec![ContentBlock::Text { text: "go".into() }],
-        )];
+        let history = vec![(Role::User, vec![ContentBlock::Text { text: "go".into() }])];
         let config = HarnessConfig {
             session: session.clone(),
             model: "test".into(),
@@ -2244,14 +2497,18 @@ mod tests {
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
-            .await
-            .unwrap();
+        let result =
+            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+                .await
+                .unwrap();
         assert!(result.is_none(), "should complete normally");
 
         let results = results_store.lock().unwrap();
         assert_eq!(results.len(), 1, "expected one tool result");
-        assert_eq!(results[0], "file content here", "tool should have run normally");
+        assert_eq!(
+            results[0], "file content here",
+            "tool should have run normally"
+        );
         drop(results);
     }
 
@@ -2265,15 +2522,21 @@ mod tests {
 
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                results_store_c.lock().unwrap().push(content.clone());
-            }
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |_, _, _, block| {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    results_store_c.lock().unwrap().push(content.clone());
+                }
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
 
         let hooks = AgentHooks {
             pre_tool_use: vec![HookEntry {
@@ -2286,10 +2549,7 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        let history = vec![(
-            Role::User,
-            vec![ContentBlock::Text { text: "go".into() }],
-        )];
+        let history = vec![(Role::User, vec![ContentBlock::Text { text: "go".into() }])];
         let config = HarnessConfig {
             session: session.clone(),
             model: "test".into(),
@@ -2305,7 +2565,11 @@ mod tests {
             .unwrap();
 
         let results = results_store.lock().unwrap();
-        assert_eq!(results.len(), 1, "expected one tool result (the blocked message)");
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one tool result (the blocked message)"
+        );
         assert!(
             results[0].contains("tool blocked by hook"),
             "tool result must be hook stderr when blocked, got: {:?}",
@@ -2324,15 +2588,21 @@ mod tests {
 
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(move |_, _, _, block| {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                results_store_c.lock().unwrap().push(content.clone());
-            }
-            Ok(())
-        });
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(move |_, _, _, block| {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    results_store_c.lock().unwrap().push(content.clone());
+                }
+                Ok(())
+            });
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
 
         let hooks = AgentHooks {
             post_tool_use: vec![HookEntry {
@@ -2345,10 +2615,7 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        let history = vec![(
-            Role::User,
-            vec![ContentBlock::Text { text: "go".into() }],
-        )];
+        let history = vec![(Role::User, vec![ContentBlock::Text { text: "go".into() }])];
         let config = HarnessConfig {
             session: session.clone(),
             model: "test".into(),
@@ -2387,10 +2654,7 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        let history = vec![(
-            Role::User,
-            vec![ContentBlock::Text { text: "hi".into() }],
-        )];
+        let history = vec![(Role::User, vec![ContentBlock::Text { text: "hi".into() }])];
         let config = HarnessConfig {
             session: session.clone(),
             model: "test".into(),
@@ -2402,10 +2666,14 @@ mod tests {
         let mock_db = permissive_mock_db();
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
-            .await
-            .unwrap();
-        assert!(result.is_none(), "stop hook exit 0 must return None (normal completion)");
+        let result =
+            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+                .await
+                .unwrap();
+        assert!(
+            result.is_none(),
+            "stop hook exit 0 must return None (normal completion)"
+        );
     }
 
     #[tokio::test]
@@ -2423,10 +2691,7 @@ mod tests {
         let session = make_session();
         let (event_tx, _rx) = broadcast::channel(64);
 
-        let history = vec![(
-            Role::User,
-            vec![ContentBlock::Text { text: "hi".into() }],
-        )];
+        let history = vec![(Role::User, vec![ContentBlock::Text { text: "hi".into() }])];
         let config = HarnessConfig {
             session: session.clone(),
             model: "test".into(),
@@ -2438,10 +2703,14 @@ mod tests {
         let mock_db = permissive_mock_db();
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        let result = run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
-            .await
-            .unwrap();
-        assert!(result.is_some(), "stop hook exit 1 must inject a user message");
+        let result =
+            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+                .await
+                .unwrap();
+        assert!(
+            result.is_some(),
+            "stop hook exit 1 must inject a user message"
+        );
         let injected = result.unwrap();
         assert!(
             injected.contains("do more work"),
@@ -2459,16 +2728,24 @@ mod tests {
 
     impl RateLimitThenOkClient {
         fn new(n_failures: u32) -> Self {
-            Self { call_count: std::sync::atomic::AtomicU32::new(0), n_failures }
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+                n_failures,
+            }
         }
     }
 
     #[async_trait]
     impl AnthropicClient for RateLimitThenOkClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count < self.n_failures {
-                Err(anthropic::Error::Api { status: 429, message: "rate limited".into() })
+                Err(anthropic::Error::Api {
+                    status: 429,
+                    message: "rate limited".into(),
+                })
             } else {
                 Ok(MessageResponse {
                     content: vec![ContentBlock::Text { text: "ok".into() }],
@@ -2515,7 +2792,9 @@ mod tests {
 
         // Should have completed successfully — no Error event, SessionDone present
         assert!(
-            !events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Error { .. })),
             "should NOT emit Error when 429 retried and eventually succeeds"
         );
         assert!(
@@ -2556,7 +2835,9 @@ mod tests {
         }
 
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Error { .. })),
             "expected SessionEvent::Error when all 429 retries are exhausted"
         );
     }
@@ -2568,8 +2849,14 @@ mod tests {
 
         #[async_trait]
         impl AnthropicClient for AlwaysServerErrorClient {
-            async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-                Err(anthropic::Error::Api { status: 500, message: "internal server error".into() })
+            async fn complete(
+                &self,
+                _request: MessageRequest,
+            ) -> anthropic::Result<MessageResponse> {
+                Err(anthropic::Error::Api {
+                    status: 500,
+                    message: "internal server error".into(),
+                })
             }
         }
 
@@ -2592,7 +2879,10 @@ mod tests {
 
         // Should return Err (non-429 is not swallowed)
         let result = run(config, client, db, event_tx, msg_rx).await;
-        assert!(result.is_err(), "non-429 error should propagate immediately as Err");
+        assert!(
+            result.is_err(),
+            "non-429 error should propagate immediately as Err"
+        );
     }
 
     /// `NS2_MAX_RETRIES` env var overrides the default of 5.
@@ -2635,7 +2925,9 @@ mod tests {
         }
 
         assert!(
-            events.iter().any(|e| matches!(e, SessionEvent::Error { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Error { .. })),
             "expected Error when NS2_MAX_RETRIES=2 and client fails 3 times"
         );
     }
@@ -2648,10 +2940,8 @@ mod tests {
         let agents_dir = tmp.path().join(".ns2").join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
 
-        let log_file = std::env::temp_dir().join(format!(
-            "ns2_proj_hook_test_{}.txt",
-            uuid::Uuid::new_v4()
-        ));
+        let log_file =
+            std::env::temp_dir().join(format!("ns2_proj_hook_test_{}.txt", uuid::Uuid::new_v4()));
         let log_path = log_file.to_string_lossy().to_string();
 
         let claude_dir = tmp.path().join(".claude");
@@ -2779,7 +3069,11 @@ mod tests {
     }
 
     impl CwdCapturingTool {
-        fn new() -> (Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<Option<std::path::PathBuf>>>, Arc<Self>) {
+        fn new() -> (
+            Arc<std::sync::atomic::AtomicBool>,
+            Arc<Mutex<Option<std::path::PathBuf>>>,
+            Arc<Self>,
+        ) {
             let was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let captured_cwd = Arc::new(Mutex::new(None));
             let tool = Arc::new(Self {
@@ -2800,8 +3094,13 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, cwd: Option<&std::path::Path>) -> tools::Result<String> {
-            self.was_called.store(true, std::sync::atomic::Ordering::SeqCst);
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            cwd: Option<&std::path::Path>,
+        ) -> tools::Result<String> {
+            self.was_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             *self.captured_cwd.lock().await = cwd.map(std::path::Path::to_path_buf);
             Ok("captured".into())
         }
@@ -2814,14 +3113,18 @@ mod tests {
 
     impl CwdCaptureClient {
         fn new() -> Self {
-            Self { call_count: std::sync::atomic::AtomicU32::new(0) }
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
         }
     }
 
     #[async_trait]
     impl AnthropicClient for CwdCaptureClient {
         async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
-            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
                 Ok(MessageResponse {
                     content: vec![ContentBlock::ToolUse {
@@ -2835,7 +3138,9 @@ mod tests {
                 })
             } else {
                 Ok(MessageResponse {
-                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     stop_reason: "end_turn".into(),
                     input_tokens: 5,
                     output_tokens: 2,
@@ -2849,35 +3154,53 @@ mod tests {
     /// `resolve_session_cwd_with_root(git_root)` and pass it as `cwd` to tool
     /// dispatch — so the tool executes inside the worktree, not the server's cwd.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn run_resolves_worktree_cwd_from_git_root_when_issue_has_branch() {
         // Set up a real git repo so ensure_worktree can create a worktree.
         let origin_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["init", "--bare", "-b", "main"])
             .current_dir(origin_dir.path())
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         let local_dir = tempfile::TempDir::new().unwrap();
         std::process::Command::new("git")
             .args(["clone", &origin_dir.path().to_string_lossy(), "."])
             .current_dir(local_dir.path())
-            .status().unwrap();
+            .status()
+            .unwrap();
 
-        for cmd in [["config", "user.email", "t@t"], ["config", "user.name", "test"]] {
+        for cmd in [
+            ["config", "user.email", "t@t"],
+            ["config", "user.name", "test"],
+        ] {
             std::process::Command::new("git")
                 .args(cmd)
                 .current_dir(local_dir.path())
-                .status().unwrap();
+                .status()
+                .unwrap();
         }
         std::fs::write(local_dir.path().join("README.md"), "init").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(local_dir.path()).status().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(local_dir.path())
+            .status()
+            .unwrap();
         std::process::Command::new("git")
             .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
             .current_dir(local_dir.path())
-            .env("GIT_AUTHOR_NAME", "test").env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "test").env("GIT_COMMITTER_EMAIL", "t@t")
-            .status().unwrap();
-        std::process::Command::new("git").args(["push", "origin", "main"]).current_dir(local_dir.path()).status().unwrap();
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(local_dir.path())
+            .status()
+            .unwrap();
 
         // Write an ns2.toml in local_dir pointing worktrees to a known temp dir.
         // This distinguishes local_dir's config from the ns2 repo's config so we
@@ -2885,8 +3208,12 @@ mod tests {
         let worktrees_base = tempfile::TempDir::new().unwrap();
         std::fs::write(
             local_dir.path().join("ns2.toml"),
-            format!("[worktrees]\npath = \"{}\"\n", worktrees_base.path().display()),
-        ).unwrap();
+            format!(
+                "[worktrees]\npath = \"{}\"\n",
+                worktrees_base.path().display()
+            ),
+        )
+        .unwrap();
 
         let branch = "feat/worktree-cwd-test";
         let session_id = Uuid::new_v4();
@@ -2895,26 +3222,34 @@ mod tests {
         // issue (not the empty-vec default from permissive_mock_db).
         let mut mock_db = MockTestDb::new();
         mock_db.expect_create_turn().returning(|_| Ok(()));
-        mock_db.expect_create_content_block().returning(|_, _, _, _| Ok(()));
-        mock_db.expect_update_session_status().returning(|_, _| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .returning(|_, _| Ok(()));
         mock_db.expect_list_turns().returning(|_| Ok(vec![]));
-        mock_db.expect_list_content_blocks().returning(|_| Ok(vec![]));
-        mock_db.expect_list_issues_by_session_id().returning(move |_| {
-            Ok(vec![types::Issue {
-                id: "wd01".into(),
-                title: "Worktree cwd test".into(),
-                body: "body".into(),
-                status: types::IssueStatus::Running,
-                branch: branch.into(),
-                assignee: None,
-                session_id: Some(session_id),
-                parent_id: None,
-                blocked_on: vec![],
-                comments: vec![],
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            }])
-        });
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(move |_| {
+                Ok(vec![types::Issue {
+                    id: "wd01".into(),
+                    title: "Worktree cwd test".into(),
+                    body: "body".into(),
+                    status: types::IssueStatus::Running,
+                    branch: branch.into(),
+                    assignee: None,
+                    session_id: Some(session_id),
+                    parent_id: None,
+                    blocked_on: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            });
 
         let (was_called, captured_cwd, cwd_tool) = CwdCapturingTool::new();
 
@@ -2938,9 +3273,14 @@ mod tests {
 
         run(config, client, db, event_tx, msg_rx).await.unwrap();
 
-        assert!(was_called.load(std::sync::atomic::Ordering::SeqCst), "cwd-capture tool should have been called");
+        assert!(
+            was_called.load(std::sync::atomic::Ordering::SeqCst),
+            "cwd-capture tool should have been called"
+        );
         // Extract the path without holding the guard across subsequent code.
-        let tool_cwd = captured_cwd.lock().await
+        let tool_cwd = captured_cwd
+            .lock()
+            .await
             .as_ref()
             .expect("tool should have received a non-None cwd")
             .clone();

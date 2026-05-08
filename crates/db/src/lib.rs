@@ -146,8 +146,7 @@ fn parse_turn_row(row: &sqlx::sqlite::SqliteRow) -> Result<Turn> {
     let created_at_ts: i64 = row.get("created_at");
 
     let id = Uuid::parse_str(&id_str).map_err(|e| Error::Parse(e.to_string()))?;
-    let session_id =
-        Uuid::parse_str(&session_id_str).map_err(|e| Error::Parse(e.to_string()))?;
+    let session_id = Uuid::parse_str(&session_id_str).map_err(|e| Error::Parse(e.to_string()))?;
     let created_at = Utc
         .timestamp_opt(created_at_ts, 0)
         .single()
@@ -198,11 +197,13 @@ impl SessionDb for SqliteDb {
     }
 
     async fn get_session(&self, id: Uuid) -> Result<Session> {
-        let row = sqlx::query("SELECT id, name, status, agent, created_at, updated_at FROM sessions WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let row = sqlx::query(
+            "SELECT id, name, status, agent, created_at, updated_at FROM sessions WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
         parse_session_row(&row)
     }
 
@@ -229,15 +230,13 @@ impl SessionDb for SqliteDb {
 
     async fn update_session_status(&self, id: Uuid, status: SessionStatus) -> Result<()> {
         let now = Utc::now().timestamp();
-        let affected = sqlx::query(
-            "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(status.to_string())
-        .bind(now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+        let affected = sqlx::query("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.to_string())
+            .bind(now)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         if affected == 0 {
             return Err(Error::NotFound);
         }
@@ -311,8 +310,8 @@ impl ContentBlockDb for SqliteDb {
                 let role_str: String = row.get("role");
                 let content_str: String = row.get("content");
                 let role = role_from_str(&role_str)?;
-                let block: ContentBlock = serde_json::from_str(&content_str)
-                    .map_err(|e| Error::Parse(e.to_string()))?;
+                let block: ContentBlock =
+                    serde_json::from_str(&content_str).map_err(|e| Error::Parse(e.to_string()))?;
                 Ok((role, block))
             })
             .collect()
@@ -338,8 +337,8 @@ impl ContentBlockDb for SqliteDb {
             None => Ok(None),
             Some(r) => {
                 let content_str: String = r.get("content");
-                let block: ContentBlock = serde_json::from_str(&content_str)
-                    .map_err(|e| Error::Parse(e.to_string()))?;
+                let block: ContentBlock =
+                    serde_json::from_str(&content_str).map_err(|e| Error::Parse(e.to_string()))?;
                 match block {
                     ContentBlock::Text { text } => Ok(Some(text)),
                     _ => Ok(None),
@@ -448,8 +447,16 @@ impl IssueDb for SqliteDb {
         Ok(issues
             .into_iter()
             .filter(|i| status.as_ref().is_none_or(|s| &i.status == s))
-            .filter(|i| assignee.as_ref().is_none_or(|a| i.assignee.as_deref() == Some(a.as_str())))
-            .filter(|i| parent_id.as_ref().is_none_or(|p| i.parent_id.as_deref() == Some(p.as_str())))
+            .filter(|i| {
+                assignee
+                    .as_ref()
+                    .is_none_or(|a| i.assignee.as_deref() == Some(a.as_str()))
+            })
+            .filter(|i| {
+                parent_id
+                    .as_ref()
+                    .is_none_or(|p| i.parent_id.as_deref() == Some(p.as_str()))
+            })
             .collect())
     }
 
@@ -494,7 +501,7 @@ impl IssueDb for SqliteDb {
 
 // ── HookStore ─────────────────────────────────────────────────────────────────
 
-use types::{Hook, HookAction, HookExecution, HookFilter, HookSource, ExecutionStatus};
+use types::{ExecutionStatus, Hook, HookAction, HookExecution, HookFilter, HookSource};
 
 #[async_trait]
 pub trait HookStore: Send + Sync {
@@ -509,11 +516,7 @@ pub trait HookStore: Send + Sync {
     async fn delete_hook(&self, id: &str) -> Result<()>;
     async fn create_execution(&self, exec: &HookExecution) -> Result<()>;
     async fn update_execution(&self, exec: &HookExecution) -> Result<()>;
-    async fn list_executions(
-        &self,
-        hook_id: &str,
-        limit: usize,
-    ) -> Result<Vec<HookExecution>>;
+    async fn list_executions(&self, hook_id: &str, limit: usize) -> Result<Vec<HookExecution>>;
 }
 
 pub(crate) struct SqliteHookStore {
@@ -561,16 +564,14 @@ fn parse_hook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Hook> {
     let created_at_str: String = row.get("created_at");
     let updated_at_str: String = row.get("updated_at");
 
-    let source: HookSource = serde_json::from_str(&source_json)
-        .map_err(|e| Error::Parse(format!("source: {e}")))?;
+    let source: HookSource =
+        serde_json::from_str(&source_json).map_err(|e| Error::Parse(format!("source: {e}")))?;
     let filter: Option<HookFilter> = filter_json
         .as_deref()
-        .map(|s| {
-            serde_json::from_str(s).map_err(|e| Error::Parse(format!("filter: {e}")))
-        })
+        .map(|s| serde_json::from_str(s).map_err(|e| Error::Parse(format!("filter: {e}"))))
         .transpose()?;
-    let action: HookAction = serde_json::from_str(&action_json)
-        .map_err(|e| Error::Parse(format!("action: {e}")))?;
+    let action: HookAction =
+        serde_json::from_str(&action_json).map_err(|e| Error::Parse(format!("action: {e}")))?;
 
     Ok(Hook {
         id,
@@ -595,8 +596,8 @@ fn parse_execution_row(row: &sqlx::sqlite::SqliteRow) -> Result<HookExecution> {
     let result: Option<String> = row.get("result");
     let completed_at_str: Option<String> = row.get("completed_at");
 
-    let event_payload: serde_json::Value = serde_json::from_str(&event_payload_str)
-        .map_err(|e| Error::Parse(e.to_string()))?;
+    let event_payload: serde_json::Value =
+        serde_json::from_str(&event_payload_str).map_err(|e| Error::Parse(e.to_string()))?;
     let status: ExecutionStatus = status_str.parse().map_err(Error::Parse)?;
     let completed_at = completed_at_str
         .as_deref()
@@ -617,16 +618,16 @@ fn parse_execution_row(row: &sqlx::sqlite::SqliteRow) -> Result<HookExecution> {
 #[async_trait]
 impl HookStore for SqliteHookStore {
     async fn create_hook(&self, hook: &Hook) -> Result<()> {
-        let source_json = serde_json::to_string(&hook.source)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let source_json =
+            serde_json::to_string(&hook.source).map_err(|e| Error::Parse(e.to_string()))?;
         let filter_json = hook
             .filter
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e: serde_json::Error| Error::Parse(e.to_string()))?;
-        let action_json = serde_json::to_string(&hook.action)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let action_json =
+            serde_json::to_string(&hook.action).map_err(|e| Error::Parse(e.to_string()))?;
 
         sqlx::query(
             "INSERT INTO hooks (id, name, source_type, source, filter, action_type, action, \
@@ -653,37 +654,31 @@ impl HookStore for SqliteHookStore {
         enabled: Option<bool>,
         source_type: Option<&str>,
     ) -> Result<Vec<Hook>> {
-        let rows = match (enabled, source_type) {
-            (None, None) => {
-                sqlx::query(
+        let rows =
+            match (enabled, source_type) {
+                (None, None) => sqlx::query(
                     "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks ORDER BY created_at ASC",
                 )
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(en), None) => {
-                sqlx::query(
+                .await?,
+                (Some(en), None) => sqlx::query(
                     "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks WHERE enabled = ? \
                      ORDER BY created_at ASC",
                 )
                 .bind(i64::from(en))
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (None, Some(st)) => {
-                sqlx::query(
+                .await?,
+                (None, Some(st)) => sqlx::query(
                     "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks WHERE source_type = ? \
                      ORDER BY created_at ASC",
                 )
                 .bind(st)
                 .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(en), Some(st)) => {
-                sqlx::query(
+                .await?,
+                (Some(en), Some(st)) => sqlx::query(
                     "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks \
                      WHERE enabled = ? AND source_type = ? ORDER BY created_at ASC",
@@ -691,9 +686,8 @@ impl HookStore for SqliteHookStore {
                 .bind(i64::from(en))
                 .bind(st)
                 .fetch_all(&self.pool)
-                .await?
-            }
-        };
+                .await?,
+            };
         rows.iter().map(parse_hook_row).collect()
     }
 
@@ -710,16 +704,16 @@ impl HookStore for SqliteHookStore {
     }
 
     async fn update_hook(&self, hook: &Hook) -> Result<()> {
-        let source_json = serde_json::to_string(&hook.source)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let source_json =
+            serde_json::to_string(&hook.source).map_err(|e| Error::Parse(e.to_string()))?;
         let filter_json = hook
             .filter
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e: serde_json::Error| Error::Parse(e.to_string()))?;
-        let action_json = serde_json::to_string(&hook.action)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let action_json =
+            serde_json::to_string(&hook.action).map_err(|e| Error::Parse(e.to_string()))?;
 
         let affected = sqlx::query(
             "UPDATE hooks SET name = ?, source_type = ?, source = ?, filter = ?, \
@@ -759,8 +753,8 @@ impl HookStore for SqliteHookStore {
     }
 
     async fn create_execution(&self, exec: &HookExecution) -> Result<()> {
-        let event_payload_str = serde_json::to_string(&exec.event_payload)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let event_payload_str =
+            serde_json::to_string(&exec.event_payload).map_err(|e| Error::Parse(e.to_string()))?;
         sqlx::query(
             "INSERT INTO hook_executions (id, hook_id, triggered_at, event_payload, \
              status, result, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -778,8 +772,8 @@ impl HookStore for SqliteHookStore {
     }
 
     async fn update_execution(&self, exec: &HookExecution) -> Result<()> {
-        let event_payload_str = serde_json::to_string(&exec.event_payload)
-            .map_err(|e| Error::Parse(e.to_string()))?;
+        let event_payload_str =
+            serde_json::to_string(&exec.event_payload).map_err(|e| Error::Parse(e.to_string()))?;
         sqlx::query(
             "UPDATE hook_executions SET status = ?, result = ?, completed_at = ?, \
              event_payload = ? WHERE id = ?",
@@ -829,8 +823,14 @@ mod tests {
         assert_eq!(fetched.name, "test");
         assert_eq!(fetched.status, types::SessionStatus::Created);
         assert!(fetched.agent.is_none());
-        assert_eq!(fetched.created_at.timestamp(), session.created_at.timestamp());
-        assert_eq!(fetched.updated_at.timestamp(), session.updated_at.timestamp());
+        assert_eq!(
+            fetched.created_at.timestamp(),
+            session.created_at.timestamp()
+        );
+        assert_eq!(
+            fetched.updated_at.timestamp(),
+            session.updated_at.timestamp()
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -992,7 +992,9 @@ mod tests {
         let session = insert_session(&db).await;
         let turn = insert_turn(&db, session.id).await;
 
-        let block = types::ContentBlock::Text { text: "hello world".into() };
+        let block = types::ContentBlock::Text {
+            text: "hello world".into(),
+        };
         db.create_content_block(turn.id, 0, &types::Role::Assistant, &block)
             .await
             .unwrap();
@@ -1015,7 +1017,9 @@ mod tests {
             turn.id,
             2,
             &types::Role::Assistant,
-            &types::ContentBlock::Text { text: "third".into() },
+            &types::ContentBlock::Text {
+                text: "third".into(),
+            },
         )
         .await
         .unwrap();
@@ -1023,7 +1027,9 @@ mod tests {
             turn.id,
             0,
             &types::Role::Assistant,
-            &types::ContentBlock::Text { text: "first".into() },
+            &types::ContentBlock::Text {
+                text: "first".into(),
+            },
         )
         .await
         .unwrap();
@@ -1031,7 +1037,9 @@ mod tests {
             turn.id,
             1,
             &types::Role::Assistant,
-            &types::ContentBlock::Text { text: "second".into() },
+            &types::ContentBlock::Text {
+                text: "second".into(),
+            },
         )
         .await
         .unwrap();
@@ -1049,7 +1057,9 @@ mod tests {
         let session = insert_session(&db).await;
         let turn = insert_turn(&db, session.id).await;
 
-        let block = types::ContentBlock::Text { text: "user message".into() };
+        let block = types::ContentBlock::Text {
+            text: "user message".into(),
+        };
         db.create_content_block(turn.id, 0, &types::Role::User, &block)
             .await
             .unwrap();
@@ -1128,9 +1138,18 @@ mod tests {
 
         let turns = db.list_turns(session.id).await.unwrap();
         assert_eq!(turns.len(), 3);
-        assert_eq!(turns[0].id, id_first,  "first inserted turn must be at index 0");
-        assert_eq!(turns[1].id, id_second, "second inserted turn must be at index 1");
-        assert_eq!(turns[2].id, id_third,  "third inserted turn must be at index 2");
+        assert_eq!(
+            turns[0].id, id_first,
+            "first inserted turn must be at index 0"
+        );
+        assert_eq!(
+            turns[1].id, id_second,
+            "second inserted turn must be at index 1"
+        );
+        assert_eq!(
+            turns[2].id, id_third,
+            "third inserted turn must be at index 2"
+        );
     }
 
     // --- IssueDb tests ---
@@ -1193,11 +1212,17 @@ mod tests {
         db.create_issue(&i1).await.unwrap();
         db.create_issue(&i2).await.unwrap();
 
-        let open = db.list_issues(Some(types::IssueStatus::Open), None, None).await.unwrap();
+        let open = db
+            .list_issues(Some(types::IssueStatus::Open), None, None)
+            .await
+            .unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].id, "aa11");
 
-        let completed = db.list_issues(Some(types::IssueStatus::Completed), None, None).await.unwrap();
+        let completed = db
+            .list_issues(Some(types::IssueStatus::Completed), None, None)
+            .await
+            .unwrap();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].id, "bb22");
     }
@@ -1212,7 +1237,10 @@ mod tests {
         db.create_issue(&i1).await.unwrap();
         db.create_issue(&i2).await.unwrap();
 
-        let swe_issues = db.list_issues(None, Some("swe".into()), None).await.unwrap();
+        let swe_issues = db
+            .list_issues(None, Some("swe".into()), None)
+            .await
+            .unwrap();
         assert_eq!(swe_issues.len(), 1);
         assert_eq!(swe_issues[0].id, "aa11");
     }
@@ -1231,7 +1259,10 @@ mod tests {
         other.parent_id = Some("other".into());
         db.create_issue(&other).await.unwrap();
 
-        let children = db.list_issues(None, None, Some("pp00".into())).await.unwrap();
+        let children = db
+            .list_issues(None, None, Some("pp00".into()))
+            .await
+            .unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].id, "cc11");
     }
@@ -1288,9 +1319,14 @@ mod tests {
         let session = insert_session(&db).await;
         let turn = insert_turn(&db, session.id).await;
 
-        db.create_content_block(turn.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
-            text: "hello from the agent".into(),
-        })
+        db.create_content_block(
+            turn.id,
+            0,
+            &types::Role::Assistant,
+            &types::ContentBlock::Text {
+                text: "hello from the agent".into(),
+            },
+        )
         .await
         .unwrap();
 
@@ -1305,20 +1341,34 @@ mod tests {
         let turn1 = insert_turn(&db, session.id).await;
         let turn2 = insert_turn(&db, session.id).await;
 
-        db.create_content_block(turn1.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
-            text: "first text".into(),
-        })
+        db.create_content_block(
+            turn1.id,
+            0,
+            &types::Role::Assistant,
+            &types::ContentBlock::Text {
+                text: "first text".into(),
+            },
+        )
         .await
         .unwrap();
 
-        db.create_content_block(turn2.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
-            text: "second text".into(),
-        })
+        db.create_content_block(
+            turn2.id,
+            0,
+            &types::Role::Assistant,
+            &types::ContentBlock::Text {
+                text: "second text".into(),
+            },
+        )
         .await
         .unwrap();
 
         let result = db.get_last_text_for_session(session.id).await.unwrap();
-        assert_eq!(result.as_deref(), Some("second text"), "should return the most recent text");
+        assert_eq!(
+            result.as_deref(),
+            Some("second text"),
+            "should return the most recent text"
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -1328,14 +1378,22 @@ mod tests {
         let session_b = insert_session(&db).await;
 
         let turn_b = insert_turn(&db, session_b.id).await;
-        db.create_content_block(turn_b.id, 0, &types::Role::Assistant, &types::ContentBlock::Text {
-            text: "session b text".into(),
-        })
+        db.create_content_block(
+            turn_b.id,
+            0,
+            &types::Role::Assistant,
+            &types::ContentBlock::Text {
+                text: "session b text".into(),
+            },
+        )
         .await
         .unwrap();
 
         let result = db.get_last_text_for_session(session_a.id).await.unwrap();
-        assert!(result.is_none(), "should not return text from other sessions");
+        assert!(
+            result.is_none(),
+            "should not return text from other sessions"
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -1344,14 +1402,22 @@ mod tests {
         let session = insert_session(&db).await;
         let turn = insert_turn(&db, session.id).await;
 
-        db.create_content_block(turn.id, 0, &types::Role::User, &types::ContentBlock::Text {
-            text: "user question".into(),
-        })
+        db.create_content_block(
+            turn.id,
+            0,
+            &types::Role::User,
+            &types::ContentBlock::Text {
+                text: "user question".into(),
+            },
+        )
         .await
         .unwrap();
 
         let result = db.get_last_text_for_session(session.id).await.unwrap();
-        assert!(result.is_none(), "user messages should not count as last text");
+        assert!(
+            result.is_none(),
+            "user messages should not count as last text"
+        );
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -1441,5 +1507,431 @@ mod tests {
 
         let after_update = db.get_issue("br01".into()).await.unwrap();
         assert_eq!(after_update.branch, "fix/updated-branch");
+    }
+
+    // ── SqliteHookStore tests ─────────────────────────────────────────────────
+
+    fn make_hook(id: &str) -> types::Hook {
+        types::Hook {
+            id: id.into(),
+            name: "test-hook".into(),
+            source: types::HookSource::Internal {
+                event_types: vec!["issue.created".into()],
+            },
+            filter: None,
+            action: types::HookAction::SendMessage {
+                target: types::MessageTarget::Issue("x".into()),
+                body: "hi".into(),
+            },
+            enabled: true,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // test: create_then_list_hooks_returns_correct_source_type
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_create_then_list_hooks_returns_correct_source_type(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-001");
+        store.create_hook(&hook).await.unwrap();
+
+        let hooks = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].id, "hook-001");
+        assert!(
+            matches!(
+                &hooks[0].source,
+                types::HookSource::Internal { event_types }
+                    if event_types == &["issue.created"]
+            ),
+            "source should be Internal with correct event_types"
+        );
+    }
+
+    // test: source_type_str filters correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_hooks_filter_by_source_type(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let internal_hook = make_hook("h-internal");
+        store.create_hook(&internal_hook).await.unwrap();
+
+        let mut external_hook = make_hook("h-external");
+        external_hook.source = types::HookSource::External { secret: None };
+        store.create_hook(&external_hook).await.unwrap();
+
+        let mut timer_hook = make_hook("h-timer");
+        timer_hook.source = types::HookSource::Timer {
+            schedule: "*/5 * * * *".into(),
+        };
+        store.create_hook(&timer_hook).await.unwrap();
+
+        // Filter by "internal" — should return only the internal hook
+        let internal_list = store.list_hooks(None, Some("internal")).await.unwrap();
+        assert_eq!(internal_list.len(), 1);
+        assert_eq!(internal_list[0].id, "h-internal");
+
+        // Filter by "external"
+        let external_list = store.list_hooks(None, Some("external")).await.unwrap();
+        assert_eq!(external_list.len(), 1);
+        assert_eq!(external_list[0].id, "h-external");
+
+        // Filter by "timer"
+        let timer_list = store.list_hooks(None, Some("timer")).await.unwrap();
+        assert_eq!(timer_list.len(), 1);
+        assert_eq!(timer_list[0].id, "h-timer");
+    }
+
+    // test: action_type_str_round_trips_correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_type_str_round_trips_correctly(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-action");
+        store.create_hook(&hook).await.unwrap();
+
+        let fetched = store.get_hook("hook-action").await.unwrap();
+        assert!(
+            matches!(
+                &fetched.action,
+                types::HookAction::SendMessage { target, body }
+                    if matches!(target, types::MessageTarget::Issue(s) if s == "x")
+                    && body == "hi"
+            ),
+            "action should be SendMessage with correct target and body"
+        );
+    }
+
+    // test: action_type CreateIssue round-trips
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_create_issue_round_trips(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let mut hook = make_hook("hook-ci");
+        hook.action = types::HookAction::CreateIssue {
+            title: "Auto issue".into(),
+            body: "Created by hook".into(),
+            assignee: Some("dev".into()),
+            parent: None,
+            start: false,
+        };
+        store.create_hook(&hook).await.unwrap();
+
+        let fetched = store.get_hook("hook-ci").await.unwrap();
+        assert!(
+            matches!(
+                &fetched.action,
+                types::HookAction::CreateIssue { title, assignee, .. }
+                    if title == "Auto issue" && assignee.as_deref() == Some("dev")
+            ),
+            "action should be CreateIssue with correct fields"
+        );
+    }
+
+    // test: enabled_flag_round_trips_correctly
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_enabled_flag_round_trips_correctly(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        // Create a hook with enabled: false
+        let mut hook = make_hook("hook-disabled");
+        hook.enabled = false;
+        store.create_hook(&hook).await.unwrap();
+
+        // List hooks and assert enabled == false
+        let hooks = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert!(!hooks[0].enabled, "hook should be disabled after creation");
+
+        // Update the hook to enabled: true
+        let mut updated = hooks[0].clone();
+        updated.enabled = true;
+        updated.updated_at = Utc::now();
+        store.update_hook(&updated).await.unwrap();
+
+        // Get the hook and assert enabled == true
+        let fetched = store.get_hook("hook-disabled").await.unwrap();
+        assert!(fetched.enabled, "hook should be enabled after update");
+    }
+
+    // test: list_hooks filter by enabled flag
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_list_hooks_filter_by_enabled(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let enabled_hook = make_hook("h-enabled");
+        store.create_hook(&enabled_hook).await.unwrap();
+
+        let mut disabled_hook = make_hook("h-disabled");
+        disabled_hook.enabled = false;
+        store.create_hook(&disabled_hook).await.unwrap();
+
+        let enabled_only = store.list_hooks(Some(true), None).await.unwrap();
+        assert_eq!(enabled_only.len(), 1);
+        assert_eq!(enabled_only[0].id, "h-enabled");
+        assert!(enabled_only[0].enabled);
+
+        let disabled_only = store.list_hooks(Some(false), None).await.unwrap();
+        assert_eq!(disabled_only.len(), 1);
+        assert_eq!(disabled_only[0].id, "h-disabled");
+        assert!(!disabled_only[0].enabled);
+    }
+
+    // test: update_nonexistent_hook_returns_not_found
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_update_nonexistent_hook_returns_not_found(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("no-such-id");
+        let result = store.update_hook(&hook).await;
+        assert!(
+            matches!(result, Err(Error::NotFound)),
+            "updating a non-existent hook should return NotFound, got: {result:?}"
+        );
+    }
+
+    // test: delete_nonexistent_hook_returns_not_found
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_nonexistent_hook_returns_not_found(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let result = store.delete_hook("no-such-id").await;
+        assert!(
+            matches!(result, Err(Error::NotFound)),
+            "deleting a non-existent hook should return NotFound, got: {result:?}"
+        );
+    }
+
+    // test: delete an existing hook succeeds and it's no longer listable
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_hook_removes_it(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+        let hook = make_hook("hook-to-delete");
+        store.create_hook(&hook).await.unwrap();
+
+        // Confirm it exists
+        let before = store.list_hooks(None, None).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Delete it
+        store.delete_hook("hook-to-delete").await.unwrap();
+
+        // Confirm it's gone
+        let after = store.list_hooks(None, None).await.unwrap();
+        assert!(after.is_empty());
+
+        // get_hook should return NotFound
+        let get_result = store.get_hook("hook-to-delete").await;
+        assert!(matches!(get_result, Err(Error::NotFound)));
+    }
+
+    // test: action_type_str is stored correctly in the DB for all action types
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_type_str_stored_correctly_send_message(pool: SqlitePool) {
+        use sqlx::Row;
+        let store = SqliteHookStore::new(pool.clone());
+        let hook = make_hook("hook-sm");
+        // hook already has SendMessage action
+        store.create_hook(&hook).await.unwrap();
+
+        // Query raw action_type column to verify the stored string
+        let row = sqlx::query("SELECT action_type FROM hooks WHERE id = ?")
+            .bind("hook-sm")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let action_type: String = row.get("action_type");
+        assert_eq!(action_type, "send_message");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_type_str_stored_correctly_create_issue(pool: SqlitePool) {
+        use sqlx::Row;
+        let store = SqliteHookStore::new(pool.clone());
+        let mut hook = make_hook("hook-ci2");
+        hook.action = types::HookAction::CreateIssue {
+            title: "title".into(),
+            body: "body".into(),
+            assignee: None,
+            parent: None,
+            start: false,
+        };
+        store.create_hook(&hook).await.unwrap();
+
+        let row = sqlx::query("SELECT action_type FROM hooks WHERE id = ?")
+            .bind("hook-ci2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let action_type: String = row.get("action_type");
+        assert_eq!(action_type, "create_issue");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_action_type_str_stored_correctly_run_shell(pool: SqlitePool) {
+        use sqlx::Row;
+        let store = SqliteHookStore::new(pool.clone());
+        let mut hook = make_hook("hook-rs");
+        hook.action = types::HookAction::RunShell {
+            command: "echo hi".into(),
+            timeout_secs: 10,
+            blocking: false,
+        };
+        store.create_hook(&hook).await.unwrap();
+
+        let row = sqlx::query("SELECT action_type FROM hooks WHERE id = ?")
+            .bind("hook-rs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let action_type: String = row.get("action_type");
+        assert_eq!(action_type, "run_shell");
+    }
+
+    // ── HookExecution CRUD SQLite tests ──────────────────────────────────────
+
+    fn make_execution(hook_id: &str) -> types::HookExecution {
+        types::HookExecution {
+            id: uuid::Uuid::new_v4().to_string(),
+            hook_id: hook_id.into(),
+            triggered_at: Utc::now(),
+            event_payload: serde_json::json!({"type": "test"}),
+            status: types::ExecutionStatus::Running,
+            result: None,
+            completed_at: None,
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_create_and_list(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        // Create a hook first (no FK constraint in schema, but good practice)
+        let hook = make_hook("exec-hook-1");
+        store.create_hook(&hook).await.unwrap();
+
+        // Create an execution
+        let exec = make_execution("exec-hook-1");
+        let exec_id = exec.id.clone();
+        store.create_execution(&exec).await.unwrap();
+
+        // List executions and assert it's there
+        let executions = store.list_executions("exec-hook-1", 10).await.unwrap();
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].id, exec_id);
+        assert_eq!(executions[0].hook_id, "exec-hook-1");
+        assert_eq!(executions[0].status, types::ExecutionStatus::Running);
+        assert!(executions[0].result.is_none());
+        assert!(executions[0].completed_at.is_none());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_update_status(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let hook = make_hook("exec-hook-2");
+        store.create_hook(&hook).await.unwrap();
+
+        // Create execution with status Running
+        let mut exec = make_execution("exec-hook-2");
+        store.create_execution(&exec).await.unwrap();
+
+        // Update execution with status Completed
+        exec.status = types::ExecutionStatus::Completed;
+        exec.result = Some("done".into());
+        exec.completed_at = Some(Utc::now());
+        store.update_execution(&exec).await.unwrap();
+
+        // List executions and assert status is now Completed
+        let executions = store.list_executions("exec-hook-2", 10).await.unwrap();
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].status, types::ExecutionStatus::Completed);
+        assert_eq!(executions[0].result.as_deref(), Some("done"));
+        assert!(executions[0].completed_at.is_some());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_update_to_failed(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let hook = make_hook("exec-hook-3");
+        store.create_hook(&hook).await.unwrap();
+
+        let mut exec = make_execution("exec-hook-3");
+        store.create_execution(&exec).await.unwrap();
+
+        exec.status = types::ExecutionStatus::Failed;
+        exec.result = Some("error: something went wrong".into());
+        exec.completed_at = Some(Utc::now());
+        store.update_execution(&exec).await.unwrap();
+
+        let executions = store.list_executions("exec-hook-3", 10).await.unwrap();
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].status, types::ExecutionStatus::Failed);
+        assert!(executions[0].result.as_deref().unwrap().contains("error"));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_list_default_limit(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let hook = make_hook("exec-hook-limit");
+        store.create_hook(&hook).await.unwrap();
+
+        // Create 25 executions
+        for _ in 0..25 {
+            let exec = make_execution("exec-hook-limit");
+            store.create_execution(&exec).await.unwrap();
+        }
+
+        // List with limit=20 — assert 20 returned
+        let executions = store.list_executions("exec-hook-limit", 20).await.unwrap();
+        assert_eq!(
+            executions.len(),
+            20,
+            "expected 20 executions with limit=20, got {}",
+            executions.len()
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_list_empty_when_no_executions(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let hook = make_hook("exec-hook-empty");
+        store.create_hook(&hook).await.unwrap();
+
+        let executions = store.list_executions("exec-hook-empty", 10).await.unwrap();
+        assert!(executions.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_hook_execution_list_returns_descending_order(pool: SqlitePool) {
+        let store = SqliteHookStore::new(pool);
+
+        let hook = make_hook("exec-hook-order");
+        store.create_hook(&hook).await.unwrap();
+
+        // Create 3 executions with different triggered_at times
+        let base_time = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for i in 0..3_i64 {
+            let exec = types::HookExecution {
+                id: format!("exec-order-{i}"),
+                hook_id: "exec-hook-order".into(),
+                triggered_at: base_time + chrono::Duration::seconds(i),
+                event_payload: serde_json::json!({}),
+                status: types::ExecutionStatus::Running,
+                result: None,
+                completed_at: None,
+            };
+            store.create_execution(&exec).await.unwrap();
+        }
+
+        let executions = store.list_executions("exec-hook-order", 10).await.unwrap();
+        assert_eq!(executions.len(), 3);
+        // Should be in descending order (most recent first)
+        assert_eq!(executions[0].id, "exec-order-2");
+        assert_eq!(executions[1].id, "exec-order-1");
+        assert_eq!(executions[2].id, "exec-order-0");
     }
 }

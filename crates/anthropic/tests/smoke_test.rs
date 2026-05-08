@@ -17,7 +17,12 @@ fn make_request() -> MessageRequest {
     MessageRequest {
         model: "claude-opus-4-5".into(),
         system: None,
-        messages: vec![(Role::User, vec![ContentBlock::Text { text: "hello".into() }])],
+        messages: vec![(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        )],
         max_tokens: 1024,
         tools: vec![],
     }
@@ -82,7 +87,8 @@ async fn test_server_error_returns_err() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(
-            ResponseTemplate::new(401).set_body_string("{\"error\":{\"message\":\"invalid api key\"}}"),
+            ResponseTemplate::new(401)
+                .set_body_string("{\"error\":{\"message\":\"invalid api key\"}}"),
         )
         .mount(&mock_server)
         .await;
@@ -244,7 +250,10 @@ async fn test_malformed_tool_input_json_returns_error() {
 
     let client = Client::with_base_url("test-key".into(), mock_server.uri());
     let result = client.complete(make_request()).await;
-    assert!(result.is_err(), "expected error for malformed tool input JSON, got: {result:?}");
+    assert!(
+        result.is_err(),
+        "expected error for malformed tool input JSON, got: {result:?}"
+    );
     let err_str = result.unwrap_err().to_string();
     assert!(
         err_str.contains("parse error") || err_str.contains("invalid tool input JSON"),
@@ -281,7 +290,11 @@ async fn test_text_content_block_start_does_not_corrupt_output() {
     let client = Client::with_base_url("test-key".into(), mock_server.uri());
     let response = client.complete(make_request()).await.unwrap();
 
-    assert_eq!(response.content.len(), 1, "expected exactly one content block");
+    assert_eq!(
+        response.content.len(),
+        1,
+        "expected exactly one content block"
+    );
     match &response.content[0] {
         ContentBlock::Text { text } => assert_eq!(text, "hello world"),
         other => panic!("expected Text block, got: {other:?}"),

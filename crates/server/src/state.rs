@@ -1,9 +1,9 @@
+use db::HookStore;
+use events::EventBus;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use events::EventBus;
-use db::HookStore;
 use uuid::Uuid;
 
 /// Central application state shared across all request handlers.

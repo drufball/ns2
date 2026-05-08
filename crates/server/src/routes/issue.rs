@@ -6,9 +6,9 @@ use axum::{
 use serde::{Deserialize, Deserializer};
 use types::{Issue, IssueStatus};
 
+use super::Error;
 use crate::harness_spawn::spawn_harness_sync;
 use crate::state::AppState;
-use super::Error;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -94,14 +94,17 @@ pub async fn create_issue(
     State(state): State<AppState>,
     Json(req): Json<CreateIssueRequest>,
 ) -> std::result::Result<(StatusCode, Json<Issue>), Error> {
-    let issue = state.issue_service.create_issue(issues::CreateIssueInput {
-        title: req.title,
-        body: req.body,
-        assignee: req.assignee,
-        parent_id: req.parent_id,
-        blocked_on: req.blocked_on.unwrap_or_default(),
-        branch: req.branch,
-    }).await?;
+    let issue = state
+        .issue_service
+        .create_issue(issues::CreateIssueInput {
+            title: req.title,
+            body: req.body,
+            assignee: req.assignee,
+            parent_id: req.parent_id,
+            blocked_on: req.blocked_on.unwrap_or_default(),
+            branch: req.branch,
+        })
+        .await?;
     Ok((StatusCode::CREATED, Json(issue)))
 }
 
@@ -137,14 +140,20 @@ pub async fn edit_issue(
     Path(id): Path<String>,
     Json(req): Json<EditIssueRequest>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let issue = state.issue_service.edit_issue(id, issues::EditIssueInput {
-        title: req.title,
-        body: req.body,
-        assignee: req.assignee,
-        parent_id: req.parent_id,
-        blocked_on: req.blocked_on,
-        branch: req.branch,
-    }).await?;
+    let issue = state
+        .issue_service
+        .edit_issue(
+            id,
+            issues::EditIssueInput {
+                title: req.title,
+                body: req.body,
+                assignee: req.assignee,
+                parent_id: req.parent_id,
+                blocked_on: req.blocked_on,
+                branch: req.branch,
+            },
+        )
+        .await?;
     Ok(Json(issue))
 }
 
@@ -153,7 +162,10 @@ pub async fn add_comment(
     Path(id): Path<String>,
     Json(req): Json<AddCommentRequest>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let issue = state.issue_service.add_comment(id, req.author, req.body).await?;
+    let issue = state
+        .issue_service
+        .add_comment(id, req.author, req.body)
+        .await?;
     Ok(Json(issue))
 }
 
@@ -218,7 +230,10 @@ pub async fn update_issue_status(
     Path(id): Path<String>,
     Json(req): Json<UpdateIssueStatusRequest>,
 ) -> std::result::Result<Json<Issue>, Error> {
-    let new_status = req.status.parse::<IssueStatus>().map_err(Error::BadRequest)?;
+    let new_status = req
+        .status
+        .parse::<IssueStatus>()
+        .map_err(Error::BadRequest)?;
     let mut issue = state.db.get_issue(id.clone()).await?;
     issue.status = new_status;
     state.db.update_issue(&issue).await?;

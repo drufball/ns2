@@ -16,7 +16,7 @@ pub struct SpecDef {
     pub body: String,
 }
 
-#[must_use] 
+#[must_use]
 pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
     let content = content.trim_start();
     let rest = content.strip_prefix("---\n")?;
@@ -40,7 +40,9 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
             targets.push(line[4..].trim().to_string());
         } else if let Some(v) = line.strip_prefix("verified: ") {
             in_targets = false;
-            let dt = DateTime::parse_from_rfc3339(v.trim()).ok()?.with_timezone(&Utc);
+            let dt = DateTime::parse_from_rfc3339(v.trim())
+                .ok()?
+                .with_timezone(&Utc);
             verified = Some(dt);
         } else if let Some(v) = line.strip_prefix("severity: ") {
             in_targets = false;
@@ -58,10 +60,15 @@ pub fn parse_spec_content(content: &str) -> Option<SpecDef> {
         return None;
     }
 
-    Some(SpecDef { targets, verified, severity, body: body.to_string() })
+    Some(SpecDef {
+        targets,
+        verified,
+        severity,
+        body: body.to_string(),
+    })
 }
 
-#[must_use] 
+#[must_use]
 pub fn format_spec_file(def: &SpecDef) -> String {
     let mut out = String::from("---\ntargets:\n");
     for t in &def.targets {
@@ -80,7 +87,7 @@ pub fn format_spec_file(def: &SpecDef) -> String {
     out
 }
 
-#[must_use] 
+#[must_use]
 pub fn load_spec(path: &Path) -> Option<SpecDef> {
     let content = std::fs::read_to_string(path).ok()?;
     parse_spec_content(&content)
@@ -104,7 +111,9 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
         .filter_map(|entry| {
             let path = entry.ok()?;
             let content = std::fs::read_to_string(&path).ok()?;
-            if let Some(def) = parse_spec_content(&content) { Some((path, def)) } else {
+            if let Some(def) = parse_spec_content(&content) {
+                Some((path, def))
+            } else {
                 tracing::warn!("skipping {}: invalid frontmatter", path.display());
                 None
             }
@@ -119,7 +128,7 @@ pub fn list_specs(root: &Path) -> Vec<(PathBuf, SpecDef)> {
 /// In CI (`CI` env var set) with a git repo: uses commit ancestry — a target is stale if its
 /// last-touching commit is *not* an ancestor of the spec file's last-touching commit.
 /// Locally: compares file mtime against the `verified` timestamp in the spec frontmatter.
-#[must_use] 
+#[must_use]
 pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf> {
     let matched = glob_matched_files(root, &def.targets);
 
@@ -133,10 +142,9 @@ pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf>
         matched
             .into_iter()
             .filter(|rel_target| {
-                workspace::git_last_commit_for_file(root, rel_target)
-                    .is_none_or(|target_commit| {
-                        !workspace::git_is_ancestor_or_equal(root, &target_commit, &spec_commit)
-                    })
+                workspace::git_last_commit_for_file(root, rel_target).is_none_or(|target_commit| {
+                    !workspace::git_is_ancestor_or_equal(root, &target_commit, &spec_commit)
+                })
             })
             .collect()
     } else {
@@ -149,7 +157,11 @@ pub fn stale_files(root: &Path, spec_path: &Path, def: &SpecDef) -> Vec<PathBuf>
                 let dt: DateTime<Utc> = root
                     .join(rel)
                     .metadata()
-                    .and_then(|m| m.modified()).map_or_else(|_| chrono::TimeZone::timestamp_opt(&Utc, 0, 0).unwrap(), Into::into);
+                    .and_then(|m| m.modified())
+                    .map_or_else(
+                        |_| chrono::TimeZone::timestamp_opt(&Utc, 0, 0).unwrap(),
+                        Into::into,
+                    );
                 dt > verified
             })
             .collect()
@@ -160,7 +172,9 @@ fn glob_matched_files(root: &Path, targets: &[String]) -> Vec<PathBuf> {
     let mut matched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for target in targets {
         let pattern = format!("{}/{}", root.display(), target);
-        let Ok(entries) = glob::glob(&pattern) else { continue };
+        let Ok(entries) = glob::glob(&pattern) else {
+            continue;
+        };
         for entry in entries.filter_map(std::result::Result::ok) {
             if let Ok(rel) = entry.strip_prefix(root) {
                 matched.insert(rel.to_path_buf());
@@ -180,7 +194,10 @@ mod tests {
     #[test]
     fn parse_spec_content_extracts_targets() {
         let def = parse_spec_content(SAMPLE).unwrap();
-        assert_eq!(def.targets, vec!["crates/cli/src/**/*.rs", "crates/agents/Cargo.toml"]);
+        assert_eq!(
+            def.targets,
+            vec!["crates/cli/src/**/*.rs", "crates/agents/Cargo.toml"]
+        );
     }
 
     #[test]
@@ -219,7 +236,8 @@ mod tests {
 
     #[test]
     fn parse_spec_content_returns_none_for_invalid_timestamp() {
-        let content = "---\ntargets:\n  - crates/cli/src/**/*.rs\nverified: not-a-timestamp\n---\n\nBody.\n";
+        let content =
+            "---\ntargets:\n  - crates/cli/src/**/*.rs\nverified: not-a-timestamp\n---\n\nBody.\n";
         assert!(parse_spec_content(content).is_none());
     }
 
@@ -248,7 +266,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let def = SpecDef {
-            targets: vec!["crates/cli/src/**/*.rs".to_string(), "crates/agents/Cargo.toml".to_string()],
+            targets: vec![
+                "crates/cli/src/**/*.rs".to_string(),
+                "crates/agents/Cargo.toml".to_string(),
+            ],
             verified: Some(verified),
             severity: Severity::Error,
             body: "Some spec body.".to_string(),
@@ -284,7 +305,10 @@ mod tests {
             body: "Body.".to_string(),
         };
         let formatted = format_spec_file(&def);
-        assert!(!formatted.contains("verified:"), "verified: line must be absent when verified is None");
+        assert!(
+            !formatted.contains("verified:"),
+            "verified: line must be absent when verified is None"
+        );
     }
 
     #[test]
@@ -393,8 +417,14 @@ mod tests {
             body: String::new(),
         };
         let formatted = format_spec_file(&def);
-        assert!(formatted.ends_with("---\n"), "empty body must end with ---\\n");
-        assert!(!formatted.contains("---\n\n"), "must not have blank line after --- when body is empty");
+        assert!(
+            formatted.ends_with("---\n"),
+            "empty body must end with ---\\n"
+        );
+        assert!(
+            !formatted.contains("---\n\n"),
+            "must not have blank line after --- when body is empty"
+        );
     }
 
     #[test]
@@ -487,10 +517,7 @@ mod tests {
         std::fs::write(&path, "fn main() {}").unwrap();
         // Read the actual mtime and use it verbatim as the verified timestamp.
         // modified_dt == verified  →  modified_dt > verified is false  →  not stale.
-        let mtime = std::fs::metadata(&path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         let verified: DateTime<Utc> = mtime.into();
         let def = SpecDef {
             targets: vec!["*.rs".to_string()],

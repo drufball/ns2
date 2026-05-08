@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-04-29T17:13:17Z
+verified: 2026-05-06T18:51:59Z
 ---
 
 # Issue Lifecycle Spec
