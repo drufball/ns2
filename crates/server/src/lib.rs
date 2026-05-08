@@ -1481,6 +1481,102 @@ mod tests {
         );
     }
 
+    /// Resuming a Waiting session via POST /sessions/:id/messages must spawn
+    /// a harness with the linked issue's ID so the issue watcher is active.
+    ///
+    /// When the harness runs and emits Done (without a Stopped event), the
+    /// linked issue should transition from Running → Waiting, proving the
+    /// issue watcher was correctly re-spawned.
+    #[tokio::test]
+    async fn test_waiting_session_resume_via_message_spawns_issue_watcher() {
+        let (app, state) = test_app_with_state().await;
+
+        // 1. Create a Waiting session.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "waiting-resume-test".into(),
+            status: SessionStatus::Waiting,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Waiting)
+            .await
+            .unwrap();
+
+        // 2. Create a Running issue linked to this session.
+        //    We use Running (not Waiting) so the state change to Waiting is
+        //    detectable: harness → Done without Stopped → park_issue(Waiting).
+        let issue = types::Issue {
+            id: "wt01".to_string(),
+            title: "Waiting issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // 3. POST a message to the Waiting session — this must spawn the harness
+        //    with the linked issue's ID.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/messages", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"message": "continue please"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Waiting session must accept messages"
+        );
+
+        // 4. The TestClient stub returns immediately, causing the harness to emit Done
+        //    (no Stopped event). The issue watcher (if correctly spawned) will park
+        //    the issue as Waiting.  The issue should transition Running → Waiting,
+        //    proving the watcher was set up.
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("wt01".to_string()).await.unwrap();
+            if fetched.status == types::IssueStatus::Waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "linked issue did not become Waiting within 5s; status={} — \
+                 this indicates the issue watcher was not spawned",
+                fetched.status
+            );
+        }
+
+        let issue_final = state.db.get_issue("wt01".to_string()).await.unwrap();
+        assert_eq!(
+            issue_final.status,
+            types::IssueStatus::Waiting,
+            "linked issue must be Waiting after harness emits Done (without Stopped), \
+             proving the issue watcher was correctly spawned when Waiting session resumed"
+        );
+    }
+
     // ─── Issue endpoint tests ─────────────────────────────────────────────────
 
     fn issue_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {

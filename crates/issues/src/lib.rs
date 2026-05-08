@@ -220,21 +220,31 @@ impl IssueService {
     }
 
     /// Park an issue after a session ends: optionally add a comment, then set
-    /// status to `Completed` (if `complete` is true) or `Waiting` (if false).
+    /// status to the provided `status` (must be `Waiting` or `Completed`).
     ///
     /// This is called by the issue watcher when it receives a `Stopped` event
     /// from the harness, enabling the comment and status to be set atomically.
     ///
     /// # Errors
     ///
-    /// Returns an error if the issue is not found or the database write fails.
+    /// Returns an error if the issue is not found, the database write fails, or
+    /// `status` is not `Waiting` or `Completed`.
     pub async fn park_issue(
         &self,
         id: &str,
-        complete: bool,
+        status: IssueStatus,
         comment: Option<String>,
         author: Option<String>,
     ) -> Result<()> {
+        match status {
+            IssueStatus::Waiting | IssueStatus::Completed => {}
+            other => {
+                return Err(Error::BadRequest(format!(
+                    "park_issue: status must be Waiting or Completed, got {other}"
+                )));
+            }
+        }
+
         let mut issue = self.db.get_issue(id.to_string()).await?;
         let from = issue.status.clone();
 
@@ -257,19 +267,14 @@ impl IssueService {
             }
         }
 
-        let to = if complete {
-            IssueStatus::Completed
-        } else {
-            IssueStatus::Waiting
-        };
-        issue.status = to.clone();
+        issue.status = status.clone();
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
                 from,
-                to,
+                to: status,
             }));
         Ok(())
     }
@@ -1223,7 +1228,7 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.park_issue("ab12", true, Some("Task done.".into()), None)
+        svc.park_issue("ab12", IssueStatus::Completed, Some("Task done.".into()), None)
             .await
             .unwrap();
 
@@ -1242,7 +1247,7 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.park_issue("ab12", false, None, None).await.unwrap();
+        svc.park_issue("ab12", IssueStatus::Waiting, None, None).await.unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Waiting);
@@ -1257,7 +1262,7 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.park_issue("ab12", true, None, None).await.unwrap();
+        svc.park_issue("ab12", IssueStatus::Completed, None, None).await.unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
@@ -1275,7 +1280,7 @@ mod tests {
 
         svc.park_issue(
             "ab12",
-            true,
+            IssueStatus::Completed,
             Some("Done".into()),
             Some("custom-author".into()),
         )
@@ -1295,12 +1300,45 @@ mod tests {
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        svc.park_issue("ab12", true, Some("summary".into()), None)
+        svc.park_issue("ab12", IssueStatus::Completed, Some("summary".into()), None)
             .await
             .unwrap();
 
         let persisted = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(persisted.comments[0].author, "agent");
+    }
+
+    #[tokio::test]
+    async fn park_issue_rejects_invalid_status() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        let result = svc.park_issue("ab12", IssueStatus::Running, None, None).await;
+        assert!(
+            matches!(result, Err(Error::BadRequest(_))),
+            "park_issue with Running status should return BadRequest"
+        );
+
+        let result = svc.park_issue("ab12", IssueStatus::Failed, None, None).await;
+        assert!(
+            matches!(result, Err(Error::BadRequest(_))),
+            "park_issue with Failed status should return BadRequest"
+        );
+
+        let result = svc.park_issue("ab12", IssueStatus::Open, None, None).await;
+        assert!(
+            matches!(result, Err(Error::BadRequest(_))),
+            "park_issue with Open status should return BadRequest"
+        );
+
+        let result = svc.park_issue("ab12", IssueStatus::Cancelled, None, None).await;
+        assert!(
+            matches!(result, Err(Error::BadRequest(_))),
+            "park_issue with Cancelled status should return BadRequest"
+        );
     }
 
     // --- fail_issue ---

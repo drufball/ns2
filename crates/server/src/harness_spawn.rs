@@ -61,9 +61,13 @@ pub fn spawn_harness_sync(
                         event: SessionEvent::Done,
                     } if sid == session_id => {
                         // Use the Stopped signal if present; otherwise default to Waiting.
-                        let complete = matches!(stopped_status, Some(StopEventStatus::Complete));
+                        let park_status = if matches!(stopped_status, Some(StopEventStatus::Complete)) {
+                            types::IssueStatus::Completed
+                        } else {
+                            types::IssueStatus::Waiting
+                        };
                         let _ = svc
-                            .park_issue(&id, complete, stopped_comment.take(), None)
+                            .park_issue(&id, park_status, stopped_comment.take(), None)
                             .await;
                         break;
                     }

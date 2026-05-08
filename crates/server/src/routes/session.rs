@@ -189,6 +189,7 @@ pub async fn send_message(
         )),
         // `waiting` sessions can receive new messages — they behave like `completed`
         // sessions: spawn a harness if needed and deliver the message to resume work.
+        // IMPORTANT: look up any linked issue so the watcher is re-spawned correctly.
         SessionStatus::Waiting => {
             let mut spawning = state.spawning.lock().await;
             let senders = state.msg_senders.lock().await;
@@ -219,7 +220,17 @@ pub async fn send_message(
             drop(senders);
             drop(spawning);
 
-            let msg_tx = spawn_harness_sync(&state, session, None);
+            // Look up a linked issue so its watcher is re-spawned on resume.
+            let linked_issue_id = state
+                .db
+                .list_issues_by_session_id(id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .map(|issue| issue.id);
+
+            let msg_tx = spawn_harness_sync(&state, session, linked_issue_id);
             msg_tx.send(req.message).await.ok();
             Ok(StatusCode::OK)
         }
