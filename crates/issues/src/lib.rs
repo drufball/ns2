@@ -219,6 +219,61 @@ impl IssueService {
         Ok(())
     }
 
+    /// Park an issue after a session ends: optionally add a comment, then set
+    /// status to `Completed` (if `complete` is true) or `Waiting` (if false).
+    ///
+    /// This is called by the issue watcher when it receives a `Stopped` event
+    /// from the harness, enabling the comment and status to be set atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the issue is not found or the database write fails.
+    pub async fn park_issue(
+        &self,
+        id: &str,
+        complete: bool,
+        comment: Option<String>,
+        author: Option<String>,
+    ) -> Result<()> {
+        let mut issue = self.db.get_issue(id.to_string()).await?;
+        let from = issue.status.clone();
+
+        if let Some(text) = comment {
+            if !text.is_empty() {
+                let comment_author = author
+                    .or_else(|| issue.assignee.clone())
+                    .unwrap_or_else(|| "agent".to_string());
+                let comment_obj = IssueComment {
+                    author: comment_author,
+                    created_at: Utc::now(),
+                    body: text,
+                };
+                issue.comments.push(comment_obj.clone());
+                self.event_bus
+                    .send(SystemEvent::Issue(IssueEvent::CommentAdded {
+                        issue: issue.clone(),
+                        comment: comment_obj,
+                    }));
+            }
+        }
+
+        let to = if complete {
+            IssueStatus::Completed
+        } else {
+            IssueStatus::Waiting
+        };
+        issue.status = to.clone();
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to,
+            }));
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Returns an error if the issue is not found or the database write fails.
@@ -356,10 +411,10 @@ impl IssueService {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
         match issue.status {
-            IssueStatus::Open | IssueStatus::Running => {}
+            IssueStatus::Open | IssueStatus::Running | IssueStatus::Waiting => {}
             _ => {
                 return Err(Error::BadRequest(format!(
-                    "cannot cancel issue {id}: only open or running issues can be cancelled (current status: {})",
+                    "cannot cancel issue {id}: only open, running, or waiting issues can be cancelled (current status: {})",
                     issue.status
                 )));
             }
@@ -399,10 +454,10 @@ impl IssueService {
         // Only `failed`, `completed`, and `cancelled` can be reopened
         let keep_session_id = match issue.status {
             IssueStatus::Failed | IssueStatus::Cancelled => false, // clear session_id → fresh session on next start
-            IssueStatus::Completed => true, // keep session_id → resume history on next start
+            IssueStatus::Completed | IssueStatus::Waiting => true, // keep session_id → resume history on next start
             _ => {
                 return Err(Error::BadRequest(format!(
-                    "cannot reopen issue {id}: only failed, completed, or cancelled issues can be reopened (current status: {})",
+                    "cannot reopen issue {id}: only failed, completed, cancelled, or waiting issues can be reopened (current status: {})",
                     issue.status
                 )));
             }
@@ -1150,6 +1205,97 @@ mod tests {
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
         svc.finish_issue("ab12", Some("summary".into()))
+            .await
+            .unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.comments[0].author, "agent");
+    }
+
+    // --- park_issue ---
+
+    #[tokio::test]
+    async fn park_issue_complete_with_comment_marks_completed_and_adds_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.assignee = Some("swe".into());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue("ab12", true, Some("Task done.".into()), None)
+            .await
+            .unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Completed);
+        assert_eq!(persisted.comments.len(), 1);
+        assert_eq!(persisted.comments[0].body, "Task done.");
+        assert_eq!(persisted.comments[0].author, "swe");
+    }
+
+    #[tokio::test]
+    async fn park_issue_waiting_with_no_comment_marks_waiting_no_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue("ab12", false, None, None).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Waiting);
+        assert_eq!(persisted.comments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn park_issue_complete_no_comment_marks_completed_no_comment() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue("ab12", true, None, None).await.unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::Completed);
+        assert_eq!(persisted.comments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn park_issue_uses_explicit_author_when_provided() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.assignee = Some("bot".into());
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue(
+            "ab12",
+            true,
+            Some("Done".into()),
+            Some("custom-author".into()),
+        )
+        .await
+        .unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.comments[0].author, "custom-author");
+    }
+
+    #[tokio::test]
+    async fn park_issue_falls_back_to_agent_when_no_assignee_and_no_author() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        issue.assignee = None;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue("ab12", true, Some("summary".into()), None)
             .await
             .unwrap();
 

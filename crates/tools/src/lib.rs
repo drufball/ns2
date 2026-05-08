@@ -2,6 +2,24 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// ── Stop signal types ─────────────────────────────────────────────────────────
+
+/// Indicates whether the agent is done or pausing for human input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopStatus {
+    Complete,
+    Waiting,
+}
+
+/// Payload sent over the stop channel when the agent calls the `stop` tool.
+#[derive(Debug, Clone)]
+pub struct StopSignal {
+    pub status: StopStatus,
+    pub comment: Option<String>,
+}
+
+// ── Error / Result ────────────────────────────────────────────────────────────
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io error: {0}")]
@@ -281,6 +299,87 @@ impl Tool for EditTool {
         tokio::fs::write(&resolved, new_contents.as_bytes()).await?;
 
         Ok(format!("Replaced {count} occurrence(s) in {resolved_str}"))
+    }
+}
+
+// ── StopTool ──────────────────────────────────────────────────────────────────
+
+/// A tool that signals the harness to stop the current session.
+///
+/// When the agent calls `stop`, the `execute` method sends a `StopSignal` on
+/// the provided `mpsc::Sender` and returns `"Session stopped."`. The harness
+/// loop reads the signal after `end_turn` to determine the final session status.
+pub struct StopTool {
+    tx: tokio::sync::mpsc::Sender<StopSignal>,
+}
+
+impl StopTool {
+    /// Create a new `StopTool` and a receiver for the stop signal.
+    ///
+    /// The returned `(Receiver, StopTool)` pair should be used together:
+    /// the `StopTool` is given to the harness as part of the tools list, and
+    /// the `Receiver` is polled by the harness after `end_turn` to check if
+    /// the agent signalled a stop.
+    #[must_use]
+    pub fn new_pair() -> (tokio::sync::mpsc::Receiver<StopSignal>, Self) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        (rx, Self { tx })
+    }
+}
+
+#[async_trait]
+impl Tool for StopTool {
+    fn definition(&self) -> types::ToolDefinition {
+        types::ToolDefinition {
+            name: "stop".into(),
+            description: "Stop the session. Call this when you are done or need to pause for human input.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["complete", "waiting"],
+                        "description": "Whether the task is complete or waiting for human input."
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "Optional comment to add to the issue before stopping."
+                    }
+                },
+                "required": ["status"]
+            }),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value, _cwd: Option<&Path>) -> Result<String> {
+        let status_str = input
+            .get("status")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::InvalidInput("missing required field: status".into()))?;
+
+        let status = match status_str {
+            "complete" => StopStatus::Complete,
+            "waiting" => StopStatus::Waiting,
+            other => {
+                return Err(Error::InvalidInput(format!(
+                    "invalid status '{other}': must be 'complete' or 'waiting'"
+                )));
+            }
+        };
+
+        let comment = input
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty());
+
+        let signal = StopSignal { status, comment };
+
+        // Fire-and-forget: if the receiver is gone, the signal is lost but we
+        // still return success so the tool result reaches the model.
+        let _ = self.tx.try_send(signal);
+
+        Ok("Session stopped.".to_string())
     }
 }
 
@@ -714,5 +813,87 @@ mod tests {
     #[test]
     fn edit_tool_definition_has_correct_name() {
         assert_eq!(EditTool.definition().name, "edit");
+    }
+
+    // ── StopTool tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_tool_definition_has_correct_name() {
+        let (_rx, tool) = StopTool::new_pair();
+        assert_eq!(tool.definition().name, "stop");
+    }
+
+    #[test]
+    fn stop_tool_schema_requires_status() {
+        let (_rx, tool) = StopTool::new_pair();
+        let def = tool.definition();
+        let required = def.input_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("status")));
+    }
+
+    #[tokio::test]
+    async fn stop_tool_execute_sends_complete_signal() {
+        let (mut rx, tool) = StopTool::new_pair();
+        let result = tool
+            .execute(
+                serde_json::json!({"status": "complete", "comment": "done"}),
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert_eq!(result.unwrap(), "Session stopped.");
+
+        let signal = rx.try_recv().expect("should have received a signal");
+        assert_eq!(signal.status, StopStatus::Complete);
+        assert_eq!(signal.comment, Some("done".to_string()));
+    }
+
+    #[tokio::test]
+    async fn stop_tool_execute_sends_waiting_signal() {
+        let (mut rx, tool) = StopTool::new_pair();
+        let result = tool
+            .execute(serde_json::json!({"status": "waiting"}), None)
+            .await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        let signal = rx.try_recv().expect("should have received a signal");
+        assert_eq!(signal.status, StopStatus::Waiting);
+        assert!(signal.comment.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_tool_execute_missing_status_returns_error() {
+        let (_rx, tool) = StopTool::new_pair();
+        let result = tool.execute(serde_json::json!({}), None).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn stop_tool_execute_invalid_status_returns_error() {
+        let (_rx, tool) = StopTool::new_pair();
+        let result = tool
+            .execute(serde_json::json!({"status": "bogus"}), None)
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn stop_tool_execute_empty_comment_produces_none() {
+        let (mut rx, tool) = StopTool::new_pair();
+        let result = tool
+            .execute(
+                serde_json::json!({"status": "complete", "comment": ""}),
+                None,
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let signal = rx.try_recv().expect("should have received a signal");
+        assert!(
+            signal.comment.is_none(),
+            "empty comment string should be treated as None"
+        );
     }
 }

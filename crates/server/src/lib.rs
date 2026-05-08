@@ -1310,12 +1310,12 @@ mod tests {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             let session = state.db.get_session(session_id).await.unwrap();
-            if session.status == SessionStatus::Completed {
+            if session.status == SessionStatus::Waiting {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "session did not reach Completed within 3s; status={}",
+                "session did not reach Waiting within 3s; status={}",
                 session.status
             );
         }
@@ -2011,12 +2011,12 @@ mod tests {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Completed {
+            if issue.status == IssueStatus::Waiting {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "issue did not auto-complete within 5 seconds; status={}",
+                "issue did not transition to waiting within 5 seconds; status={}",
                 issue.status
             );
         }
@@ -2855,10 +2855,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    // ─── issue_watcher: final turn text posted as comment ─────────────────────
+    // ─── issue_watcher: session done transitions issue to Waiting ────────────
 
     #[tokio::test]
     async fn test_issue_watcher_posts_final_turn_as_comment_on_session_done() {
+        // Previously this test verified auto-comment behaviour. Now the issue
+        // watcher only posts a comment when the agent explicitly calls the
+        // `stop` tool with a comment. Without a stop signal, the issue
+        // transitions to `Waiting` with no new comment.
         let (app, state) = test_app_with_state().await;
 
         let create_resp = app
@@ -2867,7 +2871,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Watcher comment test",
+                    "title": "Watcher waiting test",
                     "body": "Please respond",
                     "assignee": "swe-agent"
                 }),
@@ -2893,37 +2897,27 @@ mod tests {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Completed {
+            if issue.status == IssueStatus::Waiting {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "issue did not auto-complete within 5 seconds; status={}",
+                "issue did not transition to waiting within 5 seconds; status={}",
                 issue.status
             );
         }
 
         let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-        assert_eq!(issue.status, IssueStatus::Completed);
-
+        assert_eq!(issue.status, IssueStatus::Waiting);
+        // No auto-comment added — only the agent calling stop with a comment produces a comment.
         let agent_comments: Vec<_> = issue
             .comments
             .iter()
             .filter(|c| c.author == "swe-agent")
             .collect();
         assert!(
-            !agent_comments.is_empty(),
-            "expected at least one comment from 'swe-agent', got comments: {:?}",
-            issue.comments
-        );
-
-        let has_stub_text = agent_comments
-            .iter()
-            .any(|c| c.body.contains("stub response"));
-        assert!(
-            has_stub_text,
-            "expected a comment containing 'stub response', got: {:?}",
-            agent_comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+            agent_comments.is_empty(),
+            "expected no auto-comment when stop tool is not called, got: {agent_comments:?}",
         );
     }
 

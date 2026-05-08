@@ -187,6 +187,42 @@ pub async fn send_message(
         SessionStatus::Cancelled => Err(Error::BadRequest(
             "session is in cancelled state and cannot accept messages; reopen it first".into(),
         )),
+        // `waiting` sessions can receive new messages — they behave like `completed`
+        // sessions: spawn a harness if needed and deliver the message to resume work.
+        SessionStatus::Waiting => {
+            let mut spawning = state.spawning.lock().await;
+            let senders = state.msg_senders.lock().await;
+
+            if let Some(tx) = senders.get(&id) {
+                let tx = tx.clone();
+                drop(senders);
+                drop(spawning);
+                tx.send(req.message).await.ok();
+                return Ok(StatusCode::OK);
+            }
+
+            if spawning.contains(&id) {
+                drop(senders);
+                drop(spawning);
+                for _ in 0..40 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    let senders = state.msg_senders.lock().await;
+                    if let Some(tx) = senders.get(&id) {
+                        tx.send(req.message).await.ok();
+                        return Ok(StatusCode::OK);
+                    }
+                }
+                return Ok(StatusCode::OK);
+            }
+
+            spawning.insert(id);
+            drop(senders);
+            drop(spawning);
+
+            let msg_tx = spawn_harness_sync(&state, session, None);
+            msg_tx.send(req.message).await.ok();
+            Ok(StatusCode::OK)
+        }
     }
 }
 

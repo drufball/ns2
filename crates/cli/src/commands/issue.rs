@@ -10,7 +10,7 @@ use types::{Issue, IssueStatus};
 pub const fn issue_is_terminal(status: &IssueStatus) -> bool {
     matches!(
         status,
-        IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled
+        IssueStatus::Completed | IssueStatus::Failed | IssueStatus::Cancelled | IssueStatus::Waiting
     )
 }
 
@@ -736,6 +736,11 @@ mod tests {
     }
 
     #[test]
+    fn issue_is_terminal_waiting() {
+        assert!(issue_is_terminal(&types::IssueStatus::Waiting));
+    }
+
+    #[test]
     fn issue_is_not_terminal_open() {
         assert!(!issue_is_terminal(&types::IssueStatus::Open));
     }
@@ -753,6 +758,12 @@ mod tests {
     #[test]
     fn all_nodes_terminal_single_completed_leaf() {
         let roots = vec![make_node(types::IssueStatus::Completed, vec![])];
+        assert!(all_nodes_terminal(&roots));
+    }
+
+    #[test]
+    fn all_nodes_terminal_single_waiting_is_terminal() {
+        let roots = vec![make_node(types::IssueStatus::Waiting, vec![])];
         assert!(all_nodes_terminal(&roots));
     }
 

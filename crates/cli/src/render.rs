@@ -124,6 +124,16 @@ pub fn format_session_event(event: &SessionEvent) -> Option<String> {
             ContentBlock::ToolResult { content, .. } => Some(format!("[result: {content}]\n")),
         },
         Done => Some("[done]\n".to_string()),
+        Stopped { status, comment } => {
+            let status_str = match status {
+                events::StopEventStatus::Complete => "complete",
+                events::StopEventStatus::Waiting => "waiting",
+            };
+            Some(comment.as_ref().map_or_else(
+                || format!("[stopped: {status_str}]\n"),
+                |c| format!("[stopped: {status_str} — {c}]\n"),
+            ))
+        }
         Error { message } => Some(format!("[error] {message}\n")),
     }
 }
@@ -236,6 +246,7 @@ pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'stat
         IssueStatus::Failed => ("✗".to_string(), "failed"),
         IssueStatus::Open => ("●".to_string(), "open"),
         IssueStatus::Cancelled => ("⊘".to_string(), "cancelled"),
+        IssueStatus::Waiting => ("⏸".to_string(), "waiting"),
     }
 }
 
@@ -341,6 +352,7 @@ pub fn session_status_symbol(status: &SessionStatus, tick: usize) -> (String, &'
         SessionStatus::Completed => ("✔".to_string(), "completed"),
         SessionStatus::Failed => ("✗".to_string(), "failed"),
         SessionStatus::Cancelled => ("●".to_string(), "cancelled"),
+        SessionStatus::Waiting => ("⏸".to_string(), "waiting"),
     }
 }
 

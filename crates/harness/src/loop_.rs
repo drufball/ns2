@@ -5,9 +5,10 @@ use crate::prompt::build_system_prompt;
 use crate::retry::{complete_with_retry, is_rate_limit, max_retries};
 use crate::HarnessConfig;
 use chrono::Utc;
-use events::SessionEvent;
+use events::{SessionEvent, StopEventStatus};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+use tools::{StopSignal, StopStatus, StopTool};
 use types::{ContentBlock, Role, SessionStatus, Turn};
 use uuid::Uuid;
 
@@ -16,11 +17,15 @@ use uuid::Uuid;
 /// Hook subprocesses are started with `config.cwd` as their working directory so they
 /// operate on the session's worktree rather than the server's cwd.
 ///
+/// Returns the stop signal (if the agent called the `stop` tool) and an optional
+/// injected message (if a Stop hook wants to re-enter the loop).
+///
 /// # Errors
 ///
 /// Returns an error if the LLM call fails with a non-rate-limit error, or if any
 /// database write fails.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tool_dispatch_loop(
     config: &HarnessConfig,
     client: &Arc<dyn anthropic::AnthropicClient>,
@@ -29,9 +34,12 @@ pub async fn run_tool_dispatch_loop(
     hooks: &agents::AgentHooks,
     system: Option<String>,
     mut messages: Vec<(Role, Vec<ContentBlock>)>,
-) -> crate::Result<Option<String>> {
+    stop_rx: &mut mpsc::Receiver<StopSignal>,
+) -> crate::Result<(Option<StopSignal>, Option<String>)> {
     let tool_definitions: Vec<types::ToolDefinition> =
         config.tools.iter().map(|t| t.definition()).collect();
+
+    let mut stop_signal: Option<StopSignal> = None;
 
     loop {
         let request = anthropic::MessageRequest {
@@ -95,11 +103,15 @@ pub async fn run_tool_dispatch_loop(
         match response.stop_reason.as_str() {
             "tool_use" => { /* dispatch tools below */ }
             "end_turn" => {
+                // Check if a stop signal was sent during the preceding tool calls
+                if let Ok(sig) = stop_rx.try_recv() {
+                    stop_signal = Some(sig);
+                }
                 // Run Stop hooks; if any exit non-zero, return their stdout as an injected message
                 if let Some(injected) =
                     run_stop_hooks(hooks, config.session.id, config.cwd.as_deref()).await
                 {
-                    return Ok(Some(injected));
+                    return Ok((stop_signal, Some(injected)));
                 }
                 break;
             }
@@ -159,6 +171,11 @@ pub async fn run_tool_dispatch_loop(
             }
         }
 
+        // After executing tools, drain the stop channel (the stop tool may have fired)
+        if let Ok(sig) = stop_rx.try_recv() {
+            stop_signal = Some(sig);
+        }
+
         // Store tool result turn in DB
         let tool_result_turn = Turn {
             id: Uuid::new_v4(),
@@ -190,7 +207,7 @@ pub async fn run_tool_dispatch_loop(
         messages.push((Role::User, tool_result_blocks));
     }
 
-    Ok(None)
+    Ok((stop_signal, None))
 }
 
 /// # Errors
@@ -270,6 +287,11 @@ pub async fn run(
         }
     };
 
+    // Create the stop channel. The StopTool is injected into config.tools so that
+    // the agent can call it; we hold the receiver to read the signal after end_turn.
+    let (mut stop_rx, stop_tool) = StopTool::new_pair();
+    config.tools.push(Arc::new(stop_tool));
+
     loop {
         // Wait for the next user message. When the sender is dropped, recv() returns None → exit.
         let Some(message) = msg_rx.recv().await else {
@@ -289,7 +311,7 @@ pub async fn run(
         // Run the tool dispatch loop. It returns Some(injected_message) when a Stop
         // hook blocks completion and injects a message for the next turn.
         let mut current_history = history;
-        loop {
+        let final_stop_signal = loop {
             match run_tool_dispatch_loop(
                 &config,
                 &client,
@@ -298,20 +320,39 @@ pub async fn run(
                 &hooks,
                 system.clone(),
                 current_history,
+                &mut stop_rx,
             )
             .await?
             {
-                None => break, // normal completion
-                Some(injected) => {
+                (signal, None) => break signal, // normal completion
+                (_, Some(injected)) => {
                     // Stop hook rejected; inject the message and continue
                     persist_user_message(&db, config.session.id, &injected, &event_tx).await?;
                     current_history = load_history(&db, config.session.id).await?;
                 }
             }
+        };
+
+        // Determine the final session status from the stop signal (or default to Waiting).
+        let final_status = match &final_stop_signal {
+            Some(sig) if sig.status == StopStatus::Complete => SessionStatus::Completed,
+            _ => SessionStatus::Waiting,
+        };
+
+        // Emit Stopped event before Done so issue watchers can act on it.
+        if let Some(sig) = &final_stop_signal {
+            let ev_status = match sig.status {
+                StopStatus::Complete => StopEventStatus::Complete,
+                StopStatus::Waiting => StopEventStatus::Waiting,
+            };
+            let _ = event_tx.send(SessionEvent::Stopped {
+                status: ev_status,
+                comment: sig.comment.clone(),
+            });
         }
 
-        // Mark session completed and emit done event
-        db.update_session_status(config.session.id, SessionStatus::Completed)
+        // Mark session with final status and emit done event
+        db.update_session_status(config.session.id, final_status)
             .await?;
         let _ = event_tx.send(SessionEvent::Done);
 

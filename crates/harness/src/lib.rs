@@ -148,6 +148,22 @@ mod tests {
         mock_db
     }
 
+    /// Test helper: run the tool dispatch loop with a throw-away stop channel.
+    /// Used in tests that only need to verify tool dispatch behaviour and don't
+    /// care about the stop signal.
+    async fn run_tool_dispatch_loop_test(
+        config: &HarnessConfig,
+        client: &Arc<dyn AnthropicClient>,
+        db: &Arc<dyn db::Db>,
+        event_tx: &tokio::sync::broadcast::Sender<SessionEvent>,
+        hooks: &agents::AgentHooks,
+        history: Vec<(types::Role, Vec<types::ContentBlock>)>,
+    ) -> crate::Result<(Option<tools::StopSignal>, Option<String>)> {
+        let (mut stop_rx, _stop_tool) = tools::StopTool::new_pair();
+        run_tool_dispatch_loop(config, client, db, event_tx, hooks, None, history, &mut stop_rx)
+            .await
+    }
+
     // ── Worktree tests ────────────────────────────────────────────────────────
 
     /// `ensure_worktree` with an existing directory returns `Some(path)` without running git.
@@ -393,7 +409,7 @@ mod tests {
         mock_db
             .expect_list_issues_by_session_id()
             .returning(|_| Ok(vec![]));
-        // Expect Running then Completed
+        // Expect Running then Waiting (default when stop tool is not called)
         let mut seq = mockall::Sequence::new();
         mock_db
             .expect_update_session_status()
@@ -404,7 +420,7 @@ mod tests {
         mock_db
             .expect_update_session_status()
             .withf(move |id, status| {
-                *id == session_id && *status == types::SessionStatus::Completed
+                *id == session_id && *status == types::SessionStatus::Waiting
             })
             .times(1)
             .in_sequence(&mut seq)
@@ -1553,6 +1569,7 @@ mod tests {
                 } => "ContentBlockDone(ToolResult)",
                 SessionEvent::TurnDone { .. } => "TurnDone",
                 SessionEvent::Done => "SessionDone",
+                SessionEvent::Stopped { .. } => "Stopped",
                 SessionEvent::Error { .. } => "Error",
                 SessionEvent::ToolUseStart { .. } => "ToolUseStart",
                 SessionEvent::ToolUseDone { .. } => "ToolUseDone",
@@ -2498,10 +2515,11 @@ mod tests {
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
         let result =
-            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+            run_tool_dispatch_loop_test(&config, &client, &db, &event_tx, &hooks, history)
                 .await
                 .unwrap();
-        assert!(result.is_none(), "should complete normally");
+        let (_, injected_msg) = result;
+        assert!(injected_msg.is_none(), "should complete normally");
 
         let results = results_store.lock().unwrap();
         assert_eq!(results.len(), 1, "expected one tool result");
@@ -2560,7 +2578,7 @@ mod tests {
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+        run_tool_dispatch_loop_test(&config, &client, &db, &event_tx, &hooks, history)
             .await
             .unwrap();
 
@@ -2626,7 +2644,7 @@ mod tests {
         let client: Arc<dyn AnthropicClient> = Arc::new(ToolUseClient::new());
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
-        run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+        run_tool_dispatch_loop_test(&config, &client, &db, &event_tx, &hooks, history)
             .await
             .unwrap();
 
@@ -2667,11 +2685,11 @@ mod tests {
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
         let result =
-            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+            run_tool_dispatch_loop_test(&config, &client, &db, &event_tx, &hooks, history)
                 .await
                 .unwrap();
         assert!(
-            result.is_none(),
+            result.1.is_none(),
             "stop hook exit 0 must return None (normal completion)"
         );
     }
@@ -2704,18 +2722,327 @@ mod tests {
         let db: Arc<dyn db::Db> = Arc::new(mock_db);
 
         let result =
-            run_tool_dispatch_loop(&config, &client, &db, &event_tx, &hooks, None, history)
+            run_tool_dispatch_loop_test(&config, &client, &db, &event_tx, &hooks, history)
                 .await
                 .unwrap();
         assert!(
-            result.is_some(),
+            result.1.is_some(),
             "stop hook exit 1 must inject a user message"
         );
-        let injected = result.unwrap();
+        let injected = result.1.unwrap();
         assert!(
             injected.contains("do more work"),
             "injected message must contain hook stdout, got: {injected:?}"
         );
+    }
+
+    // ── Stop tool integration tests (GH#121) ─────────────────────────────────
+
+    /// A client that first returns `tool_use` for "stop" with complete status, then `end_turn`.
+    struct StopCompleteClient {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl StopCompleteClient {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AnthropicClient for StopCompleteClient {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_stop".into(),
+                        name: "stop".into(),
+                        input: serde_json::json!({"status": "complete", "comment": "Task done."}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                })
+            } else {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "All done.".into(),
+                    }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 10,
+                    output_tokens: 3,
+                })
+            }
+        }
+    }
+
+    /// A client that calls stop with `status=waiting` (no comment), then `end_turn`.
+    struct StopWaitingClient {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl StopWaitingClient {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AnthropicClient for StopWaitingClient {
+        async fn complete(&self, _request: MessageRequest) -> anthropic::Result<MessageResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_stop".into(),
+                        name: "stop".into(),
+                        input: serde_json::json!({"status": "waiting"}),
+                    }],
+                    stop_reason: "tool_use".into(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                })
+            } else {
+                Ok(MessageResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "Pausing.".into(),
+                    }],
+                    stop_reason: "end_turn".into(),
+                    input_tokens: 10,
+                    output_tokens: 3,
+                })
+            }
+        }
+    }
+
+    /// Scenario 1: Agent calls stop with status=complete → session becomes Completed,
+    /// Stopped event emitted with Complete + comment, Done emitted.
+    #[tokio::test]
+    async fn test_stop_complete_sets_session_completed_and_emits_stopped_event() {
+        let session = make_session();
+        let session_id = session.id;
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
+
+        let mut seq = mockall::Sequence::new();
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| *id == session_id && *status == types::SessionStatus::Running)
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| {
+                *id == session_id && *status == types::SessionStatus::Completed
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+            cwd: None,
+        };
+        let client = Arc::new(StopCompleteClient::new());
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("do something".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Must emit Stopped{Complete, "Task done."} before Done
+        let stopped_idx = events.iter().position(|e| {
+            matches!(
+                e,
+                SessionEvent::Stopped {
+                    status: events::StopEventStatus::Complete,
+                    comment: Some(c),
+                } if c == "Task done."
+            )
+        });
+        let done_idx = events.iter().position(|e| matches!(e, SessionEvent::Done));
+
+        assert!(
+            stopped_idx.is_some(),
+            "expected Stopped{{Complete, 'Task done.'}} event"
+        );
+        assert!(done_idx.is_some(), "expected Done event");
+        assert!(
+            stopped_idx.unwrap() < done_idx.unwrap(),
+            "Stopped must come before Done"
+        );
+    }
+
+    /// Scenario 2: Agent calls stop with status=waiting → session becomes Waiting,
+    /// Stopped event emitted with Waiting + no comment, Done emitted.
+    #[tokio::test]
+    async fn test_stop_waiting_sets_session_waiting_and_emits_stopped_event() {
+        let session = make_session();
+        let session_id = session.id;
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
+
+        let mut seq = mockall::Sequence::new();
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| *id == session_id && *status == types::SessionStatus::Running)
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| {
+                *id == session_id && *status == types::SessionStatus::Waiting
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+            cwd: None,
+        };
+        let client = Arc::new(StopWaitingClient::new());
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("do something".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Stopped event with Waiting and no comment
+        let stopped = events.iter().find(|e| {
+            matches!(
+                e,
+                SessionEvent::Stopped {
+                    status: events::StopEventStatus::Waiting,
+                    comment: None,
+                }
+            )
+        });
+        assert!(
+            stopped.is_some(),
+            "expected Stopped{{Waiting, None}} event, got: {events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
+    }
+
+    /// Scenario 3: Agent ends without calling stop → session becomes Waiting,
+    /// no Stopped event emitted.
+    #[tokio::test]
+    async fn test_no_stop_tool_call_sets_session_waiting_no_stopped_event() {
+        let session = make_session();
+        let session_id = session.id;
+
+        let mut mock_db = MockTestDb::new();
+        mock_db.expect_create_turn().returning(|_| Ok(()));
+        mock_db
+            .expect_create_content_block()
+            .returning(|_, _, _, _| Ok(()));
+        mock_db.expect_list_turns().returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_content_blocks()
+            .returning(|_| Ok(vec![]));
+        mock_db
+            .expect_list_issues_by_session_id()
+            .returning(|_| Ok(vec![]));
+
+        let mut seq = mockall::Sequence::new();
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| *id == session_id && *status == types::SessionStatus::Running)
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+        mock_db
+            .expect_update_session_status()
+            .withf(move |id, status| {
+                *id == session_id && *status == types::SessionStatus::Waiting
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+
+        let config = HarnessConfig {
+            session: session.clone(),
+            model: "claude-opus-4-5".into(),
+            tools: vec![],
+            git_root: None,
+            cwd: None,
+        };
+        let client = Arc::new(StubClient);
+        let db = Arc::new(mock_db);
+        let (event_tx, mut event_rx) = broadcast::channel(64);
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        msg_tx.send("hello".into()).await.unwrap();
+        drop(msg_tx);
+
+        run(config, client, db, event_tx, msg_rx).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
+        }
+
+        // No Stopped event
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Stopped { .. })),
+            "must NOT emit Stopped when stop tool was not called"
+        );
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::Done)));
     }
 
     // ── GH#47: 429 rate-limit retry tests ────────────────────────────────────

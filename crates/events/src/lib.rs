@@ -43,12 +43,29 @@ pub enum SessionEvent {
         name: String,
         output: String,
     },
+    /// Emitted just before `Done` when the agent explicitly called the `stop` tool.
+    /// Carries the stop status and an optional comment to add to the linked issue.
+    Stopped {
+        status: StopEventStatus,
+        comment: Option<String>,
+    },
     /// Emitted when the session finishes successfully.  The `session_id` is on
     /// the outer `SystemEvent::Session { session_id, .. }` wrapper.
     Done,
     Error {
         message: String,
     },
+}
+
+/// The status value carried by `SessionEvent::Stopped`.
+///
+/// Mirrors `tools::StopStatus` but lives in `events` so that crates
+/// consuming the event bus do not need to depend on the `tools` crate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopEventStatus {
+    Complete,
+    Waiting,
 }
 
 // ── IssueEvent ────────────────────────────────────────────────────────────────
@@ -396,6 +413,34 @@ mod tests {
         assert_eq!(v["type"], "done");
         let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, SessionEvent::Done));
+    }
+
+    #[test]
+    fn session_event_stopped_complete_serde_round_trip() {
+        let ev = SessionEvent::Stopped {
+            status: StopEventStatus::Complete,
+            comment: Some("all done".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "stopped");
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SessionEvent::Stopped { status: StopEventStatus::Complete, comment: Some(ref c) } if c == "all done")
+        );
+    }
+
+    #[test]
+    fn session_event_stopped_waiting_no_comment_serde_round_trip() {
+        let ev = SessionEvent::Stopped {
+            status: StopEventStatus::Waiting,
+            comment: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SessionEvent::Stopped { status: StopEventStatus::Waiting, comment: None })
+        );
     }
 
     #[test]
