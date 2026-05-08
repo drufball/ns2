@@ -13,7 +13,7 @@ Create an issue, assign it to an agent, start a session, wait for completion, an
 git init /tmp/ns2-smoke && cd /tmp/ns2-smoke
 git commit --allow-empty -m "init"
 ns2 server start
-ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion."
+ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion. When you are done, call the stop tool with status='complete' and a brief comment summarizing what you did."
 ```
 
 ## Steps
@@ -59,7 +59,7 @@ ns2 issue list --status completed
 
 Expected: the issue shows with status `completed`.
 
-### Step 6: Verify the agent posted a final-turn comment automatically
+### Step 6: Verify the agent posted a comment via the stop tool
 
 ```bash
 curl -sf "http://localhost:9876/issues/$ISSUE" | python3 -c "
@@ -72,7 +72,7 @@ print('OK' if agent_comments else 'FAIL — no agent comment found')
 "
 ```
 
-Expected: `OK` — the harness automatically posts the agent's final turn text as a comment with `author == "swe"`.
+Expected: `OK` — the agent explicitly called the stop tool with a comment, which is posted with `author == "swe"`.
 
 ### Step 7: Mark it done with a completion comment
 
@@ -90,6 +90,17 @@ ns2 issue comment --id "$ISSUE" --body "Good work!" --author reviewer
 
 Expected: command exits 0.
 
+## Waiting Status
+
+If an agent's session ends without calling the stop tool, the issue transitions to
+`waiting` (not `completed`). This lets operators know the agent stopped unexpectedly
+and the issue needs attention.
+
+```bash
+# An issue linked to a session that ended without stop tool → status = waiting
+ns2 issue list --status waiting
+```
+
 ## Acceptance Criteria
 
 - [ ] `ns2 issue new` prints a 4-character issue ID to stdout
@@ -97,8 +108,10 @@ Expected: command exits 0.
 - [ ] `ns2 issue start` creates a session linked to the issue and sets status to `running`
 - [ ] The session uses the issue's assignee as the agent type
 - [ ] `ns2 issue wait` blocks until the issue reaches a terminal state and exits 0
-- [ ] When the session completes, the agent's final turn text is automatically posted as a comment (`author == assignee`)
+- [ ] When the agent calls `stop(status="complete", comment="...")`, the comment is posted and the issue becomes `completed`
+- [ ] When the agent calls `stop(status="waiting")`, the issue becomes `waiting`
+- [ ] When the session ends without the agent calling the stop tool, the issue becomes `waiting` with no auto-comment
 - [ ] `ns2 issue complete` adds a manual summary comment
 - [ ] `ns2 issue comment` adds comments with the specified author
-- [ ] Issue status transitions: open → running → completed
+- [ ] Issue status transitions: open → running → completed (via stop tool) or open → running → waiting (no stop tool)
 - [ ] No panics or unhandled errors in server output
