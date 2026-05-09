@@ -24,7 +24,14 @@ ns2 issue list
 Work in ns2 is managed by creating issues. Every issue is given a dedicated agent session to complete the issue based on `--assignee`.
 
 ```bash
-# Create and immediately start
+# Create, start, and wait in one command
+id=$(ns2 issue new --title "..." --body "..." --assignee <agent> --status in_progress --wait)
+```
+
+Keep the alternative 2-step pattern for cases where you need the ID before waiting:
+
+```bash
+# Two-step: get ID first, then start
 id=$(ns2 issue new --title "..." --body "..." --assignee <agent>)
 ns2 issue set-status --id "$id" --status in_progress
 ```
