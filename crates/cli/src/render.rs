@@ -510,4 +510,17 @@ mod tests {
         assert_eq!(sym, "⏸");
         assert_eq!(label, "waiting");
     }
+
+    // ── InProgress symbol test ────────────────────────────────────────────────
+
+    #[test]
+    fn issue_status_symbol_in_progress_returns_spinner() {
+        let (sym, label) = issue_status_symbol(&IssueStatus::InProgress, 0);
+        // The symbol must be a known braille spinner character.
+        assert!(
+            SPINNER_FRAMES.contains(&sym.chars().next().expect("symbol must be non-empty")),
+            "in_progress symbol must be a spinner character, got: {sym:?}"
+        );
+        assert_eq!(label, "in_progress");
+    }
 }

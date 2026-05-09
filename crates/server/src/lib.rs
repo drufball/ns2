@@ -4653,4 +4653,148 @@ mod tests {
             "error message must hint at `reopen`, got: {err_msg}"
         );
     }
+
+    // ─── Test 2: Running issue with Running session blocks in_progress ────────
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_running_issue_with_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a Running session.
+        let running_session_id = Uuid::new_v4();
+        let running_session = types::Session {
+            id: running_session_id,
+            name: "running-session".into(),
+            status: types::SessionStatus::Running,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&running_session).await.unwrap();
+
+        // Create an issue in Running state with the running session.
+        let issue = types::Issue {
+            id: "ri01".to_string(),
+            title: "Running issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(running_session_id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // PATCH /issues/ri01/status with {"status": "in_progress"} must return 400.
+        let resp = patch_issue_status(
+            app.clone(),
+            "ri01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on running issue must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("running"),
+            "error message must mention 'running', got: {err_msg}"
+        );
+    }
+
+    // ─── Test 3: Waiting issue with no session_id returns 400 ─────────────────
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_waiting_issue_without_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an issue in Waiting state with session_id: None.
+        let issue = types::Issue {
+            id: "wi02".to_string(),
+            title: "Waiting no-session issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Waiting,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // PATCH /issues/wi02/status with {"status": "in_progress"} must return 400.
+        let resp = patch_issue_status(
+            app.clone(),
+            "wi02",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on waiting issue with no session_id must return 400"
+        );
+    }
+
+    // ─── Test 4: Non-in_progress status update stores the new status ──────────
+
+    #[tokio::test]
+    async fn test_patch_issue_status_non_in_progress_updates_field() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an open issue.
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "Status update test",
+                    "body": "body"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // PATCH /issues/{id}/status with {"status": "waiting"}.
+        let resp = patch_issue_status(
+            app.clone(),
+            &issue_id,
+            serde_json::json!({"status": "waiting"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PATCH with non-in_progress status must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "waiting",
+            "returned issue must have the new status"
+        );
+
+        // Confirm persistence: fetch from DB directly.
+        let persisted = state.db.get_issue(issue_id).await.unwrap();
+        assert_eq!(
+            persisted.status,
+            types::IssueStatus::Waiting,
+            "DB must persist the new status"
+        );
+    }
 }
+
