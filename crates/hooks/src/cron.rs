@@ -215,4 +215,23 @@ mod tests {
         // POSIX "1,3,5" (Mon,Wed,Fri) → crate "2,4,6"
         assert_eq!(translate_dow("1,3,5").unwrap(), "2,4,6");
     }
+
+    #[test]
+    fn translate_dow_question_mark_passes_through() {
+        assert_eq!(translate_dow("?").unwrap(), "?");
+    }
+
+    #[test]
+    fn translate_dow_step_notation_1_5_step_2() {
+        // POSIX "1-5/2" (Mon-Fri, every 2nd) → crate "2-6/2"
+        assert_eq!(translate_dow("1-5/2").unwrap(), "2-6/2");
+    }
+
+    #[test]
+    fn translate_dow_token_rejects_value_above_7() {
+        let result = translate_dow("8");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("invalid cron DOW value"), "got: {msg}");
+    }
 }
