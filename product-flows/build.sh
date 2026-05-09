@@ -11,7 +11,7 @@ echo "==> Compiling ns2 for Linux using Docker..."
 docker build \
   -t ns2-builder:latest \
   -f - "$REPO_ROOT" <<'DOCKERFILE'
-FROM rust:1.83-bookworm
+FROM rust:1.86-bookworm
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
