@@ -10,6 +10,7 @@ pub enum IssueStatus {
     Completed,
     Failed,
     Cancelled,
+    Waiting,
 }
 
 impl std::fmt::Display for IssueStatus {
@@ -20,6 +21,7 @@ impl std::fmt::Display for IssueStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
+            Self::Waiting => write!(f, "waiting"),
         }
     }
 }
@@ -33,6 +35,7 @@ impl std::str::FromStr for IssueStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "waiting" => Ok(Self::Waiting),
             _ => Err(format!("unknown issue status: {s}")),
         }
     }
@@ -69,6 +72,7 @@ pub enum SessionStatus {
     Completed,
     Failed,
     Cancelled,
+    Waiting,
 }
 
 impl std::fmt::Display for SessionStatus {
@@ -79,6 +83,7 @@ impl std::fmt::Display for SessionStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
+            Self::Waiting => write!(f, "waiting"),
         }
     }
 }
@@ -92,6 +97,7 @@ impl std::str::FromStr for SessionStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "waiting" => Ok(Self::Waiting),
             _ => Err(format!("unknown status: {s}")),
         }
     }
@@ -314,6 +320,7 @@ mod tests {
             SessionStatus::Completed,
             SessionStatus::Failed,
             SessionStatus::Cancelled,
+            SessionStatus::Waiting,
         ] {
             let s = status.to_string();
             let parsed = SessionStatus::from_str(&s).expect("should parse");
@@ -491,6 +498,7 @@ mod tests {
             IssueStatus::Completed,
             IssueStatus::Failed,
             IssueStatus::Cancelled,
+            IssueStatus::Waiting,
         ] {
             let s = status.to_string();
             let parsed: IssueStatus = s.parse().expect("should parse");
@@ -502,6 +510,22 @@ mod tests {
     fn issue_status_from_str_unknown_returns_err() {
         let result: std::result::Result<IssueStatus, _> = "bogus".parse();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_status_waiting_round_trip() {
+        let s = SessionStatus::Waiting.to_string();
+        assert_eq!(s, "waiting");
+        let parsed: SessionStatus = s.parse().unwrap();
+        assert_eq!(parsed, SessionStatus::Waiting);
+    }
+
+    #[test]
+    fn issue_status_waiting_round_trip() {
+        let s = IssueStatus::Waiting.to_string();
+        assert_eq!(s, "waiting");
+        let parsed: IssueStatus = s.parse().unwrap();
+        assert_eq!(parsed, IssueStatus::Waiting);
     }
 
     #[test]

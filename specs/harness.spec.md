@@ -1,7 +1,8 @@
 ---
 targets:
   - crates/harness/src/**/*.rs
-verified: 2026-05-06T18:50:24Z
+  - crates/tools/src/**/*.rs
+verified: 2026-05-09T00:21:26Z
 ---
 
 # harness crate
@@ -26,6 +27,46 @@ Given a session, the harness drives the agent forward: builds the context window
 | `lib.rs` | Re-exports the public API; hosts the integration test module |
 
 Each leaf module (`prompt`, `history`, `hooks`, `retry`, `cwd`) depends only on external crates — they have no knowledge of each other or of the turn loop. `loop_.rs` is the sole orchestrator.
+
+## Turn loop and final status
+
+The harness runs `run_tool_dispatch_loop` in a loop until `end_turn` is received from the model. At that point it:
+
+1. Checks the stop channel for a `StopSignal` sent by the `StopTool` during the preceding tool calls.
+2. Runs Stop hooks; if any exit non-zero, injects their stdout as a new user message and re-enters the loop.
+3. Determines the final `SessionStatus`:
+   - `stop(complete)` was called → `SessionStatus::Completed`
+   - `stop(waiting)` was called, or no `stop` call at all → `SessionStatus::Waiting`
+4. If a stop signal was received, emits `SessionEvent::Stopped { status, comment }` on the broadcast channel.
+5. Writes the final `SessionStatus` to the DB and emits `SessionEvent::Done`.
+
+## StopTool
+
+The `stop` tool is auto-injected by the harness at startup (not configurable via `HarnessConfig`). It is always available to the agent. Its schema:
+
+```json
+{
+  "status": "complete" | "waiting",   // required
+  "comment": "<string>"               // optional
+}
+```
+
+- **`complete`** — task is done; session becomes `Completed`, linked issue becomes `Completed`.
+- **`waiting`** — agent needs human input; session becomes `Waiting`, linked issue becomes `Waiting`.
+
+When the agent calls `stop`, the tool sends a `StopSignal` over an internal `mpsc` channel. The harness reads it after `end_turn` via `try_recv`. If the agent calls `stop` multiple times in a turn, only the last signal is used.
+
+## SSE events emitted
+
+| Event | When |
+|---|---|
+| `TurnStarted` | Start of each assistant turn |
+| `ContentBlockStarted/Delta/Done` | Streaming content |
+| `ToolUseStart/Done` | Each tool call dispatched |
+| `TurnDone` | End of each assistant turn |
+| `Stopped { status, comment }` | After `end_turn`, only when `stop` was called |
+| `Done` | Always, after final status is written |
+| `Error { message }` | On unrecoverable failure |
 
 ## How it fits in
 

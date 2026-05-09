@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const fn session_is_terminal(status: &SessionStatus) -> bool {
     matches!(
         status,
-        SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled
+        SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Waiting
     )
 }
 
@@ -333,6 +333,11 @@ mod tests {
     #[test]
     fn session_is_terminal_cancelled() {
         assert!(session_is_terminal(&SessionStatus::Cancelled));
+    }
+
+    #[test]
+    fn session_is_terminal_waiting() {
+        assert!(session_is_terminal(&SessionStatus::Waiting));
     }
 
     #[test]

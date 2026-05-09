@@ -187,6 +187,53 @@ pub async fn send_message(
         SessionStatus::Cancelled => Err(Error::BadRequest(
             "session is in cancelled state and cannot accept messages; reopen it first".into(),
         )),
+        // `waiting` sessions can receive new messages — they behave like `completed`
+        // sessions: spawn a harness if needed and deliver the message to resume work.
+        // IMPORTANT: look up any linked issue so the watcher is re-spawned correctly.
+        SessionStatus::Waiting => {
+            let mut spawning = state.spawning.lock().await;
+            let senders = state.msg_senders.lock().await;
+
+            if let Some(tx) = senders.get(&id) {
+                let tx = tx.clone();
+                drop(senders);
+                drop(spawning);
+                tx.send(req.message).await.ok();
+                return Ok(StatusCode::OK);
+            }
+
+            if spawning.contains(&id) {
+                drop(senders);
+                drop(spawning);
+                for _ in 0..40 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    let senders = state.msg_senders.lock().await;
+                    if let Some(tx) = senders.get(&id) {
+                        tx.send(req.message).await.ok();
+                        return Ok(StatusCode::OK);
+                    }
+                }
+                return Ok(StatusCode::OK);
+            }
+
+            spawning.insert(id);
+            drop(senders);
+            drop(spawning);
+
+            // Look up a linked issue so its watcher is re-spawned on resume.
+            let linked_issue_id = state
+                .db
+                .list_issues_by_session_id(id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .map(|issue| issue.id);
+
+            let msg_tx = spawn_harness_sync(&state, session, linked_issue_id);
+            msg_tx.send(req.message).await.ok();
+            Ok(StatusCode::OK)
+        }
     }
 }
 

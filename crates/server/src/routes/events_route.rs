@@ -147,7 +147,8 @@ pub async fn events(
             match sess.status {
                 types::SessionStatus::Completed
                 | types::SessionStatus::Failed
-                | types::SessionStatus::Cancelled => {
+                | types::SessionStatus::Cancelled
+                | types::SessionStatus::Waiting => {
                     history.push(SystemEvent::Session {
                         session_id,
                         event: SessionEvent::Done,
@@ -564,6 +565,81 @@ mod tests {
         assert!(
             has_done,
             "completed session SSE stream must contain a Done event; raw={raw:?}"
+        );
+    }
+
+    /// Route-level test: a Waiting session SSE stream replays history, emits Done,
+    /// and closes — does NOT hang open waiting for new events.
+    ///
+    /// This verifies that `SessionStatus::Waiting` is treated as terminal in the
+    /// `events` handler (`session_already_done` = true path), fixing the bug where
+    /// clients subscribed to a Waiting session would hang indefinitely.
+    #[tokio::test]
+    async fn route_waiting_session_emits_done_and_closes() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Pre-populate a Waiting session in the DB.
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "waiting-route-test".into(),
+            status: types::SessionStatus::Waiting,
+            agent: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, types::SessionStatus::Waiting)
+            .await
+            .unwrap();
+
+        // Open the SSE stream for the Waiting session.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events?session_id={}", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // For a terminal (Waiting) session the stream must close on its own.
+        // We use to_bytes with a timeout: if it doesn't finish, the session is
+        // keeping the stream open (the bug).
+        let body_bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .expect("SSE stream for Waiting session must close within 2 s — did not close (bug: Waiting not treated as terminal)")
+        .expect("body read error");
+
+        let raw = std::str::from_utf8(&body_bytes).unwrap();
+
+        // Assert: a Done event is present in the SSE output.
+        let has_done = raw.lines().filter(|l| l.starts_with("data: ")).any(|l| {
+            let json = &l["data: ".len()..];
+            serde_json::from_str::<SystemEvent>(json).is_ok_and(|ev| {
+                matches!(
+                    ev,
+                    SystemEvent::Session {
+                        event: SessionEvent::Done,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            has_done,
+            "Waiting session SSE stream must contain a Done event; raw={raw:?}"
         );
     }
 

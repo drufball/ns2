@@ -124,6 +124,16 @@ pub fn format_session_event(event: &SessionEvent) -> Option<String> {
             ContentBlock::ToolResult { content, .. } => Some(format!("[result: {content}]\n")),
         },
         Done => Some("[done]\n".to_string()),
+        Stopped { status, comment } => {
+            let status_str = match status {
+                events::StopEventStatus::Complete => "complete",
+                events::StopEventStatus::Waiting => "waiting",
+            };
+            Some(comment.as_ref().map_or_else(
+                || format!("[stopped: {status_str}]\n"),
+                |c| format!("[stopped: {status_str} — {c}]\n"),
+            ))
+        }
         Error { message } => Some(format!("[error] {message}\n")),
     }
 }
@@ -236,6 +246,7 @@ pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'stat
         IssueStatus::Failed => ("✗".to_string(), "failed"),
         IssueStatus::Open => ("●".to_string(), "open"),
         IssueStatus::Cancelled => ("⊘".to_string(), "cancelled"),
+        IssueStatus::Waiting => ("⏸".to_string(), "waiting"),
     }
 }
 
@@ -341,6 +352,7 @@ pub fn session_status_symbol(status: &SessionStatus, tick: usize) -> (String, &'
         SessionStatus::Completed => ("✔".to_string(), "completed"),
         SessionStatus::Failed => ("✗".to_string(), "failed"),
         SessionStatus::Cancelled => ("●".to_string(), "cancelled"),
+        SessionStatus::Waiting => ("⏸".to_string(), "waiting"),
     }
 }
 
@@ -378,8 +390,8 @@ pub fn render_session_line(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use events::IssueEvent;
-    use types::{Issue, IssueComment, IssueStatus};
+    use events::{IssueEvent, SessionEvent, StopEventStatus};
+    use types::{Issue, IssueComment, IssueStatus, SessionStatus};
 
     fn make_issue(id: &str, title: &str, status: IssueStatus) -> Issue {
         Issue {
@@ -458,5 +470,43 @@ mod tests {
             "must contain comment body"
         );
         assert!(line.contains('"'), "comment body must be quoted");
+    }
+
+    // ── format_session_event: Stopped variants ────────────────────────────────
+
+    #[test]
+    fn format_session_event_stopped_complete_with_comment() {
+        let event = SessionEvent::Stopped {
+            status: StopEventStatus::Complete,
+            comment: Some("done".into()),
+        };
+        let result = format_session_event(&event);
+        assert_eq!(result, Some("[stopped: complete — done]\n".to_string()));
+    }
+
+    #[test]
+    fn format_session_event_stopped_waiting_no_comment() {
+        let event = SessionEvent::Stopped {
+            status: StopEventStatus::Waiting,
+            comment: None,
+        };
+        let result = format_session_event(&event);
+        assert_eq!(result, Some("[stopped: waiting]\n".to_string()));
+    }
+
+    // ── Status symbol tests for Waiting ──────────────────────────────────────
+
+    #[test]
+    fn issue_status_symbol_waiting() {
+        let (sym, label) = issue_status_symbol(&IssueStatus::Waiting, 0);
+        assert_eq!(sym, "⏸");
+        assert_eq!(label, "waiting");
+    }
+
+    #[test]
+    fn session_status_symbol_waiting() {
+        let (sym, label) = session_status_symbol(&SessionStatus::Waiting, 0);
+        assert_eq!(sym, "⏸");
+        assert_eq!(label, "waiting");
     }
 }
