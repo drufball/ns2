@@ -20,35 +20,53 @@ holds no authoritative issue state in memory.
 ```
 open → running → completed
               ↘ failed
+              ↘ waiting
          ↑ (reopen)
 ```
 
 - **`open`** — issue created, not yet started. The default state after `ns2 issue new`.
 - **`running`** — `ns2 issue start` has been called; a session is active.
-- **`completed`** — the agent session finished successfully, or the user called
-  `ns2 issue complete`. Terminal.
+- **`completed`** — the agent called `stop(complete)`. Terminal.
+- **`waiting`** — the agent called `stop(waiting)` or the session ended without calling
+  `stop`. The issue is paused for human input. Terminal (the session is still associated
+  and its history is preserved; reopen to continue).
 - **`failed`** — the agent session hit an error, or the server restarted while the
   session was active (orphan recovery). Terminal unless explicitly reopened.
 
-Both `failed` and `completed` issues can be moved back to `open` via `ns2 issue reopen`.
-The behavior differs by prior state — see the Reopen section below.
+`failed`, `completed`, and `waiting` issues can be moved back to `open` via
+`ns2 issue reopen`. The behavior differs by prior state — see the Reopen section below.
 
-## Auto-Complete: Issue Watcher Task
+## Stop-Tool-Driven Issue Completion
 
 When `ns2 issue start` spawns a harness, the server also spawns an `issue_watcher` task
-that subscribes to the session's broadcast channel. The watcher:
+that subscribes to the session's event bus. The watcher drives the issue to its terminal
+state using the `Stopped` SSE event emitted by the harness just before `Done`.
 
-1. Accumulates the current turn's text content as `ContentBlockDelta { TextDelta }`
-   events arrive, building a `current_turn_text` buffer.
-2. On `TurnDone` — saves `current_turn_text` into `last_turn_text`; resets
-   `current_turn_text` to empty.
-3. On `SessionDone` — posts `last_turn_text` as a comment on the issue (author =
-   `issue.assignee` or `"agent"` if no assignee), then marks the issue `completed`.
+**Event flow:**
+
+1. Agent calls `stop(status, [comment])` during a turn → harness captures a `StopSignal`.
+2. After `end_turn`, the harness emits `SessionEvent::Stopped { status, comment }` if a
+   stop signal was received, then emits `SessionEvent::Done`.
+3. The `issue_watcher` holds the most recent `Stopped` event in memory. On `Done`, it
+   calls `park_issue(id, park_status, comment)`:
+   - `stop(complete)` → `park_status = Completed`
+   - `stop(waiting)` or no stop call → `park_status = Waiting`
+
+**`park_issue` behaviour:**
+- Accepts only `Completed` or `Waiting` as target status (rejects anything else).
+- If a non-empty `comment` is provided, appends it to the issue's `comments` array
+  (author = explicit author arg, or `issue.assignee`, or `"agent"` as fallback) and
+  emits a `CommentAdded` event *before* the status transition.
+- Updates `issue.status` and emits a `StatusChanged` event.
+
 4. On `Error { message }` — posts `message` as a comment (author = `"system"`), then
    marks the issue `failed`.
 
-The comment is written to the DB before the status transition, so a reader that polls
-on status will always see the comment once the issue is terminal.
+The `Stopped` event for a different session is ignored (the watcher filters by
+`session_id`).
+
+**If the agent never calls `stop`:** the session ends as `Waiting` and the issue
+transitions to `Waiting` with no comment added.
 
 ## Comment Protocol
 
@@ -71,28 +89,31 @@ on, or reopened.
 
 ## Reopen (`ns2 issue reopen`)
 
-`ns2 issue reopen --id <id> [--comment <text>] [--start]` moves a `failed` or
-`completed` issue back to `open`. **Behavior differs by prior state:**
+`ns2 issue reopen --id <id> [--comment <text>] [--start]` moves a `failed`, `completed`,
+or `waiting` issue back to `open`. **Behavior differs by prior state:**
 
 - **`failed` → reopen** — clears `session_id` so `issue start` creates a fresh session.
   The failed session's history is not replayed (the harness is long dead).
 - **`completed` → reopen** — keeps `session_id` so `issue start` resumes the existing
   session with full history. This lets the agent continue from where it left off.
+- **`waiting` → reopen** — keeps `session_id` so `issue start` resumes the existing
+  session with full history. This is the primary continuation path when an agent has
+  paused for human input.
 
-For both states:
+For all states:
 - Existing comments are preserved — the history of what happened is retained.
 - If `--comment <text>` is provided, a comment with `author = "user"` is appended
   **before** the status transition, so it is visible in history when the agent resumes.
 - If `--start` is provided, `issue start` is called immediately after reopening.
 - The `updated_at` timestamp is refreshed.
-- Only `failed` and `completed` issues can be reopened. Attempting to reopen an `open`
-  or `running` issue returns an error.
+- Only `failed`, `completed`, and `waiting` issues can be reopened. Attempting to reopen
+  an `open` or `running` issue returns an error.
 
-After reopening, the normal `open → running → completed` lifecycle applies.
+After reopening, the normal lifecycle applies.
 
 ## Validation Rules
 
-`ns2 issue start` requires the issue to be in `open` state and to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed` or `completed` state. `ns2 issue new --start` requires `--assignee`.
+`ns2 issue start` requires the issue to be in `open` state and to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. `ns2 issue new --start` requires `--assignee`. Cancellation is allowed from `open`, `running`, or `waiting` states.
 
 ## Connect Sections
 
