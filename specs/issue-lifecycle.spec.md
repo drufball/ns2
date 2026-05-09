@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-05-09T00:21:26Z
+verified: 2026-05-09T06:32:23Z
 ---
 
 # Issue Lifecycle Spec
@@ -25,7 +25,7 @@ open → running → completed
 ```
 
 - **`open`** — issue created, not yet started. The default state after `ns2 issue new`.
-- **`running`** — `ns2 issue start` has been called; a session is active.
+- **`running`** — `PATCH /issues/:id/status` with `in_progress` has been called; a session is active.
 - **`completed`** — the agent called `stop(complete)`. Terminal.
 - **`waiting`** — the agent called `stop(waiting)` or the session ended without calling
   `stop`. The issue is paused for human input. Terminal (the session is still associated
@@ -38,7 +38,7 @@ open → running → completed
 
 ## Stop-Tool-Driven Issue Completion
 
-When `ns2 issue start` spawns a harness, the server also spawns an `issue_watcher` task
+When `PATCH /issues/:id/status` with `in_progress` is received, the server spawns an `issue_watcher` task
 that subscribes to the session's event bus. The watcher drives the issue to its terminal
 state using the `Stopped` SSE event emitted by the harness just before `Done`.
 
@@ -89,14 +89,14 @@ on, or reopened.
 
 ## Reopen (`ns2 issue reopen`)
 
-`ns2 issue reopen --id <id> [--comment <text>] [--start]` moves a `failed`, `completed`,
+`ns2 issue reopen --id <id> [--comment <text>]` moves a `failed`, `completed`,
 or `waiting` issue back to `open`. **Behavior differs by prior state:**
 
-- **`failed` → reopen** — clears `session_id` so `issue start` creates a fresh session.
+- **`failed` → reopen** — clears `session_id` so the next `in_progress` transition creates a fresh session.
   The failed session's history is not replayed (the harness is long dead).
-- **`completed` → reopen** — keeps `session_id` so `issue start` resumes the existing
+- **`completed` → reopen** — keeps `session_id` so the next `in_progress` transition resumes the existing
   session with full history. This lets the agent continue from where it left off.
-- **`waiting` → reopen** — keeps `session_id` so `issue start` resumes the existing
+- **`waiting` → reopen** — keeps `session_id` so the next `in_progress` transition resumes the existing
   session with full history. This is the primary continuation path when an agent has
   paused for human input.
 
@@ -104,7 +104,6 @@ For all states:
 - Existing comments are preserved — the history of what happened is retained.
 - If `--comment <text>` is provided, a comment with `author = "user"` is appended
   **before** the status transition, so it is visible in history when the agent resumes.
-- If `--start` is provided, `issue start` is called immediately after reopening.
 - The `updated_at` timestamp is refreshed.
 - Only `failed`, `completed`, and `waiting` issues can be reopened. Attempting to reopen
   an `open` or `running` issue returns an error.
@@ -113,7 +112,7 @@ After reopening, the normal lifecycle applies.
 
 ## Validation Rules
 
-`ns2 issue start` requires the issue to be in `open` state and to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. `ns2 issue new --start` requires `--assignee`. Cancellation is allowed from `open`, `running`, or `waiting` states.
+`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `running`, or `waiting` states.
 
 ## Connect Sections
 

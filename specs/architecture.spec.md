@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-05-06T18:50:22Z
+verified: 2026-05-09T06:29:22Z
 ---
 
 # Architecture Spec
@@ -74,10 +74,10 @@ _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP.
 **`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/cancelled), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
 
-**`hooks`** — hook types, filter evaluation, and action dispatch. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). A hook evaluator subscribes to the `EventBus` and dispatches actions when filters match.
+**`hooks`** — hook types, filter evaluation, action dispatch, and timer scheduling. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). Modules: `evaluate` (event matching), `execute` (action dispatch), `template` (minijinja rendering), `cron` (5-field cron → next fire time via the `cron` crate), and `timer` (`process_timer_hooks` + `spawn_timer_scheduler` background loop). A hook evaluator in `server` subscribes to the `EventBus` and dispatches actions when filters match; a separate timer scheduler polls on a 30-second interval.
 _Known violation tracked in GH#98 (direct `issues` dep)._
 
-**`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle.
+**`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` in `AppState` shared by all routes and the hook evaluator. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle. On startup, spawns the hook evaluator and the timer scheduler (`hooks::timer::spawn_timer_scheduler`).
 _Doesn't own: issue business logic — delegate to `issues`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.

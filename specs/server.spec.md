@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-05-06T18:51:59Z
+verified: 2026-05-09T06:29:20Z
 ---
 
 # server crate
@@ -13,13 +13,25 @@ The server crate is the HTTP layer for ns2. It owns the axum router, the runtime
 
 The server handles three families of HTTP endpoints: session management, issue management, and SSE event streaming. Route handlers are intentionally thin — they parse input, call a service or the database, and return a response. No business logic lives in a handler.
 
-On startup, `run(config)` initializes the database, constructs `AppState`, runs the orphan sweep (see Session Lifecycle Spec), and binds the TCP listener with graceful SIGTERM/Ctrl-C shutdown.
+On startup, `run(config)` initializes the database, constructs `AppState`, spawns background tasks (hook evaluator, timer scheduler), runs the orphan sweep (see Session Lifecycle Spec), and binds the TCP listener with graceful SIGTERM/Ctrl-C shutdown.
 
 ## Key modules
 
 - **`lib.rs`** — router construction and the public `run()` entry point. Pure wiring, no business logic.
 - **`state.rs`** — owns `AppState` and the `spawn_harness_sync` function. Single authority over all runtime maps.
-- **`routes/`** — thin handlers for sessions, issues, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+- **`routes/`** — thin handlers for sessions, issues, hooks, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+
+## Background tasks
+
+Two background tasks are spawned at server startup:
+
+- **Hook evaluator** — subscribes to the `EventBus` and fires internal hooks whose `event_types` and `filter` match incoming `SystemEvent`s.
+- **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer hooks, and emits `SystemEvent::TimerFired` for any whose 5-field cron schedule falls within the 60-second rolling window ending at `now`. The action is then executed in a spawned task identical to the evaluator path.
+
+## Hook validation
+
+`POST /hooks` validates timer hook schedules before persisting. If the `schedule` field cannot be parsed as a 5-field cron expression, the server returns `400 Bad Request` with `{ "error": "invalid cron schedule: ..." }`.
+
 
 ## AppState and channel ownership
 
