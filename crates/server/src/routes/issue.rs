@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Deserializer};
-use types::{Issue, IssueStatus};
+use types::{Issue, IssueStatus, SessionStatus};
 
 use super::Error;
 use crate::harness_spawn::spawn_harness_sync;
@@ -20,6 +20,17 @@ pub fn generate_issue_id_for_test() -> String {
 #[cfg(test)]
 pub fn slugify(title: &str) -> String {
     issues::slugify(title)
+}
+
+// Builds a user-facing error message when an issue cannot be set to in_progress
+// due to its current status. Cancelled issues get an extra hint.
+fn bad_status_error(status: &IssueStatus) -> String {
+    let base = format!("cannot set in_progress on issue in {status} state");
+    if *status == IssueStatus::Cancelled {
+        format!("{base}; use `ns2 issue reopen --id <id>` first")
+    } else {
+        base
+    }
 }
 
 // Wraps a present JSON field (including null) in Some, leaving absent fields as None.
@@ -169,12 +180,15 @@ pub async fn add_comment(
     Ok(Json(issue))
 }
 
-pub async fn start_issue(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
+/// Internal helper: start an issue by calling `issue_service.start_issue()` and
+/// spawning the harness.  Used by `update_issue_status` when the new status is
+/// `InProgress`.
+async fn do_start_issue(
+    state: &AppState,
+    id: String,
 ) -> std::result::Result<Json<Issue>, Error> {
     let outcome = state.issue_service.start_issue(id).await?;
-    let msg_tx = spawn_harness_sync(&state, outcome.session, Some(outcome.issue.id.clone()));
+    let msg_tx = spawn_harness_sync(state, outcome.session, Some(outcome.issue.id.clone()));
     msg_tx.send(outcome.initial_message).await.ok();
     Ok(Json(outcome.issue))
 }
@@ -225,6 +239,19 @@ pub async fn cancel_issue(
     Ok(Json(issue))
 }
 
+/// PATCH /issues/:id/status — update an issue's status.
+///
+/// When the new status is `in_progress`, this handler:
+/// 1. Checks the issue has an assignee (returns 400 if not).
+/// 2. If the issue has a linked session in `Failed` state, marks that session
+///    `Cancelled` and clears the `session_id` on the issue.
+/// 3. If the issue is in `Waiting` state (has an existing session), directly
+///    spawns the harness against the existing session (resume mode).
+/// 4. Otherwise calls `issue_service.start_issue()` and spawns the harness.
+/// 5. Returns the issue in `running` state (never `in_progress` — that status
+///    is only accepted as input, never stored).
+///
+/// For any other status the issue's status is updated directly in the DB.
 pub async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -234,6 +261,77 @@ pub async fn update_issue_status(
         .status
         .parse::<IssueStatus>()
         .map_err(Error::BadRequest)?;
+
+    if new_status == IssueStatus::InProgress {
+        // Fetch the current issue to validate preconditions.
+        let issue = state.db.get_issue(id.clone()).await?;
+
+        // Must have an assignee.
+        if issue.assignee.is_none() {
+            return Err(Error::BadRequest(
+                "issue has no assignee; set one with `issue edit --assignee <agent>`".into(),
+            ));
+        }
+
+        // If the issue is Waiting with an existing session, resume it directly
+        // (spawn harness against existing session without creating a new one).
+        if issue.status == types::IssueStatus::Waiting {
+            if let Some(session_id) = issue.session_id {
+                let session = state.db.get_session(session_id).await?;
+                // Update the issue to Running state.
+                let mut updated_issue = issue.clone();
+                updated_issue.status = types::IssueStatus::Running;
+                updated_issue.updated_at = chrono::Utc::now();
+                state.db.update_issue(&updated_issue).await?;
+                // Spawn/resume the harness for the existing session.
+                let msg_tx = spawn_harness_sync(&state, session, Some(issue.id.clone()));
+                // Send a resume message to wake the agent.
+                msg_tx.send("Please continue.".to_string()).await.ok();
+                let refreshed = state.db.get_issue(id).await?;
+                return Ok(Json(refreshed));
+            }
+            // session_id is None: a Waiting issue with no session cannot be
+            // resumed.  Fall through to the checks below, which will produce
+            // the "in waiting state" error — the correct behaviour.
+        }
+
+        // If the issue has a Failed session, cancel it and clear session_id so
+        // start_issue creates a fresh one.
+        if let Some(session_id) = issue.session_id {
+            let session = state.db.get_session(session_id).await?;
+            if session.status == SessionStatus::Failed {
+                // Mark old session cancelled.
+                let _ = state
+                    .db
+                    .update_session_status(session_id, SessionStatus::Cancelled)
+                    .await;
+                // Clear session_id on the issue and set to Open so start_issue accepts it.
+                let mut updated_issue = issue.clone();
+                updated_issue.session_id = None;
+                updated_issue.status = types::IssueStatus::Open;
+                state.db.update_issue(&updated_issue).await?;
+            } else if issue.status != types::IssueStatus::Open {
+                // Issue has a session that isn't failed (e.g. running/completed/cancelled)
+                // and the issue is not Open — cannot restart.
+                return Err(Error::BadRequest(bad_status_error(&issue.status)));
+            }
+        } else if issue.status == types::IssueStatus::Failed {
+            // Issue has no session but is in Failed state — allow restart
+            // (set back to Open so start_issue accepts it).
+            let mut updated_issue = issue.clone();
+            updated_issue.status = types::IssueStatus::Open;
+            updated_issue.session_id = None;
+            state.db.update_issue(&updated_issue).await?;
+        } else if issue.status != types::IssueStatus::Open {
+            // Issue has no session and is not Open or Failed — cannot restart.
+            return Err(Error::BadRequest(bad_status_error(&issue.status)));
+        }
+
+        // Delegate to the internal start logic.
+        return do_start_issue(&state, id).await;
+    }
+
+    // For all other statuses: simple field update.
     let mut issue = state.db.get_issue(id.clone()).await?;
     issue.status = new_status;
     state.db.update_issue(&issue).await?;

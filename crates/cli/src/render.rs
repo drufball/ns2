@@ -242,6 +242,7 @@ pub struct IssueTreeNode {
 pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'static str) {
     match status {
         IssueStatus::Running => (spinner_char(tick).to_string(), "running"),
+        IssueStatus::InProgress => (spinner_char(tick).to_string(), "in_progress"),
         IssueStatus::Completed => ("✔".to_string(), "completed"),
         IssueStatus::Failed => ("✗".to_string(), "failed"),
         IssueStatus::Open => ("●".to_string(), "open"),
@@ -508,5 +509,18 @@ mod tests {
         let (sym, label) = session_status_symbol(&SessionStatus::Waiting, 0);
         assert_eq!(sym, "⏸");
         assert_eq!(label, "waiting");
+    }
+
+    // ── InProgress symbol test ────────────────────────────────────────────────
+
+    #[test]
+    fn issue_status_symbol_in_progress_returns_spinner() {
+        let (sym, label) = issue_status_symbol(&IssueStatus::InProgress, 0);
+        // The symbol must be a known braille spinner character.
+        assert!(
+            SPINNER_FRAMES.contains(&sym.chars().next().expect("symbol must be non-empty")),
+            "in_progress symbol must be a spinner character, got: {sym:?}"
+        );
+        assert_eq!(label, "in_progress");
     }
 }

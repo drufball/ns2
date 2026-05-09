@@ -437,8 +437,9 @@ fn issue_start_without_assignee_fails() {
     let mut h = TestHarness::new();
     h.start_server();
     let id = h.ns2_stdout(&["issue", "new", "--title", "No Assignee", "--body", "b"]);
+    // Use set-status in_progress; without assignee it should fail with 400
     h.ns2()
-        .args(["issue", "start", "--id", &id])
+        .args(["issue", "set-status", "--id", &id, "--status", "in_progress"])
         .assert()
         .failure()
         .stderr(
@@ -465,8 +466,9 @@ fn issue_start_already_completed_fails() {
         .args(["issue", "complete", "--id", &id, "--comment", "done"])
         .assert()
         .success();
+    // Trying to set in_progress on a completed issue with session should fail
     h.ns2()
-        .args(["issue", "start", "--id", &id])
+        .args(["issue", "set-status", "--id", &id, "--status", "in_progress"])
         .assert()
         .failure();
 }
@@ -495,7 +497,7 @@ fn issue_operations_on_nonexistent_id_fail() {
     let mut h = TestHarness::new();
     h.start_server();
     h.ns2()
-        .args(["issue", "start", "--id", "zzzz"])
+        .args(["issue", "set-status", "--id", "zzzz", "--status", "in_progress"])
         .assert()
         .failure()
         .stderr(

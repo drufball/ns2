@@ -53,7 +53,7 @@ fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
         "--assignee",
         "swe",
     ]);
-    h.ns2_stdout(&["issue", "start", "--id", &issue_id]);
+    h.ns2_stdout(&["issue", "set-status", "--id", &issue_id, "--status", "in_progress"]);
     h.ns2_stdout(&["issue", "wait", "--id", &issue_id]);
 
     h.http_patch(

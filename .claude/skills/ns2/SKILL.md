@@ -26,7 +26,7 @@ Work in ns2 is managed by creating issues. Every issue is given a dedicated agen
 ```bash
 # Create and immediately start
 id=$(ns2 issue new --title "..." --body "..." --assignee <agent>)
-ns2 issue start --id "$id"
+ns2 issue set-status --id "$id" --status in_progress
 ```
 
 ## Token-efficient monitoring
@@ -64,7 +64,8 @@ ns2 is alpha software, so you may have to debug its work occasionally. ONLY WHEN
 If an issue fails (e.g. rate limit cascade), reopen with context before restarting:
 
 ```bash
-ns2 issue reopen --id "$id" --comment "Restarting after rate limit. Previous approach was correct, pick up from where you left off." --start
+ns2 issue reopen --id "$id" --comment "Restarting after rate limit. Previous approach was correct, pick up from where you left off."
+ns2 issue set-status --id "$id" --status in_progress
 ```
 
 ## Sending Corrections Mid-Session

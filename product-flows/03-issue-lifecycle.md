@@ -1,7 +1,7 @@
 
 # Flow 03: Issue Lifecycle
 
-Create an issue, assign it to an agent, start a session, wait for completion, and mark it done. This is the primary orchestration smoke test.
+Create an issue, assign it to an agent, set status to in_progress to automatically start execution, wait for completion, and mark it done. This is the primary orchestration smoke test.
 
 ## Prerequisites
 
@@ -35,13 +35,13 @@ ns2 issue list --status open
 
 Expected: a table showing the issue with status `open`, assignee `swe`, and auto-generated branch `<id>-add-a-greeting`.
 
-### Step 3: Start the issue
+### Step 3: Set status to in_progress to auto-start execution
 
 ```bash
-ns2 issue start --id "$ISSUE"
+ns2 issue set-status --id "$ISSUE" --status in_progress
 ```
 
-Expected: session UUID printed, issue status transitions to `running`.
+Expected: issue transitions to `running` and a session is automatically created and started.
 
 ### Step 4: Wait for completion
 
@@ -105,7 +105,7 @@ ns2 issue list --status waiting
 
 - [ ] `ns2 issue new` prints a 4-character issue ID to stdout
 - [ ] New issues start with status `open` and an auto-generated branch slug
-- [ ] `ns2 issue start` creates a session linked to the issue and sets status to `running`
+- [ ] Setting status to `in_progress` automatically creates a session and starts execution
 - [ ] The session uses the issue's assignee as the agent type
 - [ ] `ns2 issue wait` blocks until the issue reaches a terminal state and exits 0
 - [ ] When the agent calls `stop(status="complete", comment="...")`, the comment is posted and the issue becomes `completed`
@@ -113,5 +113,6 @@ ns2 issue list --status waiting
 - [ ] When the session ends without the agent calling the stop tool, the issue becomes `waiting` with no auto-comment
 - [ ] `ns2 issue complete` adds a manual summary comment
 - [ ] `ns2 issue comment` adds comments with the specified author
-- [ ] Issue status transitions: open → running → completed (via stop tool) or open → running → waiting (no stop tool)
+- [ ] Issue status transitions: open → running (via in_progress) → completed (via stop tool) or open → running → waiting (no stop tool)
+- [ ] If the issue's session was in an error state when in_progress is set, the old session is removed before creating a new one
 - [ ] No panics or unhandled errors in server output
