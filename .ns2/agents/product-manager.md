@@ -35,5 +35,5 @@ Each swe issue must include:
 
 ```bash
 id=$(ns2 issue new --title "..." --body "..." --assignee <agent>)
-ns2 issue start --id "$id" && ns2 issue wait --id "$id"
+ns2 issue set-status --id "$id" --status in_progress && ns2 issue wait --id "$id"
 ```

@@ -47,7 +47,6 @@ fn build_router(state: AppState) -> Router {
         .route("/issues/:id", get(issue::get_issue))
         .route("/issues/:id", axum::routing::patch(issue::edit_issue))
         .route("/issues/:id/comments", post(issue::add_comment))
-        .route("/issues/:id/start", post(issue::start_issue))
         .route("/issues/:id/complete", post(issue::complete_issue))
         .route("/issues/:id/cancel", post(issue::cancel_issue))
         .route("/issues/:id/reopen", post(issue::reopen_issue))
@@ -1942,13 +1941,11 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         let start_resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
         assert_eq!(start_resp.status(), StatusCode::BAD_REQUEST);
@@ -1973,24 +1970,20 @@ mod tests {
         let id = created["id"].as_str().unwrap();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
         let second_start = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
         assert_eq!(second_start.status(), StatusCode::BAD_REQUEST);
@@ -2093,13 +2086,11 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{issue_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -2744,13 +2735,11 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{issue_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -2882,13 +2871,11 @@ mod tests {
             .unwrap();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{issue_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -2979,13 +2966,11 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{issue_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -3073,13 +3058,11 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{issue_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -4196,13 +4179,11 @@ mod tests {
 
         // Start the work issue (emits StatusChanged → Running)
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{work_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(issue_req(
+                "PATCH",
+                &format!("/issues/{work_id}/status"),
+                &serde_json::json!({"status": "in_progress"}),
+            ))
             .await
             .unwrap();
 
@@ -4289,6 +4270,293 @@ mod tests {
             20,
             "default limit should be 20, got {}",
             arr.len()
+        );
+    }
+
+    // ─── PATCH /issues/:id/status with in_progress auto-starts ──────────────
+
+    async fn patch_issue_status(
+        app: Router,
+        id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/issues/{id}/status"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_open_issue_auto_starts() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create issue with assignee
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "In-progress test",
+                    "body": "body",
+                    "assignee": "test-agent"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Set status to in_progress
+        let resp = patch_issue_status(
+            app.clone(),
+            &issue_id,
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "in_progress transition should return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The returned status should be "running" (harness was spawned)
+        assert_eq!(
+            v["status"], "running",
+            "returned issue must have status=running, not in_progress"
+        );
+        assert!(
+            !v["session_id"].is_null(),
+            "session_id must be set after in_progress transition"
+        );
+
+        // Eventually should reach waiting (stub client)
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+            if issue.status == IssueStatus::Waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue did not reach waiting within 5s; status={}",
+                issue.status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_without_assignee_returns_400() {
+        let app = test_app().await;
+
+        // Create issue WITHOUT assignee
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "No assignee",
+                    "body": "body"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        let resp = patch_issue_status(
+            app,
+            &issue_id,
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress without assignee must return 400"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_failed_session_issue_creates_fresh_session() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an issue and manually put it in failed state with a session
+        let old_session_id = Uuid::new_v4();
+        let old_session = types::Session {
+            id: old_session_id,
+            name: "old-session".into(),
+            status: types::SessionStatus::Failed,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&old_session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "fi01".to_string(),
+            title: "Failed issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Failed,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(old_session_id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Set status to in_progress — should clear old failed session and create new one
+        let resp = patch_issue_status(
+            app.clone(),
+            "fi01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "in_progress on failed issue must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "running",
+            "failed issue with in_progress should become running"
+        );
+        // The session_id should NOT be the old failed one
+        let new_session_id = v["session_id"].as_str().expect("session_id must be set");
+        assert_ne!(
+            new_session_id,
+            old_session_id.to_string(),
+            "a new session must be created, not the old failed one"
+        );
+
+        // Old session should be cancelled
+        let old_sess = state.db.get_session(old_session_id).await.unwrap();
+        assert_eq!(
+            old_sess.status,
+            types::SessionStatus::Cancelled,
+            "old failed session should be marked cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_waiting_issue_resumes_session() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a waiting session
+        let waiting_session_id = Uuid::new_v4();
+        let waiting_session = types::Session {
+            id: waiting_session_id,
+            name: "waiting-session".into(),
+            status: types::SessionStatus::Waiting,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&waiting_session).await.unwrap();
+        state
+            .db
+            .update_session_status(waiting_session_id, types::SessionStatus::Waiting)
+            .await
+            .unwrap();
+
+        // Create issue in Waiting state with session
+        let issue = types::Issue {
+            id: "wi01".to_string(),
+            title: "Waiting issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Waiting,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(waiting_session_id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Set status to in_progress — should resume existing waiting session
+        let resp = patch_issue_status(
+            app.clone(),
+            "wi01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "in_progress on waiting issue must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "running",
+            "waiting issue with in_progress should become running"
+        );
+        // Session id should be the SAME waiting session (reuse)
+        let returned_session_id = v["session_id"].as_str().expect("session_id must be set");
+        assert_eq!(
+            returned_session_id,
+            waiting_session_id.to_string(),
+            "should reuse the existing waiting session, not create a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_issues_id_start_returns_404_route_removed() {
+        let app = test_app().await;
+
+        // Create an issue first
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "Test",
+                    "body": "body",
+                    "assignee": "test-agent"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // POST /issues/:id/start should return 404 (route removed)
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "POST /issues/:id/start must return 404 after route removal"
         );
     }
 }

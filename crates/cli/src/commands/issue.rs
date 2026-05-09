@@ -31,15 +31,10 @@ pub async fn run_new(
     assignee: Option<String>,
     parent: Option<String>,
     blocked_on: Vec<String>,
-    start: bool,
     branch: Option<String>,
 ) {
     let client = reqwest::Client::new();
 
-    if start && assignee.is_none() {
-        eprintln!("Error: --start requires --assignee (start needs an agent to run)");
-        std::process::exit(1);
-    }
     if let Some(ref a) = assignee {
         if let Some(dir) = agents::agents_dir() {
             if agents::load_agent(&dir, a).is_none() {
@@ -74,32 +69,6 @@ pub async fn run_new(
     });
     eprintln!("Created issue: {} ({})", issue.title, issue.id);
     println!("{}", issue.id);
-
-    if start {
-        let start_url = format!("{}/issues/{}/start", server, issue.id);
-        let start_resp = client.post(&start_url).send().await.unwrap_or_else(|e| {
-            handle_connection_error(&e);
-        });
-        if !start_resp.status().is_success() {
-            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
-                eprintln!("Error: issue not found: {}", issue.id);
-                std::process::exit(1);
-            }
-            print_error_response(start_resp).await;
-        }
-        let started: Issue = start_resp.json().await.unwrap_or_else(|e| {
-            eprintln!("Error parsing response: {e}");
-            std::process::exit(1);
-        });
-        eprintln!(
-            "Started issue {}. Session: {}",
-            started.id,
-            started
-                .session_id
-                .map(|id| id.to_string())
-                .unwrap_or_default()
-        );
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,32 +159,6 @@ pub async fn run_comment(server: &str, id: String, body: String, author: String)
     eprintln!("Comment added to issue {id}.");
 }
 
-pub async fn run_start(server: &str, id: String) {
-    let client = reqwest::Client::new();
-    let url = format!("{server}/issues/{id}/start");
-    let resp = client.post(&url).send().await.unwrap_or_else(|e| {
-        handle_connection_error(&e);
-    });
-    if !resp.status().is_success() {
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            eprintln!("Error: issue not found: {id}");
-            std::process::exit(1);
-        }
-        print_error_response(resp).await;
-    }
-    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
-        eprintln!("Error parsing response: {e}");
-        std::process::exit(1);
-    });
-    eprintln!(
-        "Started issue {id}. Session: {}",
-        issue
-            .session_id
-            .map(|id| id.to_string())
-            .unwrap_or_default()
-    );
-}
-
 pub async fn run_complete(server: &str, id: String, comment: String) {
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/complete");
@@ -238,7 +181,7 @@ pub async fn run_complete(server: &str, id: String, comment: String) {
     eprintln!("Issue {id} marked as completed.");
 }
 
-pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start: bool) {
+pub async fn run_reopen(server: &str, id: String, comment: Option<String>) {
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}/reopen");
     let req_body = json!({ "comment": comment });
@@ -258,31 +201,6 @@ pub async fn run_reopen(server: &str, id: String, comment: Option<String>, start
         print_error_response(resp).await;
     }
     eprintln!("Issue {id} reopened.");
-
-    if start {
-        let start_url = format!("{server}/issues/{id}/start");
-        let start_resp = client.post(&start_url).send().await.unwrap_or_else(|e| {
-            handle_connection_error(&e);
-        });
-        if !start_resp.status().is_success() {
-            if start_resp.status() == reqwest::StatusCode::NOT_FOUND {
-                eprintln!("Error: issue not found: {id}");
-                std::process::exit(1);
-            }
-            print_error_response(start_resp).await;
-        }
-        let started: Issue = start_resp.json().await.unwrap_or_else(|e| {
-            eprintln!("Error parsing response: {e}");
-            std::process::exit(1);
-        });
-        eprintln!(
-            "Started issue {id}. Session: {}",
-            started
-                .session_id
-                .map(|id| id.to_string())
-                .unwrap_or_default()
-        );
-    }
 }
 
 pub async fn run_list(
@@ -360,6 +278,36 @@ pub async fn run_show(server: &str, id: String, json: bool) {
     } else {
         print!("{}", format_issue_show(&issue));
     }
+}
+
+/// `ns2 issue set-status --id X --status S`
+///
+/// Calls `PATCH /issues/:id/status` with the given status.
+/// When status is `in_progress`, the server auto-starts the issue.
+pub async fn run_set_status(server: &str, id: String, status: String) {
+    let client = reqwest::Client::new();
+    let url = format!("{server}/issues/{id}/status");
+    let req_body = json!({ "status": status });
+    let resp = client
+        .patch(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap_or_else(|e| {
+            handle_connection_error(&e);
+        });
+    if !resp.status().is_success() {
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            eprintln!("Error: issue not found: {id}");
+            std::process::exit(1);
+        }
+        print_error_response(resp).await;
+    }
+    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+        eprintln!("Error parsing response: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("Issue {id} status set to {}.", issue.status);
 }
 
 pub async fn run_cancel(server: &str, id: String) {
