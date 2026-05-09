@@ -82,6 +82,7 @@ enum Command {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum HookSubcommand {
     #[command(
@@ -113,6 +114,8 @@ enum HookSubcommand {
         title: Option<String>,
         #[arg(long, help = "Assignee for create-issue action.")]
         assignee: Option<String>,
+        #[arg(long, help = "Cron schedule for timer source (e.g. '0 9 * * 1' = Monday 9am).")]
+        schedule: Option<String>,
     },
     #[command(about = "List hooks.")]
     List {
@@ -776,6 +779,7 @@ async fn main() {
                 body,
                 title,
                 assignee,
+                schedule,
             } => {
                 commands::hook::run_new(
                     &cli.server,
@@ -788,6 +792,7 @@ async fn main() {
                     body,
                     title,
                     assignee,
+                    schedule,
                 )
                 .await;
             }
@@ -2558,6 +2563,105 @@ mod tests {
     }
 
     // ─── `ns2 hook` CLI parse tests ──────────────────────────────────────────
+
+    #[test]
+    fn hook_new_parses_schedule_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "timer-hook",
+            "--source",
+            "timer",
+            "--schedule",
+            "0 9 * * 1",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "Monday morning",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action:
+                    HookSubcommand::New {
+                        name,
+                        source,
+                        schedule,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "timer-hook");
+                assert_eq!(source, "timer");
+                assert_eq!(schedule.as_deref(), Some("0 9 * * 1"));
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_no_schedule_is_none() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "notify",
+            "--source",
+            "internal",
+            "--event-type",
+            "issue.created",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "hi",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { schedule, .. },
+            } => {
+                assert!(schedule.is_none());
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_timer_source_with_every_minute_schedule() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "every-minute",
+            "--source",
+            "timer",
+            "--schedule",
+            "* * * * *",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "tick",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { schedule, source, .. },
+            } => {
+                assert_eq!(source, "timer");
+                assert_eq!(schedule.as_deref(), Some("* * * * *"));
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
 
     #[test]
     fn hook_new_parses_required_flags() {
