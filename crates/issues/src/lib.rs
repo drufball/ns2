@@ -1341,6 +1341,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn park_issue_empty_string_comment_not_added() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Running;
+        db.create_issue(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+
+        svc.park_issue("ab12", IssueStatus::Waiting, Some(String::new()), None)
+            .await
+            .unwrap();
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(
+            persisted.status,
+            IssueStatus::Waiting,
+            "status should change to Waiting"
+        );
+        assert_eq!(
+            persisted.comments.len(),
+            0,
+            "empty-string comment must not be added"
+        );
+    }
+
     // --- fail_issue ---
 
     #[tokio::test]
