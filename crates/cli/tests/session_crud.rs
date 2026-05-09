@@ -97,9 +97,10 @@ fn session_wait_completes_when_stub_finishes() {
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
 
     let out = h.ns2_stdout(&["session", "wait", "--id", &uuid]);
+    // Without the stop tool, sessions default to 'waiting' (not 'completed').
     assert!(
-        out.contains("completed"),
-        "wait output must contain 'completed', got: {out}"
+        out.contains("waiting"),
+        "wait output must contain 'waiting', got: {out}"
     );
 }
 
@@ -112,9 +113,10 @@ fn session_wait_on_already_terminal_session_returns_immediately() {
     h.ns2_stdout(&["session", "wait", "--id", &uuid]);
 
     let out = h.ns2_stdout(&["session", "wait", "--id", &uuid]);
+    // Session is already terminal (waiting); second wait returns immediately.
     assert!(
-        out.contains("completed"),
-        "second wait must also show 'completed', got: {out}"
+        out.contains("waiting"),
+        "second wait must also show 'waiting', got: {out}"
     );
 }
 
@@ -127,9 +129,10 @@ fn session_wait_multiple_sessions() {
     let uuid2 = h.ns2_stdout(&["session", "new", "--message", "task two"]);
 
     let out = h.ns2_stdout(&["session", "wait", "--id", &uuid1, "--id", &uuid2]);
+    // Without the stop tool, sessions default to 'waiting'.
     assert!(
-        out.contains("completed"),
-        "wait output must contain 'completed', got: {out}"
+        out.contains("waiting"),
+        "wait output must contain 'waiting', got: {out}"
     );
     assert!(
         out.contains(&uuid1),
