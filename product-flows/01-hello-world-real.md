@@ -16,6 +16,14 @@ git commit --allow-empty -m "init"
 ns2 server start
 ```
 
+## Fixture Setup
+
+```bash
+docker exec ns2-flow-01 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
+docker exec -d ns2-flow-01 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+sleep 3
+```
+
 ## Steps
 
 ### Create a session with a message

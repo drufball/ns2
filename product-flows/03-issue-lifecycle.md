@@ -16,6 +16,15 @@ ns2 server start
 ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion. When you are done, call the stop tool with status='complete' and a brief comment summarizing what you did."
 ```
 
+## Fixture Setup
+
+```bash
+docker exec ns2-flow-03 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
+docker exec -d ns2-flow-03 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+sleep 3
+docker exec ns2-flow-03 bash -c 'cd /tmp/ns2-smoke && ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion. When you are done, call the stop tool with status='"'"'complete'"'"' and a brief comment summarizing what you did."'
+```
+
 ## Steps
 
 ### Step 1: Create and immediately start an issue with --wait

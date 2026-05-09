@@ -17,6 +17,14 @@ git add . && git commit -m "seed"
 ns2 server start
 ```
 
+## Fixture Setup
+
+```bash
+docker exec ns2-flow-02 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && echo "The magic number is: 7742" > /tmp/ns2-smoke/multi-turn-test.txt && git -C /tmp/ns2-smoke add . && git -C /tmp/ns2-smoke commit -m "seed"'
+docker exec -d ns2-flow-02 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+sleep 3
+```
+
 ## Steps
 
 ### Part A: Tool Use (write + read)
