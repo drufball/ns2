@@ -2,6 +2,7 @@ pub mod events_route;
 pub mod hook;
 pub mod issue;
 pub mod session;
+pub mod webhook;
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 

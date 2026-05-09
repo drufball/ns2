@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{events_route, hook as hook_route, issue, session};
+use routes::{events_route, hook as hook_route, issue, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -61,6 +61,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id", patch(hook_route::update_hook))
         .route("/hooks/:id", delete(hook_route::delete_hook))
         .route("/hooks/:id/executions", get(hook_route::list_executions))
+        // External webhook receiver
+        .route("/webhooks/:hook_id", post(webhook::receive_webhook))
         .with_state(state)
 }
 
@@ -74,6 +76,37 @@ fn spawn_hook_evaluator(state: &AppState) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    // Special handling for External events: look up the hook directly
+                    // by hook_id and run its action (bypassing matches_event which
+                    // only handles Internal hooks).
+                    if let events::SystemEvent::External {
+                        hook_id: ref ext_hook_id,
+                        ..
+                    } = event
+                    {
+                        let hook_result = hook_store_eval.get_hook(ext_hook_id).await;
+                        if let Ok(hook) = hook_result {
+                            if hook.enabled {
+                                let event_clone = event.clone();
+                                let hook_clone = hook.clone();
+                                let issue_svc = issue_svc_eval.clone();
+                                let hook_store_clone = Arc::clone(&hook_store_eval);
+                                tokio::spawn(async move {
+                                    hooks::execute::run_action(
+                                        &hook_clone,
+                                        &event_clone,
+                                        &issue_svc,
+                                        hook_store_clone.as_ref(),
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                        // External events are handled exclusively here — skip the
+                        // general matches_event loop below.
+                        continue;
+                    }
+
                     let hooks = hook_store_eval
                         .list_hooks(Some(true), None)
                         .await
@@ -4747,6 +4780,364 @@ mod tests {
     }
 
     // ─── Test 4: Non-in_progress status update stores the new status ──────────
+
+    // ─── POST /webhooks/:hook_id tests ───────────────────────────────────────
+
+    /// Helper: create a hook via the API and return its id.
+    async fn create_webhook_hook(
+        app: &Router,
+        source: serde_json::Value,
+    ) -> String {
+        let resp = app
+            .clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "test-webhook-hook",
+                    "source": source,
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": "xxxx" },
+                        "body": "webhook fired"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// Compute HMAC-SHA256 of `body` using `secret` and return "sha256=<hex>".
+    fn compute_hmac_sig(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize().into_bytes();
+        format!("sha256={}", hex::encode(result))
+    }
+
+    #[tokio::test]
+    async fn test_webhook_nonexistent_hook_returns_404() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/xxxx")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_internal_hook_returns_404() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "internal", "event_types": ["issue.created"] }),
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_external_hook_no_secret_no_signature_returns_200() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external" }),
+        )
+        .await;
+        let body = r#"{"event":"push","repo":"ns2"}"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_external_hook_with_secret_correct_signature_returns_200() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external", "secret": "test-secret" }),
+        )
+        .await;
+        let body = r#"{"event":"push"}"#;
+        let sig = compute_hmac_sig("test-secret", body.as_bytes());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", sig)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_external_hook_with_secret_missing_signature_returns_401() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external", "secret": "test-secret" }),
+        )
+        .await;
+        let body = r#"{"event":"push"}"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_external_hook_with_secret_wrong_signature_returns_401() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external", "secret": "test-secret" }),
+        )
+        .await;
+        let body = r#"{"event":"push"}"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", "sha256=badhash")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_invalid_json_returns_400() {
+        let app = test_app().await;
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external" }),
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("not-json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_disabled_hook_returns_404() {
+        let app = test_app().await;
+        // Create a disabled external hook
+        let resp = app
+            .clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "disabled-webhook",
+                    "enabled": false,
+                    "source": { "type": "external" },
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": "xxxx" },
+                        "body": "hi"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let hook_id = v["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"push"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_emits_system_event_external() {
+        let (app, state) = test_app_with_state().await;
+        let mut rx = state.event_bus.subscribe();
+        let hook_id = create_webhook_hook(
+            &app,
+            serde_json::json!({ "type": "external" }),
+        )
+        .await;
+        let body = r#"{"event":"push","ref":"main"}"#;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Drain events to find SystemEvent::External
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        loop {
+            match rx.try_recv() {
+                Ok(events::SystemEvent::External { hook_id: hid, payload }) => {
+                    assert_eq!(hid, hook_id);
+                    assert_eq!(payload["event"], "push");
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(
+                        tokio::time::Instant::now() <= deadline,
+                        "SystemEvent::External not received within 2s"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_evaluator_dispatches_action_for_external_event() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a watcher issue
+        let watcher_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({ "title": "Watcher", "body": "watch" }),
+            ))
+            .await
+            .unwrap();
+        let watcher_body = response_body_bytes(watcher_resp).await;
+        let watcher: serde_json::Value = serde_json::from_slice(&watcher_body).unwrap();
+        let watcher_id = watcher["id"].as_str().unwrap().to_string();
+
+        // Create an external hook targeting the watcher issue
+        let create_resp = app
+            .clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "external-webhook",
+                    "source": { "type": "external" },
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": watcher_id.clone() },
+                        "body": "webhook received"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let create_body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+        let hook_id = created["id"].as_str().unwrap().to_string();
+
+        // POST a valid webhook
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{hook_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"push"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Wait for the evaluator to post the comment
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let watcher_issue = state.db.get_issue(watcher_id.clone()).await.unwrap();
+            if !watcher_issue.comments.is_empty() {
+                let comment = &watcher_issue.comments[0];
+                assert_eq!(comment.author, "ns2-hook");
+                assert!(comment.body.contains("webhook received"));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "hook evaluator never dispatched action for external event within 3s"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_patch_issue_status_non_in_progress_updates_field() {
