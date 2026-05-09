@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
     Open,
+    InProgress,
     Running,
     Completed,
     Failed,
@@ -17,6 +18,7 @@ impl std::fmt::Display for IssueStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Open => write!(f, "open"),
+            Self::InProgress => write!(f, "in_progress"),
             Self::Running => write!(f, "running"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
@@ -31,6 +33,7 @@ impl std::str::FromStr for IssueStatus {
     fn from_str(s: &str) -> std::result::Result<Self, String> {
         match s {
             "open" => Ok(Self::Open),
+            "in_progress" => Ok(Self::InProgress),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
@@ -494,6 +497,7 @@ mod tests {
     fn issue_status_display_round_trip() {
         for status in [
             IssueStatus::Open,
+            IssueStatus::InProgress,
             IssueStatus::Running,
             IssueStatus::Completed,
             IssueStatus::Failed,
@@ -504,6 +508,25 @@ mod tests {
             let parsed: IssueStatus = s.parse().expect("should parse");
             assert_eq!(parsed, status);
         }
+    }
+
+    #[test]
+    fn issue_status_in_progress_display() {
+        assert_eq!(IssueStatus::InProgress.to_string(), "in_progress");
+    }
+
+    #[test]
+    fn issue_status_in_progress_from_str() {
+        let s: IssueStatus = "in_progress".parse().expect("should parse");
+        assert_eq!(s, IssueStatus::InProgress);
+    }
+
+    #[test]
+    fn issue_status_in_progress_serde_roundtrip() {
+        let json = serde_json::to_string(&IssueStatus::InProgress).expect("serialize");
+        assert_eq!(json, "\"in_progress\"");
+        let decoded: IssueStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, IssueStatus::InProgress);
     }
 
     #[test]

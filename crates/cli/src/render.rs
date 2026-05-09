@@ -242,6 +242,7 @@ pub struct IssueTreeNode {
 pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'static str) {
     match status {
         IssueStatus::Running => (spinner_char(tick).to_string(), "running"),
+        IssueStatus::InProgress => (spinner_char(tick).to_string(), "in_progress"),
         IssueStatus::Completed => ("✔".to_string(), "completed"),
         IssueStatus::Failed => ("✗".to_string(), "failed"),
         IssueStatus::Open => ("●".to_string(), "open"),

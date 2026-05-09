@@ -8,7 +8,7 @@ mod render;
 #[command(name = "ns2")]
 #[command(about = "An issue-driven agent orchestration tool.")]
 #[command(
-    long_about = "ns2 is an issue-driven agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  issue    a work item assigned to an agent; the primary way to get work done\n  session  internal implementation detail — created automatically when an issue starts\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue start --id \"$id\"\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done\""
+    long_about = "ns2 is an issue-driven agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  issue    a work item assigned to an agent; the primary way to get work done\n  session  internal implementation detail — created automatically when an issue starts\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue set-status --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done\""
 )]
 struct Cli {
     #[arg(
@@ -34,7 +34,7 @@ enum Command {
     },
     #[command(
         about = "Inspect agent sessions (implementation detail — use `issue` to get work done).",
-        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue start` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
+        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue set-status --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
     )]
     Session {
         #[command(subcommand)]
@@ -58,7 +58,7 @@ enum Command {
     },
     #[command(
         about = "Track and manage work items.",
-        long_about = "Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.\n\nLifecycle:\n  open       issue created, not yet assigned to a session\n  running    an agent session is actively working on this issue\n  completed  work finished and reviewed\n  failed     session ended with an error\n\nTypical workflow:\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue start --id \"$id\"\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done: ...\"\n\nUse `issue list` to see current issues; use `issue wait` to block until issues finish."
+        long_about = "Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.\n\nLifecycle:\n  open       issue created, not yet assigned to a session\n  running    an agent session is actively working on this issue\n  completed  work finished and reviewed\n  failed     session ended with an error\n\nTypical workflow:\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue set-status --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done: ...\"\n\nUse `issue list` to see current issues; use `issue wait` to block until issues finish."
     )]
     Issue {
         #[command(subcommand)]
@@ -397,11 +397,6 @@ enum IssueAction {
         blocked_on: Vec<String>,
         #[arg(
             long,
-            help = "Immediately start the issue after creating it. Requires --assignee."
-        )]
-        start: bool,
-        #[arg(
-            long,
             help = "Git branch name to associate with this issue. Auto-generated from title if omitted."
         )]
         branch: Option<String>,
@@ -426,7 +421,8 @@ enum IssueAction {
         #[arg(long, help = "New git branch name for this issue.")]
         branch: Option<String>,
     },
-    #[command(about = "Post a comment to an issue.")]
+    #[command(
+        about = "Post a comment to an issue.")]
     Comment {
         #[arg(long, help = "The issue ID. Required.")]
         id: String,
@@ -440,14 +436,6 @@ enum IssueAction {
         author: String,
     },
     #[command(
-        about = "Create an agent session for this issue and start it.",
-        long_about = "Creates a new session using the issue's assignee agent, sends the issue title and body as the opening message, and links the session to the issue. Sets the issue status to 'running'.\n\nPrints a confirmation to stderr including the session UUID:\n  Started issue <id>. Session: <uuid>\n\nCapture the session UUID for later tailing:\n  session=$(ns2 issue start --id \"$id\" 2>&1 | awk '/Session:/{print $NF}')"
-    )]
-    Start {
-        #[arg(long, help = "The issue ID. Required.")]
-        id: String,
-    },
-    #[command(
         about = "Mark an issue as completed.",
         long_about = "Marks an issue completed and adds a final summary comment. The --comment flag is required."
     )]
@@ -456,6 +444,16 @@ enum IssueAction {
         id: String,
         #[arg(long, help = "A final summary of what was done. Required.")]
         comment: String,
+    },
+    #[command(
+        about = "Set the status of an issue.",
+        long_about = "Update an issue's status directly. Use status 'in_progress' to auto-start the issue (spawns the agent harness).\n\nAvailable statuses: open, in_progress, running, completed, failed, cancelled, waiting\n\nTypical usage:\n  ns2 issue set-status --id \"$id\" --status in_progress\n\nSetting in_progress will:\n  - Create a new session and start the agent if the issue is open.\n  - Resume the existing session if the issue is waiting.\n  - Clear any failed session and create a fresh one if the issue is failed."
+    )]
+    SetStatus {
+        #[arg(long, help = "The issue ID. Required.")]
+        id: String,
+        #[arg(long, help = "The new status. Required.")]
+        status: String,
     },
     #[command(
         about = "Move a failed or completed issue back to open.",
@@ -469,8 +467,6 @@ enum IssueAction {
             help = "Append a comment to the issue thread before transitioning back to open. Author is 'user'."
         )]
         comment: Option<String>,
-        #[arg(long, help = "Immediately start the issue after reopening it.")]
-        start: bool,
     },
     #[command(
         about = "List issues.",
@@ -687,7 +683,6 @@ async fn main() {
                 assignee,
                 parent,
                 blocked_on,
-                start,
                 branch,
             } => {
                 commands::issue::run_new(
@@ -697,7 +692,6 @@ async fn main() {
                     assignee,
                     parent,
                     blocked_on,
-                    start,
                     branch,
                 )
                 .await;
@@ -726,14 +720,14 @@ async fn main() {
             IssueAction::Comment { id, body, author } => {
                 commands::issue::run_comment(&cli.server, id, body, author).await;
             }
-            IssueAction::Start { id } => {
-                commands::issue::run_start(&cli.server, id).await;
-            }
             IssueAction::Complete { id, comment } => {
                 commands::issue::run_complete(&cli.server, id, comment).await;
             }
-            IssueAction::Reopen { id, comment, start } => {
-                commands::issue::run_reopen(&cli.server, id, comment, start).await;
+            IssueAction::SetStatus { id, status } => {
+                commands::issue::run_set_status(&cli.server, id, status).await;
+            }
+            IssueAction::Reopen { id, comment } => {
+                commands::issue::run_reopen(&cli.server, id, comment).await;
             }
             IssueAction::List {
                 status,
@@ -1343,27 +1337,21 @@ mod tests {
     }
 
     #[test]
-    fn issue_reopen_parses_start_flag() {
-        let cli =
-            Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12", "--start"]).unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::Reopen { start, .. },
-            } => {
-                assert!(start);
-            }
-            _ => panic!("expected issue reopen command"),
-        }
+    fn issue_reopen_start_flag_removed_fails_to_parse() {
+        // --start flag has been removed from reopen
+        let result =
+            Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12", "--start"]);
+        assert!(result.is_err(), "--start on reopen should fail to parse after removal");
     }
 
     #[test]
-    fn issue_reopen_no_start_flag_is_false() {
+    fn issue_reopen_without_start_flag_parses() {
         let cli = Cli::try_parse_from(["ns2", "issue", "reopen", "--id", "ab12"]).unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::Reopen { start, .. },
+                action: IssueAction::Reopen { id, .. },
             } => {
-                assert!(!start);
+                assert_eq!(id, "ab12");
             }
             _ => panic!("expected issue reopen command"),
         }
@@ -1512,8 +1500,9 @@ mod tests {
     }
 
     #[test]
-    fn issue_new_parses_start_flag() {
-        let cli = Cli::try_parse_from([
+    fn issue_new_start_flag_removed_fails_to_parse() {
+        // --start flag has been removed from `issue new`
+        let result = Cli::try_parse_from([
             "ns2",
             "issue",
             "new",
@@ -1524,27 +1513,19 @@ mod tests {
             "--assignee",
             "swe",
             "--start",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::New { start, .. },
-            } => {
-                assert!(start);
-            }
-            _ => panic!("expected issue new command"),
-        }
+        ]);
+        assert!(result.is_err(), "--start on issue new should fail to parse after removal");
     }
 
     #[test]
-    fn issue_new_no_start_flag_is_false() {
+    fn issue_new_without_start_flag_parses() {
         let cli =
             Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"]).unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::New { start, .. },
+                action: IssueAction::New { title, .. },
             } => {
-                assert!(!start);
+                assert_eq!(title, "t");
             }
             _ => panic!("expected issue new command"),
         }
@@ -1603,6 +1584,72 @@ mod tests {
     fn issue_cancel_missing_id_fails_to_parse() {
         let result = Cli::try_parse_from(["ns2", "issue", "cancel"]);
         assert!(result.is_err(), "cancel without --id should fail to parse");
+    }
+
+    // ─── issue set-status CLI parse tests ─────────────────────────────────────
+
+    #[test]
+    fn issue_set_status_parses_id_and_status() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "set-status",
+            "--id",
+            "ab12",
+            "--status",
+            "in_progress",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::SetStatus { id, status },
+            } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(status, "in_progress");
+            }
+            _ => panic!("expected issue set-status command"),
+        }
+    }
+
+    #[test]
+    fn issue_set_status_missing_id_fails_to_parse() {
+        let result =
+            Cli::try_parse_from(["ns2", "issue", "set-status", "--status", "in_progress"]);
+        assert!(
+            result.is_err(),
+            "set-status without --id should fail to parse"
+        );
+    }
+
+    #[test]
+    fn issue_set_status_missing_status_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "issue", "set-status", "--id", "ab12"]);
+        assert!(
+            result.is_err(),
+            "set-status without --status should fail to parse"
+        );
+    }
+
+    #[test]
+    fn issue_set_status_with_open_status_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "set-status",
+            "--id",
+            "ab12",
+            "--status",
+            "open",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::SetStatus { status, .. },
+            } => {
+                assert_eq!(status, "open");
+            }
+            _ => panic!("expected issue set-status command"),
+        }
     }
 
     #[test]
