@@ -16,6 +16,16 @@ fn parse_filter_field(s: &str) -> (String, serde_json::Value) {
     }
 }
 
+// ── Helper: build timer source JSON ──────────────────────────────────────────
+
+fn build_timer_source(schedule: Option<&str>) -> serde_json::Value {
+    let Some(sched) = schedule else {
+        eprintln!("Error: --schedule is required when --source timer is used. Example: --schedule \"0 9 * * 1\"");
+        std::process::exit(1);
+    };
+    json!({ "type": "timer", "schedule": sched })
+}
+
 // ── run_new ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -30,6 +40,7 @@ pub async fn run_new(
     body_template: Option<String>,
     title: Option<String>,
     assignee: Option<String>,
+    schedule: Option<String>,
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
@@ -40,16 +51,8 @@ pub async fn run_new(
             "type": "internal",
             "event_types": event_types,
         }),
-        "external" => json!({
-            "type": "external",
-        }),
-        "timer" => {
-            // For timer we'd need a schedule, but keep minimal for now
-            json!({
-                "type": "timer",
-                "schedule": event_types.first().map_or("", std::string::String::as_str),
-            })
-        }
+        "external" => json!({ "type": "external" }),
+        "timer" => build_timer_source(schedule.as_deref()),
         other => {
             eprintln!("Error: unknown source type '{other}'. Use: internal, external, timer");
             std::process::exit(1);

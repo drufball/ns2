@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-05-09T00:21:24Z
+verified: 2026-05-09T06:29:20Z
 ---
 
 # Data Model Spec
@@ -116,3 +116,17 @@ The `types` crate mirrors the DB schema in Rust:
 - `Issue`, `IssueStatus`, `IssueComment` — maps to the `issues` table
 - `Hook`, `HookSource`, `HookAction`, `HookFilter` — maps to the `hooks` table
 - `HookExecution`, `ExecutionStatus` — maps to the `hook_executions` table
+
+`HookSource` has three variants:
+- `Internal { event_types: Vec<String> }` — fires when a matching `SystemEvent` is published on the event bus
+- `External { secret: Option<String> }` — fires via `POST /hooks/:id/trigger`
+- `Timer { schedule: String }` — fires on a 5-field cron schedule (e.g. `"0 9 * * 1"` = Monday 9 am UTC)
+
+## Events (events crate)
+
+`SystemEvent` is the top-level envelope on the global event bus:
+
+- `Session { session_id, event: SessionEvent }` — harness turn-level events
+- `Issue(IssueEvent)` — issue lifecycle events (created, status changed, comment added)
+- `External { hook_id, payload }` — fired when an external webhook is received
+- `TimerFired { hook_id, fired_at }` — fired by the timer scheduler for each enabled timer hook whose cron schedule falls within the current tick window
