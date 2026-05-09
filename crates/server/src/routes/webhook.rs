@@ -21,39 +21,23 @@ pub async fn receive_webhook(
     body: Bytes,
 ) -> impl IntoResponse {
     // 1. Look up the hook.
-    let hook = match state.hook_store.get_hook(&hook_id).await {
-        Ok(h) => h,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "not found" })),
-            )
-                .into_response();
-        }
+    let Ok(hook) = state.hook_store.get_hook(&hook_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        )
+            .into_response();
     };
 
     // 2. Must be an External hook that is enabled.
-    let secret = match &hook.source {
-        HookSource::External { secret } => {
-            if !hook.enabled {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": "not found" })),
-                )
-                    .into_response();
-            }
-            secret.clone()
-        }
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "not found" })),
-            )
-                .into_response();
-        }
+    let HookSource::External { secret } = &hook.source else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        )
+            .into_response();
     };
 
-    // Also check enabled (in case it slipped through above — belt-and-suspenders).
     if !hook.enabled {
         return (
             StatusCode::NOT_FOUND,
@@ -61,6 +45,8 @@ pub async fn receive_webhook(
         )
             .into_response();
     }
+
+    let secret = secret.clone();
 
     // 3. HMAC verification (only when secret is Some).
     if let Some(secret_str) = &secret {
@@ -75,39 +61,30 @@ pub async fn receive_webhook(
             .unwrap_or("");
 
         // Must be "sha256=<hex>"
-        let hex_digest = match sig_header.strip_prefix("sha256=") {
-            Some(h) => h,
-            None => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({ "error": "missing or invalid signature" })),
-                )
-                    .into_response();
-            }
+        let Some(hex_digest) = sig_header.strip_prefix("sha256=") else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "missing or invalid signature" })),
+            )
+                .into_response();
         };
 
         // Decode hex digest.
-        let expected_bytes = match hex::decode(hex_digest) {
-            Ok(b) => b,
-            Err(_) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({ "error": "invalid signature encoding" })),
-                )
-                    .into_response();
-            }
+        let Ok(expected_bytes) = hex::decode(hex_digest) else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid signature encoding" })),
+            )
+                .into_response();
         };
 
         // Compute HMAC and verify in constant time.
-        let mut mac = match HmacSha256::new_from_slice(secret_str.as_bytes()) {
-            Ok(m) => m,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": "internal error" })),
-                )
-                    .into_response();
-            }
+        let Ok(mut mac) = HmacSha256::new_from_slice(secret_str.as_bytes()) else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "internal error" })),
+            )
+                .into_response();
         };
         mac.update(&body);
         if mac.verify_slice(&expected_bytes).is_err() {
@@ -120,15 +97,12 @@ pub async fn receive_webhook(
     }
 
     // 4. Parse body as JSON.
-    let payload: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "invalid JSON payload" })),
-            )
-                .into_response();
-        }
+    let Ok(payload): Result<serde_json::Value, _> = serde_json::from_slice(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid JSON payload" })),
+        )
+            .into_response();
     };
 
     // 5. Emit event.
