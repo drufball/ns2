@@ -400,6 +400,12 @@ enum IssueAction {
             help = "Git branch name to associate with this issue. Auto-generated from title if omitted."
         )]
         branch: Option<String>,
+        #[arg(long, help = "Set initial status (e.g. in_progress to auto-start).")]
+        status: Option<String>,
+        #[arg(long, help = "Block until issue completes. Requires --status in_progress.")]
+        wait: bool,
+        #[arg(long, help = "Stream live events for this issue. Works with any status.")]
+        watch: bool,
     },
     #[command(
         about = "Edit an existing issue.",
@@ -684,6 +690,9 @@ async fn main() {
                 parent,
                 blocked_on,
                 branch,
+                status,
+                wait,
+                watch,
             } => {
                 commands::issue::run_new(
                     &cli.server,
@@ -693,6 +702,9 @@ async fn main() {
                     parent,
                     blocked_on,
                     branch,
+                    status,
+                    wait,
+                    watch,
                 )
                 .await;
             }
@@ -2858,5 +2870,131 @@ mod tests {
             result.is_err(),
             "subscribe without --deliver-to should fail to parse"
         );
+    }
+
+    // ─── `ns2 issue new` --status / --wait / --watch CLI parse tests ─────────
+
+    #[test]
+    fn issue_new_parses_status_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "new", "--title", "t", "--body", "b", "--status", "in_progress",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { status, .. },
+            } => {
+                assert_eq!(status.as_deref(), Some("in_progress"));
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_status_is_none() {
+        let cli =
+            Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"]).unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { status, .. },
+            } => {
+                assert!(status.is_none());
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_parses_wait_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "new", "--title", "t", "--body", "b", "--wait",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { wait, .. },
+            } => {
+                assert!(wait);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_wait_flag_is_false() {
+        let cli =
+            Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"]).unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { wait, .. },
+            } => {
+                assert!(!wait);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_parses_watch_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2", "issue", "new", "--title", "t", "--body", "b", "--watch",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { watch, .. },
+            } => {
+                assert!(watch);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_watch_flag_is_false() {
+        let cli =
+            Cli::try_parse_from(["ns2", "issue", "new", "--title", "t", "--body", "b"]).unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { watch, .. },
+            } => {
+                assert!(!watch);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_parses_all_new_flags_together() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "t",
+            "--body",
+            "b",
+            "--status",
+            "in_progress",
+            "--wait",
+            "--watch",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action:
+                    IssueAction::New {
+                        status,
+                        wait,
+                        watch,
+                        ..
+                    },
+            } => {
+                assert_eq!(status.as_deref(), Some("in_progress"));
+                assert!(wait);
+                assert!(watch);
+            }
+            _ => panic!("expected issue new command"),
+        }
     }
 }

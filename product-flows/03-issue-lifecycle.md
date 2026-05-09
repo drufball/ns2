@@ -18,38 +18,51 @@ ns2 agent new --name "swe" --description "Software engineer agent" --body "You a
 
 ## Steps
 
-### Step 1: Create an issue with an assignee
+### Step 1: Create and immediately start an issue with --wait
 
 ```bash
-ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hello.txt with the text Hello World" --assignee swe)
+ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hello.txt with the text Hello World" --assignee swe --status in_progress --wait)
 echo "Issue: $ISSUE"
 ```
 
-Expected: a 4-character issue ID printed to stdout (e.g., `a1b2`).
+Expected: the command blocks until the issue reaches a terminal state, then prints the issue ID to stdout (e.g., `a1b2`). The `--wait` flag requires `--status in_progress`.
 
-### Step 2: Verify the issue exists with status open
+### Step 1b (alternative): Create separately then wait
 
 ```bash
+ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hello.txt with the text Hello World" --assignee swe)
+ns2 issue set-status --id "$ISSUE" --status in_progress
+ns2 issue wait --id "$ISSUE"
+echo "Issue: $ISSUE"
+```
+
+Expected: same result — blocks until completion.
+
+### Step 2: Verify the issue exists with status open (without --wait)
+
+```bash
+ISSUE2=$(ns2 issue new --title "Another task" --body "Do something" --assignee swe)
 ns2 issue list --status open
 ```
 
-Expected: a table showing the issue with status `open`, assignee `swe`, and auto-generated branch `<id>-add-a-greeting`.
+Expected: a table showing the issue with status `open`, assignee `swe`, and auto-generated branch `<id>-another-task`.
 
-### Step 3: Set status to in_progress to auto-start execution
-
-```bash
-ns2 issue set-status --id "$ISSUE" --status in_progress
-```
-
-Expected: issue transitions to `running` and a session is automatically created and started.
-
-### Step 4: Wait for completion
+### Step 3: --wait without --status in_progress should error
 
 ```bash
-ns2 issue wait --id "$ISSUE"
+ns2 issue new --title "Test" --body "Test" --wait 2>&1 || true
 ```
 
-Expected: blocks until the session completes, then exits 0.
+Expected: exits non-zero with error message: `--wait requires --status in_progress`.
+
+### Step 4: --watch streams events for the new issue
+
+```bash
+WATCH_ISSUE=$(ns2 issue new --title "Watch test" --body "Test" --status in_progress --watch &)
+# events are printed to stdout as they arrive
+```
+
+Expected: SSE events (status_changed, comment_added) are printed to stdout as the issue progresses. Works with any status.
 
 ### Step 5: Verify issue status is completed
 
@@ -105,6 +118,11 @@ ns2 issue list --status waiting
 
 - [ ] `ns2 issue new` prints a 4-character issue ID to stdout
 - [ ] New issues start with status `open` and an auto-generated branch slug
+- [ ] `ns2 issue new --status in_progress` auto-starts the issue (spawns the agent harness)
+- [ ] `ns2 issue new --status in_progress --wait` blocks until the issue reaches a terminal state, then prints the ID
+- [ ] `ns2 issue new --wait` without `--status in_progress` exits non-zero with error: `--wait requires --status in_progress`
+- [ ] `ns2 issue new --watch` (any status) prints SSE events to stdout as the issue progresses
+- [ ] `ns2 issue new --status in_progress --watch` starts the issue and streams events simultaneously
 - [ ] Setting status to `in_progress` automatically creates a session and starts execution
 - [ ] The session uses the issue's assignee as the agent type
 - [ ] `ns2 issue wait` blocks until the issue reaches a terminal state and exits 0
@@ -115,4 +133,5 @@ ns2 issue list --status waiting
 - [ ] `ns2 issue comment` adds comments with the specified author
 - [ ] Issue status transitions: open → running (via in_progress) → completed (via stop tool) or open → running → waiting (no stop tool)
 - [ ] If the issue's session was in an error state when in_progress is set, the old session is removed before creating a new one
+- [ ] The ns2 orchestration skill and product-manager agent use `--wait` instead of the 2-step `set-status` + `issue wait` pattern
 - [ ] No panics or unhandled errors in server output

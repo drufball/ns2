@@ -24,6 +24,7 @@ pub fn all_nodes_terminal(roots: &[IssueTreeNode]) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::future_not_send)]
 pub async fn run_new(
     server: &str,
     title: String,
@@ -32,7 +33,16 @@ pub async fn run_new(
     parent: Option<String>,
     blocked_on: Vec<String>,
     branch: Option<String>,
+    status: Option<String>,
+    wait: bool,
+    watch: bool,
 ) {
+    // Validate: --wait requires --status in_progress
+    if wait && status.as_deref() != Some("in_progress") {
+        eprintln!("Error: --wait requires --status in_progress");
+        std::process::exit(1);
+    }
+
     let client = reqwest::Client::new();
 
     if let Some(ref a) = assignee {
@@ -67,8 +77,39 @@ pub async fn run_new(
         eprintln!("Error parsing response: {e}");
         std::process::exit(1);
     });
-    eprintln!("Created issue: {} ({})", issue.title, issue.id);
-    println!("{}", issue.id);
+    let issue_id = issue.id.clone();
+    eprintln!("Created issue: {} ({})", issue.title, issue_id);
+
+    // If --status was provided, set it now.
+    if let Some(ref s) = status {
+        run_set_status(server, issue_id.clone(), s.clone()).await;
+    }
+
+    // If --watch, start streaming SSE events to stderr in the background
+    // so stdout remains capturable for the issue ID.
+    // We spawn a task that streams events and writes to stderr.
+    let watch_handle = if watch {
+        let server_clone = server.to_string();
+        let id_clone = issue_id.clone();
+        Some(tokio::spawn(async move {
+            run_watch_stderr(&server_clone, id_clone).await;
+        }))
+    } else {
+        None
+    };
+
+    // If --wait, block until the issue reaches a terminal state.
+    if wait {
+        run_wait(server, vec![issue_id.clone()], None).await;
+    }
+
+    // Abort the watch task if it's still running (we've finished waiting or don't need it).
+    if let Some(handle) = watch_handle {
+        handle.abort();
+    }
+
+    // Print the issue ID to stdout LAST (so `id=$(ns2 issue new ...)` captures it after wait).
+    println!("{issue_id}");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -512,6 +553,19 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 /// `IssueEvent` to stdout, one line per event.  Exits on Ctrl-C (SIGINT) or
 /// when the server closes the stream.
 pub async fn run_watch(server: &str, id: String) {
+    run_watch_to(server, id, false).await;
+}
+
+/// Variant of `run_watch` that writes events to stderr instead of stdout.
+/// Used internally by `run_new` when `--watch` is passed, so that stdout
+/// remains capturable for the issue ID.
+pub async fn run_watch_stderr(server: &str, id: String) {
+    run_watch_to(server, id, true).await;
+}
+
+/// Internal SSE watch implementation.
+/// `to_stderr`: if true, write event lines to stderr; otherwise to stdout.
+async fn run_watch_to(server: &str, id: String, to_stderr: bool) {
     use futures::StreamExt;
     use std::io::Write;
 
@@ -540,8 +594,6 @@ pub async fn run_watch(server: &str, id: String) {
         running_clone.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
-    let stdout = std::io::stdout();
-
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         match stream.next().await {
             None | Some(Err(_)) => break, // server closed the stream or error
@@ -561,10 +613,18 @@ pub async fn run_watch(server: &str, id: String) {
                             continue;
                         };
                         if let SystemEvent::Issue(issue_event) = ev {
-                            let line = format_issue_event(&issue_event);
-                            let mut out = stdout.lock();
-                            writeln!(out, "{line}").ok();
-                            out.flush().ok();
+                            let event_line = format_issue_event(&issue_event);
+                            if to_stderr {
+                                let stderr = std::io::stderr();
+                                let mut out = stderr.lock();
+                                writeln!(out, "{event_line}").ok();
+                                out.flush().ok();
+                            } else {
+                                let stdout = std::io::stdout();
+                                let mut out = stdout.lock();
+                                writeln!(out, "{event_line}").ok();
+                                out.flush().ok();
+                            }
                         }
                     }
                 }
