@@ -22,6 +22,17 @@ pub fn slugify(title: &str) -> String {
     issues::slugify(title)
 }
 
+// Builds a user-facing error message when an issue cannot be set to in_progress
+// due to its current status. Cancelled issues get an extra hint.
+fn bad_status_error(status: &IssueStatus) -> String {
+    let base = format!("cannot set in_progress on issue in {status} state");
+    if *status == IssueStatus::Cancelled {
+        format!("{base}; use `ns2 issue reopen --id <id>` first")
+    } else {
+        base
+    }
+}
+
 // Wraps a present JSON field (including null) in Some, leaving absent fields as None.
 // Used with #[serde(default, deserialize_with = "deserialize_some")] to distinguish
 // "field absent" (None) from "field explicitly null" (Some(None)).
@@ -170,8 +181,8 @@ pub async fn add_comment(
 }
 
 /// Internal helper: start an issue by calling `issue_service.start_issue()` and
-/// spawning the harness.  Used both from `update_issue_status` (when the new
-/// status is `InProgress`) and the legacy `start_issue` handler.
+/// spawning the harness.  Used by `update_issue_status` when the new status is
+/// `InProgress`.
 async fn do_start_issue(
     state: &AppState,
     id: String,
@@ -279,6 +290,9 @@ pub async fn update_issue_status(
                 let refreshed = state.db.get_issue(id).await?;
                 return Ok(Json(refreshed));
             }
+            // session_id is None: a Waiting issue with no session cannot be
+            // resumed.  Fall through to the checks below, which will produce
+            // the "in waiting state" error — the correct behaviour.
         }
 
         // If the issue has a Failed session, cancel it and clear session_id so
@@ -299,10 +313,7 @@ pub async fn update_issue_status(
             } else if issue.status != types::IssueStatus::Open {
                 // Issue has a session that isn't failed (e.g. running/completed/cancelled)
                 // and the issue is not Open — cannot restart.
-                return Err(Error::BadRequest(format!(
-                    "cannot set in_progress on issue in {} state",
-                    issue.status
-                )));
+                return Err(Error::BadRequest(bad_status_error(&issue.status)));
             }
         } else if issue.status == types::IssueStatus::Failed {
             // Issue has no session but is in Failed state — allow restart
@@ -313,10 +324,7 @@ pub async fn update_issue_status(
             state.db.update_issue(&updated_issue).await?;
         } else if issue.status != types::IssueStatus::Open {
             // Issue has no session and is not Open or Failed — cannot restart.
-            return Err(Error::BadRequest(format!(
-                "cannot set in_progress on issue in {} state",
-                issue.status
-            )));
+            return Err(Error::BadRequest(bad_status_error(&issue.status)));
         }
 
         // Delegate to the internal start logic.
