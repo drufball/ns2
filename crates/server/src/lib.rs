@@ -4559,4 +4559,98 @@ mod tests {
             "POST /issues/:id/start must return 404 after route removal"
         );
     }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_cancelled_issue_hints_reopen() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an issue in Cancelled state (no session).
+        let issue = types::Issue {
+            id: "ci01".to_string(),
+            title: "Cancelled issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Cancelled,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Try to set to in_progress — must fail with a hint about `reopen`.
+        let resp = patch_issue_status(
+            app.clone(),
+            "ci01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on cancelled issue must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("reopen"),
+            "error message must hint at `reopen`, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_cancelled_issue_with_session_hints_reopen() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a cancelled session.
+        let cancelled_session_id = Uuid::new_v4();
+        let cancelled_session = types::Session {
+            id: cancelled_session_id,
+            name: "cancelled-session".into(),
+            status: types::SessionStatus::Cancelled,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&cancelled_session).await.unwrap();
+
+        // Create an issue in Cancelled state with a cancelled session.
+        let issue = types::Issue {
+            id: "ci02".to_string(),
+            title: "Cancelled issue with session".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Cancelled,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(cancelled_session_id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Try to set to in_progress — must fail with a hint about `reopen`.
+        let resp = patch_issue_status(
+            app.clone(),
+            "ci02",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on cancelled issue with session must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("reopen"),
+            "error message must hint at `reopen`, got: {err_msg}"
+        );
+    }
 }
