@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/agent.rs
-verified: 2026-05-06T18:51:59Z
+verified: 2026-05-09T06:32:55Z
 ---
 
 # ns2 agent
