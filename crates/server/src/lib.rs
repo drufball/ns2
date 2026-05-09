@@ -152,6 +152,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     // Spawn the hook evaluator background task.
     spawn_hook_evaluator(&state);
 
+    // Spawn the timer scheduler background task.
+    hooks::timer::spawn_timer_scheduler(&state.hook_store, &state.event_bus, &state.issue_service);
+
     // Recover orphaned sessions before accepting any connections.
     state.issue_service.orphan_sweep().await;
 
@@ -4209,6 +4212,135 @@ mod tests {
         let comment = &watcher_issue.comments[0];
         assert_eq!(comment.author, "ns2-hook");
         assert!(comment.body.contains("status changed"));
+    }
+
+    #[tokio::test]
+    async fn test_create_timer_hook_with_valid_schedule_returns_201() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "timer-hook",
+                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": "abc1" },
+                        "body": "Monday morning"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_timer_hook_with_invalid_schedule_returns_400() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "bad-timer",
+                    "source": { "type": "timer", "schedule": "not-a-cron" },
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": "abc1" },
+                        "body": "bad"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string(), "response must contain 'error' field");
+        let err = v["error"].as_str().unwrap();
+        assert!(
+            err.contains("invalid cron schedule"),
+            "error must mention 'invalid cron schedule', got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_timer_hook_source_serialized_correctly() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "timer-check",
+                    "source": { "type": "timer", "schedule": "* * * * *" },
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": "w" },
+                        "body": "tick"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["source"]["type"], "timer");
+        assert_eq!(v["source"]["schedule"], "* * * * *");
+    }
+
+    // ─── Timer hook list filtering ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_hooks_source_type_timer_filter() {
+        let app = test_app().await;
+
+        // Create an internal hook and a timer hook
+        app.clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "internal-hook",
+                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
+                }),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "timer-hook",
+                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
+                    "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/hooks?source_type=timer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only timer hooks should be returned");
+        assert_eq!(arr[0]["name"], "timer-hook");
+        assert_eq!(arr[0]["source"]["type"], "timer");
     }
 
     #[tokio::test]

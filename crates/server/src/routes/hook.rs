@@ -79,6 +79,17 @@ pub async fn create_hook(
     State(state): State<AppState>,
     Json(req): Json<CreateHookRequest>,
 ) -> impl IntoResponse {
+    // Validate timer hook schedule
+    if let HookSource::Timer { ref schedule } = req.source {
+        if let Err(e) = hooks::cron::next_after(schedule, chrono::Utc::now()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    }
+
     let hook = Hook {
         id: generate_hook_id(),
         name: req.name,
