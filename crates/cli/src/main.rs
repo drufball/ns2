@@ -301,7 +301,7 @@ enum SessionAction {
     },
     #[command(
         about = "Stream a session's output to stdout.",
-        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session completed successfully\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
+        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session finished; now in waiting state\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
     )]
     Tail {
         #[arg(
@@ -888,6 +888,7 @@ mod tests {
         render_session_line, render_tree_line, session_status_symbol, spinner_char, truncate_str,
         IssueTreeNode, SPINNER_FRAMES,
     };
+    use clap::CommandFactory;
     use events::SessionEvent;
     use types::*;
     use uuid::Uuid;
@@ -3273,6 +3274,36 @@ mod tests {
         assert!(
             result.is_err(),
             "event new without --type should fail to parse"
+        );
+    }
+
+    // ─── Regression: session tail long_about must not reference stale status ─
+
+    #[test]
+    fn session_tail_long_about_does_not_contain_completed() {
+        // "completed" was removed as a session status in GH#131.
+        // This test guards against stale wording creeping back into the
+        // tail subcommand's help text.
+        let cmd = Cli::command();
+        let session_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "session")
+            .expect("session subcommand should exist");
+        let tail_sub = session_sub
+            .get_subcommands()
+            .find(|s| s.get_name() == "tail")
+            .expect("tail subcommand should exist");
+        let long_about = tail_sub
+            .get_long_about()
+            .expect("tail subcommand should have long_about")
+            .to_string();
+        assert!(
+            long_about.contains("waiting"),
+            "session tail long_about must describe the 'waiting' state; got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session tail long_about must not contain 'completed', got: {long_about}"
         );
     }
 }
