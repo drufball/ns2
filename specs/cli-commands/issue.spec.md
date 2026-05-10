@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/issue.rs
-verified: 2026-05-09T06:32:23Z
+verified: 2026-05-10T11:07:19Z
 ---
 
 # ns2 issue
@@ -34,6 +34,8 @@ id=$(ns2 issue new --title "Add retry logic" --body "..." --assignee swe \
 ```
 
 `--status in_progress` sets the status (starting the agent) immediately after creation. `--wait` blocks until the issue reaches a terminal state and always prints the issue ID to stdout last. `--watch` streams live SSE events to stderr while `--wait` runs, keeping stdout capturable.
+
+`--subscribe issue:<id>` (or `--subscribe session:<id>`) creates a hook immediately after the issue is created that delivers notifications on `issue.status_changed` and `issue.comment_added` events. The hook ID goes to stderr; stdout still only contains the issue ID. This calls the same logic as `ns2 issue subscribe`, ensuring no drift between the two paths.
 
 ## Setting status and starting
 

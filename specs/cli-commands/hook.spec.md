@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/commands/hook.rs
   - crates/cli/src/main.rs
-verified: 2026-05-09T06:29:25Z
+verified: 2026-05-10T11:07:19Z
 ---
 
 # ns2 hook
@@ -59,8 +59,8 @@ ns2 hook delete --id <id>
 
 ## Subscribe shortcut
 
-`ns2 hook subscribe` is sugar for creating an internal hook that watches a specific issue for status changes and new comments:
+`ns2 issue subscribe` is sugar for creating an internal hook that watches a specific issue for status changes and new comments:
 
 ```bash
-ns2 hook subscribe --id <issue-id> --deliver-to <watcher-issue-id>
+ns2 issue subscribe --id <issue-id> --deliver-to issue:<watcher-issue-id>
 ```
