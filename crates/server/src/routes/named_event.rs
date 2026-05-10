@@ -74,7 +74,7 @@ pub async fn create_event(
         return EventApiError(e).into_response();
     }
 
-    (StatusCode::OK, Json(event)).into_response()
+    (StatusCode::CREATED, Json(event)).into_response()
 }
 
 /// `GET /named-events`
