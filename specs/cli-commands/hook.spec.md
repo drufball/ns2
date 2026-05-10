@@ -2,7 +2,7 @@
 targets:
   - crates/cli/src/commands/hook.rs
   - crates/cli/src/main.rs
-verified: 2026-05-10T11:09:26Z
+verified: 2026-05-10T13:58:21Z
 ---
 
 # ns2 hook

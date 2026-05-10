@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-05-10T11:09:22Z
+verified: 2026-05-10T14:01:16Z
 ---
 
 # server crate
@@ -23,9 +23,10 @@ On startup, `run(config)` initializes the database, constructs `AppState`, spawn
 
 ## Background tasks
 
-Two background tasks are spawned at server startup:
+Three background tasks are spawned at server startup:
 
 - **Hook evaluator** — subscribes to the `EventBus` and fires internal hooks whose `event_types` and `filter` match incoming `SystemEvent`s.
+- **Global issue lifecycle subscriber** (`spawn_issue_lifecycle_subscriber`) — subscribes to the `EventBus` and drives issue state in response to session and issue events: `SessionEvent::Stopped`/`Done` park the linked issue to `Completed` or `Waiting`; `SessionEvent::Error` marks it `failed`; `IssueEvent::StatusChanged { to: InProgress }` spawns or resumes the harness; `IssueEvent::StatusChanged { to: Cancelled }` drops the msg sender to terminate the harness.
 - **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer hooks, and emits `SystemEvent::TimerFired` for any whose 5-field cron schedule falls within the 60-second rolling window ending at `now`. The action is then executed in a spawned task identical to the evaluator path.
 
 ## Hook validation

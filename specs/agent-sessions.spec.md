@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-05-10T11:07:49Z
+verified: 2026-05-10T14:01:38Z
 ---
 
 # Agent Sessions Spec

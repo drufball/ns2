@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/session.rs
-verified: 2026-05-10T11:07:49Z
+verified: 2026-05-10T13:58:21Z
 ---
 
 # ns2 session

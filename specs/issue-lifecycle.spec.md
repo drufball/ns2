@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-05-10T11:09:26Z
+verified: 2026-05-10T14:01:16Z
 ---
 
 # Issue Lifecycle Spec
@@ -18,14 +18,14 @@ holds no authoritative issue state in memory.
 ## States and Transitions
 
 ```
-open → running → completed
-              ↘ failed
-              ↘ waiting
-         ↑ (reopen)
+open → in_progress → completed
+                  ↘ failed
+                  ↘ waiting
+     ↑ (reopen)
 ```
 
 - **`open`** — issue created, not yet started. The default state after `ns2 issue new`.
-- **`running`** — `PATCH /issues/:id/status` with `in_progress` has been called; a session is active.
+- **`in_progress`** — `PATCH /issues/:id/status` with `in_progress` has been called; a session is active. Stored as `in_progress` in the DB (`running` is accepted as a legacy parse alias but never written).
 - **`completed`** — the agent called `stop(complete)`. Terminal.
 - **`waiting`** — the agent called `stop(waiting)` or the session ended without calling
   `stop`. The issue is paused for human input. Terminal (the session is still associated
@@ -38,17 +38,17 @@ open → running → completed
 
 ## Stop-Tool-Driven Issue Completion
 
-When `PATCH /issues/:id/status` with `in_progress` is received, the server spawns an `issue_watcher` task
-that subscribes to the session's event bus. The watcher drives the issue to its terminal
-state using the `Stopped` SSE event emitted by the harness just before `Done`.
+When `PATCH /issues/:id/status` with `in_progress` is received, the global issue lifecycle
+subscriber (a background task in the server) drives the issue to its terminal state using
+the `Stopped` and `Done` events emitted by the harness.
 
 **Event flow:**
 
 1. Agent calls `stop(status, [comment])` during a turn → harness captures a `StopSignal`.
 2. After `end_turn`, the harness emits `SessionEvent::Stopped { status, comment }` if a
    stop signal was received, then emits `SessionEvent::Done`.
-3. The `issue_watcher` holds the most recent `Stopped` event in memory. On `Done`, it
-   calls `park_issue(id, park_status, comment)`:
+3. The lifecycle subscriber holds the most recent `Stopped` event in a per-session map.
+   On `Done`, it calls `park_issue(id, park_status, comment)`:
    - `stop(complete)` → `park_status = Completed`
    - `stop(waiting)` or no stop call → `park_status = Waiting`
 
@@ -62,9 +62,6 @@ state using the `Stopped` SSE event emitted by the harness just before `Done`.
 4. On `Error { message }` — posts `message` as a comment (author = `"system"`), then
    marks the issue `failed`.
 
-The `Stopped` event for a different session is ignored (the watcher filters by
-`session_id`).
-
 **If the agent never calls `stop`:** the session ends as `Waiting` and the issue
 transitions to `Waiting` with no comment added.
 
@@ -75,7 +72,7 @@ Comments are stored in the `issues.comments` JSON array with `author`, `created_
 ## Orphan Recovery
 
 On server start, the orphan sweep (see Session Lifecycle Spec) identifies issues whose
-linked session was `running` at the time of restart. For each such issue:
+linked session was `in_progress` at the time of restart. For each such issue:
 
 1. The issue is transitioned to `failed`.
 2. A comment is appended:
@@ -106,13 +103,13 @@ For all states:
   **before** the status transition, so it is visible in history when the agent resumes.
 - The `updated_at` timestamp is refreshed.
 - Only `failed`, `completed`, and `waiting` issues can be reopened. Attempting to reopen
-  an `open` or `running` issue returns an error.
+  an `open` or `in_progress` issue returns an error.
 
 After reopening, the normal lifecycle applies.
 
 ## Validation Rules
 
-`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `running`, or `waiting` states.
+`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `in_progress`, or `waiting` states.
 
 ## Connect Sections
 
