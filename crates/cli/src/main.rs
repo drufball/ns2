@@ -841,6 +841,7 @@ mod tests {
         render_session_line, render_tree_line, session_status_symbol, spinner_char, truncate_str,
         IssueTreeNode, SPINNER_FRAMES,
     };
+    use clap::CommandFactory;
     use events::SessionEvent;
     use types::*;
     use uuid::Uuid;
@@ -3334,6 +3335,36 @@ mod tests {
         assert!(
             !long_about.contains("completed"),
             "session tail long_about must not contain 'completed' (stale status removed in GH#131); got: {long_about}"
+        );
+    }
+
+    // ─── Regression: session tail long_about must not reference stale status ─
+
+    #[test]
+    fn session_tail_long_about_does_not_contain_completed() {
+        // "completed" was removed as a session status in GH#131.
+        // This test guards against stale wording creeping back into the
+        // tail subcommand's help text.
+        let cmd = Cli::command();
+        let session_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "session")
+            .expect("session subcommand should exist");
+        let tail_sub = session_sub
+            .get_subcommands()
+            .find(|s| s.get_name() == "tail")
+            .expect("tail subcommand should exist");
+        let long_about = tail_sub
+            .get_long_about()
+            .expect("tail subcommand should have long_about")
+            .to_string();
+        assert!(
+            long_about.contains("waiting"),
+            "session tail long_about must describe the 'waiting' state; got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session tail long_about must not contain 'completed', got: {long_about}"
         );
     }
 }
