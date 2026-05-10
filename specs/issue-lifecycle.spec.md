@@ -4,10 +4,33 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-06-02T00:00:00Z
+  - crates/issue-backend/src/**/*.rs
+  - crates/issues/src/**/*.rs
+verified: 2026-05-10T19:51:52Z
 ---
 
 # Issue Lifecycle Spec
+
+## IssueBackend trait
+
+All issue CRUD operations go through the `IssueBackend` trait, defined in the `issue-backend` crate. The `issues` service layer holds an `Arc<dyn IssueBackend>` and never talks to the database directly for issue reads/writes.
+
+Three built-in implementations are provided:
+
+- **`SqliteIssueBackend`** (default) — wraps `Arc<dyn db::Db>`; behaviour is identical to the previous direct-DB approach.
+- **`ShellIssueBackend`** — forks a user-defined shell script for each operation, exchanging JSON via stdin/stdout. Each operation sends `{"op": "<op>", ...}` and expects `{"ok": true, ...}` back.
+- **`GitHubIssueBackend`** — creates/reads/lists/updates GitHub Issues via the REST API. A `github_issue_mapping` SQLite table tracks `ns2_id ↔ github_issue_number` so the rest of ns2 always works with ns2 IDs.
+
+The active backend is selected at server startup via `[issues] backend` in `ns2.toml`. Setting `backend = "github"` requires `GITHUB_TOKEN` in the environment and `[issues.github]` config.
+
+## Human vs. agent assignment
+
+When `PATCH /issues/:id/status` is called with `in_progress`, the server only requires the issue to have an assignee set — it does **not** check for an agent definition file at the HTTP layer. The human-vs-agent distinction is resolved later by the issue lifecycle subscriber:
+
+- If `.ns2/agents/<assignee>.md` exists → spawn a harness (agent-handled).
+- If no such file exists → skip harness spawn (human-handled); the issue is in `running` state and the human is expected to do the work.
+
+This allows issues to be assigned to human usernames (e.g. `"alice"`) without requiring a matching agent file.
 
 ## Overview
 
@@ -112,7 +135,7 @@ After reopening, the normal lifecycle applies.
 
 ## Validation Rules
 
-`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `running`, or `waiting` states.
+`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee. An agent definition file is **not** required — if none exists the issue is treated as human-assigned and no harness is spawned. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `running`, or `waiting` states.
 
 ## Connect Sections
 

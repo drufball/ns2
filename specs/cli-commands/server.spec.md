@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/server.rs
-verified: 2026-06-02T00:00:00Z
+verified: 2026-05-10T19:51:52Z
 ---
 
 # ns2 server
@@ -23,3 +23,21 @@ ns2 server stop           # when done
 ```
 
 You rarely need to think about the server after starting it. If a command fails with a connection error, the server probably isn't running.
+
+## Configuration (ns2.toml)
+
+On startup, `ns2 server start` reads `ns2.toml` from the git root (falling back to the current directory). The `[issues]` section configures the pluggable issue storage backend:
+
+```toml
+[issues]
+backend = "sqlite"   # default; also "shell" or "github"
+
+[issues.shell]
+command = ".ns2/backends/my-backend.sh"
+
+[issues.github]
+owner = "myorg"
+repo  = "myrepo"
+```
+
+If `ns2.toml` is absent or has no `[issues]` section, the SQLite backend is used. The GitHub backend additionally requires `GITHUB_TOKEN` in the environment.

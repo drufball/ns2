@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-05-10T18:26:29Z
+verified: 2026-05-10T19:51:43Z
 ---
 
 # Architecture Spec
@@ -32,13 +32,15 @@ graph TD
 
     events --> types
 
+    issue-backend --> db & types
+
     harness --> db & anthropic & tools & agents & workspace & events
 
-    issues --> db & events
+    issues --> issue-backend & db & events
 
     hooks --> events & db & issues & types
 
-    server --> issues & db & anthropic & tools & harness & events & hooks
+    server --> issues & issue-backend & db & anthropic & tools & harness & events & hooks & agents
 
     tui --> types
     cli --> agents & specs & workspace & server & types
@@ -52,7 +54,7 @@ Arrows point from dependent to dependency.
 
 **`types`** — shared domain types: `Session`, `Turn`, `ContentBlock`, `Issue`, tool shapes. No behavior.
 
-**`db`** — SQLite access via sqlx. Owns schema, migrations, and every query.
+**`db`** — SQLite access via sqlx. Owns schema, migrations, and every query. Also owns the `GitHubMappingStore` trait and migration for the `github_issue_mapping` table (used by the GitHub backend).
 _Doesn't own: SQL written anywhere else._
 
 **`anthropic`** — HTTP client for the Anthropic Messages API. Streaming SSE parsing, request/response types.
@@ -66,21 +68,28 @@ _Doesn't own: session or turn state._
 
 **`specs`** — reads/writes `.spec.md` files; staleness checking.
 
-**`events`** — global event bus. Defines `SystemEvent` (the top-level envelope), `SessionEvent` (turn-level harness events), and `IssueEvent` (issue lifecycle events). `SystemEvent::External { event_id, event_name, payload }` carries the named Event's id and name when a webhook is received; `SystemEvent::TimerFired { event_id, event_name, fired_at }` carries them for timer firings. `EventBus` is a cheaply-cloneable `tokio::broadcast` wrapper; `send` is fire-and-forget.
+**`events`** — global event bus. Defines `SystemEvent` (the top-level envelope), `SessionEvent` (turn-level harness events), `IssueEvent` (issue lifecycle events), and `SystemEvent::Custom` (emitted via `POST /events/emit` for shell backends and external integrations). `SystemEvent::External { event_id, event_name, payload }` carries the named Event's id and name when a webhook is received; `SystemEvent::TimerFired { event_id, event_name, fired_at }` carries them for timer firings. `EventBus` is a cheaply-cloneable `tokio::broadcast` wrapper; `send` is fire-and-forget.
+
+**`issue-backend`** — pluggable issue storage layer sitting between `db` and `issues`. Defines the `IssueBackend` trait and three built-in implementations:
+- `SqliteIssueBackend` — wraps `Arc<dyn db::Db>` (default)
+- `ShellIssueBackend` — delegates to a user-supplied shell script via JSON stdin/stdout
+- `GitHubIssueBackend` — uses GitHub REST API; SQLite mapping table tracks `ns2_id ↔ github_issue_number`
+
+Also exposes `IssueFilter` and the `from_config()` factory function. Config types (`IssueBackendConfig`, `BackendKind`, `ShellConfig`, `GithubConfig`) live in `server` so `cli` doesn't need to depend on `issue-backend` directly.
 
 **`harness`** — agent turn loop. Context window construction, system prompt loading, tool dispatch, worktree resolution. Publishes `SystemEvent::Session` events to the `EventBus`; one instance per active session.
 _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP._
 
-**`issues`** — pure issue domain service. Owns the state machine (open → in_progress → completed/failed/waiting), `start_issue`, `resume_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Exposes `build_initial_message` (pure function that formats an issue's title, body, and comment history into the opening agent prompt). Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`.
+**`issues`** — pure issue domain service. Owns the state machine (open → in_progress → completed/failed/waiting), `start_issue`, `resume_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Exposes `build_initial_message` (pure function that formats an issue's title, body, and comment history into the opening agent prompt). Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`. Holds `Arc<dyn IssueBackend>` for issue CRUD and `Arc<dyn db::Db>` for session operations.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
 
 **`hooks`** — hook filter evaluation, action dispatch, and timer scheduling. Defines `HookAction` (SendMessage/CreateIssue/RunShell) and `HookFilter` (field conditions). Hooks subscribe to events by name via `Hook.event_names: Vec<String>` (e.g. `"issue.created"`, `"external.ci-complete"`, `"timer.heartbeat"`, or `"*"` to match all). Modules: `evaluate` (event matching against `event_names`), `execute` (action dispatch), `template` (minijinja rendering), `cron` (5-field cron → next fire time via the `cron` crate), and `timer` (`process_timer_events` + `spawn_timer_scheduler` background loop that reads timer events from `EventStore`). Also exposes `generate_event_id()` for creating short random IDs for named events.
 _Known violation tracked in GH#98 (direct `issues` dep)._
 
-**`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` and an `EventStore` in `AppState` shared by all routes and background tasks. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Exposes `POST /webhooks/:event_id` for external webhook ingestion: looks up the named Event from `EventStore`, validates the HMAC-SHA256 signature (if a secret is set), and publishes `SystemEvent::External`. Named-event CRUD is at `POST /named-events`, `GET /named-events`, `GET /named-events/:id`, `DELETE /named-events/:id`. Hook CRUD is at `/hooks`. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle. On startup, spawns three background tasks: the hook evaluator, the timer scheduler (`hooks::timer::spawn_timer_scheduler` seeded with `EventStore`), and the global issue lifecycle subscriber (`spawn_issue_lifecycle_subscriber`).
+**`server`** — axum HTTP server. Routes, `ServerConfig`, session maps, harness spawning. Holds an `EventBus` and an `EventStore` in `AppState` shared by all routes and background tasks. Exposes `GET /events` as an SSE endpoint that replays session history from DB then streams live `SystemEvent`s with optional `session_id`, `issue_id`, and `types` filters. Exposes `POST /webhooks/:event_id` for external webhook ingestion: looks up the named Event from `EventStore`, validates the HMAC-SHA256 signature (if a secret is set), and publishes `SystemEvent::External`. Exposes `POST /events/emit` for injecting custom events onto the EventBus (the inbound integration point for shell backends). Named-event CRUD is at `POST /named-events`, `GET /named-events`, `GET /named-events/:id`, `DELETE /named-events/:id`. Hook CRUD is at `/hooks`. Constructs the Anthropic client, standard tools, and `spawn_harness_sync`. Delegates issue lifecycle to `IssueService` but owns all harness lifecycle. On startup, spawns three background tasks: the hook evaluator, the timer scheduler (`hooks::timer::spawn_timer_scheduler` seeded with `EventStore`), and the global issue lifecycle subscriber (`spawn_issue_lifecycle_subscriber`). The lifecycle subscriber implements human-vs-agent assignment: before spawning a harness it checks whether `.ns2/agents/<assignee>.md` exists; if not, the issue transitions to `in_progress` without spawning a harness (human-handled). Also owns `IssueBackendConfig`, `BackendKind`, `ShellConfig`, and `GithubConfig` wrapper types (mirroring `issue-backend`) so `cli` can parse `[issues]` config without depending on `issue-backend` directly.
 _Doesn't own: issue business logic — delegate to `issues`._
 
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 
-**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types. Uses `reqwest` directly for HTTP calls to the local ns2 server (health checks, issue/session/hook CRUD, SSE streaming).
+**`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types. Uses `reqwest` directly for HTTP calls to the local ns2 server (health checks, issue/session/hook CRUD, SSE streaming). The `ns2 event emit` subcommand posts to `POST /events/emit`.
 _Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._
