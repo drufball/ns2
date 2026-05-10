@@ -58,6 +58,10 @@ pub struct Issue {
     pub assignee: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_id: Option<String>,
+    /// Ancestor issue IDs from immediate parent up to root.
+    /// Populated at event-emission time, NOT persisted to the database.
+    #[serde(default)]
+    pub ancestor_ids: Vec<String>,
     pub blocked_on: Vec<String>,
     pub comments: Vec<IssueComment>,
     pub created_at: DateTime<Utc>,
@@ -156,27 +160,41 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+// ── Event domain types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKind {
+    Webhook { secret: Option<String> },
+    Timer { schedule: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub id: String,
+    pub name: String,
+    pub kind: EventKind,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Hook domain types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hook {
     pub id: String,
     pub name: String,
-    pub source: HookSource,
+    /// Names of events this hook listens for (e.g. "issue.created",
+    /// "external.ci-complete", "timer.heartbeat"). Use `"*"` to match all.
+    pub event_names: Vec<String>,
     pub filter: Option<HookFilter>,
     pub action: HookAction,
     pub enabled: bool,
     pub created_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookSource {
-    Internal { event_types: Vec<String> },
-    External { secret: Option<String> },
-    Timer { schedule: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,6 +555,86 @@ mod tests {
         assert_eq!(parsed, SessionStatus::Waiting);
     }
 
+    // ── Event / EventKind serde round-trips ───────────────────────────────────
+
+    #[test]
+    fn event_kind_webhook_serde_round_trip() {
+        let kind = EventKind::Webhook {
+            secret: Some("s3cr3t".into()),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: EventKind = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, EventKind::Webhook { secret: Some(ref s) } if s == "s3cr3t"));
+    }
+
+    #[test]
+    fn event_kind_timer_serde_round_trip() {
+        let kind = EventKind::Timer {
+            schedule: "0 9 * * 1".into(),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: EventKind = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, EventKind::Timer { ref schedule } if schedule == "0 9 * * 1")
+        );
+    }
+
+    #[test]
+    fn event_serde_round_trip() {
+        let ev = Event {
+            id: "abcd".into(),
+            name: "ci-complete".into(),
+            kind: EventKind::Webhook {
+                secret: Some("s3cr3t".into()),
+            },
+            description: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "abcd");
+        assert_eq!(back.name, "ci-complete");
+        assert!(back.description.is_none());
+        assert!(back.enabled);
+        assert!(
+            matches!(back.kind, EventKind::Webhook { secret: Some(ref s) } if s == "s3cr3t")
+        );
+    }
+
+    #[test]
+    fn event_enabled_field_defaults_serde() {
+        // enabled=false should survive round-trip
+        let ev = Event {
+            id: "xyz1".into(),
+            name: "timer-daily".into(),
+            kind: EventKind::Timer {
+                schedule: "0 9 * * *".into(),
+            },
+            description: Some("daily timer".into()),
+            enabled: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+    }
+
+    #[test]
+    fn event_kind_tag_is_snake_case() {
+        let webhook_kind = EventKind::Webhook { secret: None };
+        let v: serde_json::Value = serde_json::to_value(&webhook_kind).unwrap();
+        assert_eq!(v["type"], "webhook");
+
+        let timer_kind = EventKind::Timer {
+            schedule: "* * * * *".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&timer_kind).unwrap();
+        assert_eq!(v["type"], "timer");
+    }
+
     #[test]
     fn issue_status_waiting_round_trip() {
         let s = IssueStatus::Waiting.to_string();
@@ -569,6 +667,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec!["xy34".into()],
             comments: vec![IssueComment {
                 author: "user".into(),
@@ -587,5 +686,49 @@ mod tests {
         assert_eq!(decoded.comments.len(), 1);
         assert_eq!(decoded.comments[0].author, "user");
         assert_eq!(decoded.status, IssueStatus::Open);
+    }
+
+    #[test]
+    fn issue_ancestor_ids_defaults_to_empty_vec_when_missing_from_json() {
+        // Old DB rows won't have ancestor_ids — they must deserialize with empty vec.
+        let json = r#"{
+            "id": "ab12",
+            "title": "Test",
+            "body": "Body",
+            "status": "open",
+            "branch": "main",
+            "assignee": null,
+            "session_id": null,
+            "parent_id": null,
+            "blocked_on": [],
+            "comments": [],
+            "created_at": "2024-01-15T10:30:00Z",
+            "updated_at": "2024-01-15T10:30:00Z"
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("deserialize without ancestor_ids");
+        assert_eq!(issue.ancestor_ids, Vec::<String>::new(),
+            "ancestor_ids must default to empty vec when not in JSON");
+    }
+
+    #[test]
+    fn issue_ancestor_ids_round_trips() {
+        let issue = Issue {
+            id: "ab12".into(),
+            title: "Test".into(),
+            body: "Body".into(),
+            status: IssueStatus::Open,
+            branch: "main".into(),
+            assignee: None,
+            session_id: None,
+            parent_id: Some("parent1".into()),
+            ancestor_ids: vec!["parent1".into(), "grandparent1".into()],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&issue).expect("serialize");
+        let decoded: Issue = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.ancestor_ids, vec!["parent1", "grandparent1"]);
     }
 }
