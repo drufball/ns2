@@ -11,13 +11,44 @@ pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
     (data_dir, pid_file)
 }
 
+/// Read the `[issues]` section from `ns2.toml` in the current directory.
+///
+/// Returns `IssueBackendConfig::default()` (sqlite) if the file is absent or the
+/// `[issues]` key is missing.
+fn read_issue_backend_config() -> issue_backend::IssueBackendConfig {
+    // Try the git root first, then the current directory.
+    let candidates: Vec<PathBuf> = workspace::git_root_sync()
+        .into_iter()
+        .map(|r| r.join("ns2.toml"))
+        .chain(std::iter::once(PathBuf::from("ns2.toml")))
+        .collect();
+
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(parsed) = toml::from_str::<Ns2Toml>(&content) {
+                return parsed.issues.unwrap_or_default();
+            }
+        }
+    }
+
+    issue_backend::IssueBackendConfig::default()
+}
+
+/// Minimal representation of `ns2.toml` for parsing the `[issues]` block.
+#[derive(serde::Deserialize, Default)]
+struct Ns2Toml {
+    issues: Option<issue_backend::IssueBackendConfig>,
+}
+
 pub async fn run_start(port: u16) {
     let (data_dir, pid_file) = data_dir_and_pid(port);
+    let issue_backend = read_issue_backend_config();
     let config = server::ServerConfig {
         port,
         data_dir,
         pid_file,
         model: std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string()),
+        issue_backend,
     };
     if let Err(e) = server::run(config).await {
         eprintln!("Server error: {e}");

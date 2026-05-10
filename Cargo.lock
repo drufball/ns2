@@ -432,6 +432,7 @@ dependencies = [
  "clap",
  "events",
  "futures",
+ "issue-backend",
  "predicates",
  "reqwest",
  "serde",
@@ -441,6 +442,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "types",
  "ureq",
  "uuid",
@@ -1387,8 +1389,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "db",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "types",
 ]
 
