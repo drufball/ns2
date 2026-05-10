@@ -9,18 +9,13 @@ Full session lifecycle using the real Anthropic API. This is the most basic end-
 
 ## Setup
 
-```bash
-# In a temp directory with a git repo:
-git init /tmp/ns2-smoke && cd /tmp/ns2-smoke
-git commit --allow-empty -m "init"
-ns2 server start
-```
-
-## Fixture Setup
+Run each command via `docker exec ns2-flow-01 bash -c '...'`. Source `/tmp/ns2-host.env` before starting the server so it picks up `ANTHROPIC_API_KEY`:
 
 ```bash
-docker exec ns2-flow-01 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
-docker exec ns2-flow-01 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &'
+mkdir -p /tmp/ns2-smoke
+git -C /tmp/ns2-smoke init
+git -C /tmp/ns2-smoke commit --allow-empty -m "init"
+set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
 sleep 3
 ```
 
