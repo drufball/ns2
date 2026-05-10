@@ -3,10 +3,6 @@
 
 Claude writes and reads files using tools across multiple turns within a session. Combines tool-use and conversation-history verification in a single flow.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
 
 Run each command via `docker exec ns2-flow-02 bash -c '...'`:
@@ -75,7 +71,7 @@ echo "Session: $SESSION2"
 ns2 session tail --id "$SESSION2"
 ```
 
-Expected: Claude reads the file and reports `7742`. Session transitions to `completed`.
+Expected: Claude reads the file and reports `7742`. Session transitions to `waiting`.
 
 #### Send a follow-up message
 

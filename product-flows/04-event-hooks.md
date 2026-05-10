@@ -2,10 +2,6 @@
 
 Create internal hooks that react to issue state changes and deliver notifications without blocking. This is the primary orchestration smoke test for the hook system.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
 
 Run each command via `docker exec ns2-flow-04 bash -c '...'`:
@@ -69,11 +65,10 @@ Expected: exits 0 when the work issue reaches a terminal state. (`ns2 issue star
 ```bash
 sleep 2  # allow hook delivery to complete
 
-curl -sf "http://localhost:9876/issues/$WATCHER" | python3 -c "
-import sys, json, os
+ns2 issue show --id "$WATCHER" --json | python3 -c "
+import sys, json
 d = json.load(sys.stdin)
-work = os.environ.get('WORK', '')
-comments = [c for c in d['comments'] if work in c['body'] or 'completed' in c['body'].lower() or 'running' in c['body'].lower()]
+comments = [c for c in d['comments'] if 'completed' in c['body'].lower() or 'running' in c['body'].lower()]
 print('Notification comments:', len(comments))
 print('OK' if comments else 'FAIL — no notification comment found')
 "
