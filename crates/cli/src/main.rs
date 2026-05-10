@@ -87,15 +87,13 @@ enum Command {
 enum HookSubcommand {
     #[command(
         about = "Create a new hook.",
-        long_about = "Create a new hook that reacts to system events.\n\nExamples:\n  ns2 hook new --name notify --source internal --event-type issue.status_changed \\\n    --action send-message --target issue:<id> --body \"Status: {{ event.data.to }}\"\n\n  ns2 hook new --name alert --source internal --event-type issue.created \\\n    --action send-message --target issue:<watcher-id> --body \"New issue created\""
+        long_about = "Create a new hook that reacts to system events.\n\nExamples:\n  ns2 hook new --name notify --event issue.status_changed \\\n    --action send-message --target issue:<id> --body \"Status: {{ event.data.to }}\"\n\n  ns2 hook new --name alert --event issue.created \\\n    --action send-message --target issue:<watcher-id> --body \"New issue created\"\n\n  ns2 hook new --name ci-handler --event external.ci-complete \\\n    --action send-message --target issue:<id> --body \"CI done\"\n\n  ns2 hook new --name ticker --event timer.heartbeat \\\n    --action send-message --target issue:<id> --body \"tick\""
     )]
     New {
         #[arg(long, help = "Hook name. Required.")]
         name: String,
-        #[arg(long, help = "Source type: internal, external, or timer.")]
-        source: String,
-        #[arg(long = "event-type", num_args = 0.., help = "Event type(s) to listen for (for internal source). Repeatable. Use '*' for all.")]
-        event_types: Vec<String>,
+        #[arg(long = "event", num_args = 0.., help = "Event name(s) to listen for. Repeatable. Examples: issue.created, external.ci-complete, timer.heartbeat, '*'.")]
+        event_names: Vec<String>,
         #[arg(long = "filter-field", num_args = 0.., help = "Field condition in 'field=value' form. Repeatable (AND'd).")]
         filter_fields: Vec<String>,
         #[arg(long, help = "Action type: send-message, create-issue, or run-shell.")]
@@ -114,15 +112,11 @@ enum HookSubcommand {
         title: Option<String>,
         #[arg(long, help = "Assignee for create-issue action.")]
         assignee: Option<String>,
-        #[arg(long, help = "Cron schedule for timer source (e.g. '0 9 * * 1' = Monday 9am).")]
-        schedule: Option<String>,
     },
     #[command(about = "List hooks.")]
     List {
         #[arg(long, help = "Only show enabled hooks.")]
         enabled: bool,
-        #[arg(long, help = "Filter by source type: internal, external, timer.")]
-        source_type: Option<String>,
     },
     #[command(about = "Show details of a hook.")]
     Show {
@@ -767,36 +761,29 @@ async fn main() {
         Command::Hook { action } => match action {
             HookSubcommand::New {
                 name,
-                source,
-                event_types,
+                event_names,
                 filter_fields,
                 action,
                 target,
                 body,
                 title,
                 assignee,
-                schedule,
             } => {
                 commands::hook::run_new(
                     &cli.server,
                     name,
-                    source,
-                    event_types,
+                    event_names,
                     filter_fields,
                     action,
                     target,
                     body,
                     title,
                     assignee,
-                    schedule,
                 )
                 .await;
             }
-            HookSubcommand::List {
-                enabled,
-                source_type,
-            } => {
-                commands::hook::run_list(&cli.server, enabled, source_type).await;
+            HookSubcommand::List { enabled } => {
+                commands::hook::run_list(&cli.server, enabled).await;
             }
             HookSubcommand::Show { id } => {
                 commands::hook::run_show(&cli.server, id).await;
@@ -2549,115 +2536,14 @@ mod tests {
     // ─── `ns2 hook` CLI parse tests ──────────────────────────────────────────
 
     #[test]
-    fn hook_new_parses_schedule_flag() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "hook",
-            "new",
-            "--name",
-            "timer-hook",
-            "--source",
-            "timer",
-            "--schedule",
-            "0 9 * * 1",
-            "--action",
-            "send-message",
-            "--target",
-            "issue:abc1",
-            "--body",
-            "Monday morning",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Hook {
-                action:
-                    HookSubcommand::New {
-                        name,
-                        source,
-                        schedule,
-                        ..
-                    },
-            } => {
-                assert_eq!(name, "timer-hook");
-                assert_eq!(source, "timer");
-                assert_eq!(schedule.as_deref(), Some("0 9 * * 1"));
-            }
-            _ => panic!("expected hook new command"),
-        }
-    }
-
-    #[test]
-    fn hook_new_no_schedule_is_none() {
+    fn hook_new_parses_event_flag() {
         let cli = Cli::try_parse_from([
             "ns2",
             "hook",
             "new",
             "--name",
             "notify",
-            "--source",
-            "internal",
-            "--event-type",
-            "issue.created",
-            "--action",
-            "send-message",
-            "--target",
-            "issue:abc1",
-            "--body",
-            "hi",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Hook {
-                action: HookSubcommand::New { schedule, .. },
-            } => {
-                assert!(schedule.is_none());
-            }
-            _ => panic!("expected hook new command"),
-        }
-    }
-
-    #[test]
-    fn hook_new_timer_source_with_every_minute_schedule() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "hook",
-            "new",
-            "--name",
-            "every-minute",
-            "--source",
-            "timer",
-            "--schedule",
-            "* * * * *",
-            "--action",
-            "send-message",
-            "--target",
-            "issue:abc1",
-            "--body",
-            "tick",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Hook {
-                action: HookSubcommand::New { schedule, source, .. },
-            } => {
-                assert_eq!(source, "timer");
-                assert_eq!(schedule.as_deref(), Some("* * * * *"));
-            }
-            _ => panic!("expected hook new command"),
-        }
-    }
-
-    #[test]
-    fn hook_new_parses_required_flags() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "hook",
-            "new",
-            "--name",
-            "notify",
-            "--source",
-            "internal",
-            "--event-type",
+            "--event",
             "issue.status_changed",
             "--action",
             "send-message",
@@ -2672,8 +2558,7 @@ mod tests {
                 action:
                     HookSubcommand::New {
                         name,
-                        source,
-                        event_types,
+                        event_names,
                         action,
                         target,
                         body,
@@ -2681,8 +2566,7 @@ mod tests {
                     },
             } => {
                 assert_eq!(name, "notify");
-                assert_eq!(source, "internal");
-                assert_eq!(event_types, vec!["issue.status_changed"]);
+                assert_eq!(event_names, vec!["issue.status_changed"]);
                 assert_eq!(action, "send-message");
                 assert_eq!(target.as_deref(), Some("issue:abc1"));
                 assert_eq!(body.as_deref(), Some("Status changed"));
@@ -2692,18 +2576,16 @@ mod tests {
     }
 
     #[test]
-    fn hook_new_parses_multiple_event_types() {
+    fn hook_new_parses_multiple_event_names() {
         let cli = Cli::try_parse_from([
             "ns2",
             "hook",
             "new",
             "--name",
             "multi",
-            "--source",
-            "internal",
-            "--event-type",
+            "--event",
             "issue.created",
-            "--event-type",
+            "--event",
             "issue.status_changed",
             "--action",
             "send-message",
@@ -2715,11 +2597,67 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Hook {
-                action: HookSubcommand::New { event_types, .. },
+                action: HookSubcommand::New { event_names, .. },
             } => {
-                assert_eq!(event_types.len(), 2);
-                assert!(event_types.contains(&"issue.created".to_string()));
-                assert!(event_types.contains(&"issue.status_changed".to_string()));
+                assert_eq!(event_names.len(), 2);
+                assert!(event_names.contains(&"issue.created".to_string()));
+                assert!(event_names.contains(&"issue.status_changed".to_string()));
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_parses_external_event_name() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "ci-handler",
+            "--event",
+            "external.ci-complete",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "CI done",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { event_names, .. },
+            } => {
+                assert_eq!(event_names, vec!["external.ci-complete"]);
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_parses_timer_event_name() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "ticker",
+            "--event",
+            "timer.heartbeat",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "tick",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { event_names, .. },
+            } => {
+                assert_eq!(event_names, vec!["timer.heartbeat"]);
             }
             _ => panic!("expected hook new command"),
         }
@@ -2733,9 +2671,7 @@ mod tests {
             "new",
             "--name",
             "filtered",
-            "--source",
-            "internal",
-            "--event-type",
+            "--event",
             "issue.status_changed",
             "--filter-field",
             "data.issue.status=running",
@@ -2763,14 +2699,9 @@ mod tests {
         let cli = Cli::try_parse_from(["ns2", "hook", "list", "--enabled"]).unwrap();
         match cli.command {
             Command::Hook {
-                action:
-                    HookSubcommand::List {
-                        enabled,
-                        source_type,
-                    },
+                action: HookSubcommand::List { enabled },
             } => {
                 assert!(enabled);
-                assert!(source_type.is_none());
             }
             _ => panic!("expected hook list command"),
         }
@@ -2781,14 +2712,9 @@ mod tests {
         let cli = Cli::try_parse_from(["ns2", "hook", "list"]).unwrap();
         match cli.command {
             Command::Hook {
-                action:
-                    HookSubcommand::List {
-                        enabled,
-                        source_type,
-                    },
+                action: HookSubcommand::List { enabled },
             } => {
                 assert!(!enabled);
-                assert!(source_type.is_none());
             }
             _ => panic!("expected hook list command"),
         }

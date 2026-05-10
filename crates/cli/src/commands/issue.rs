@@ -687,10 +687,7 @@ pub async fn run_subscribe(
 
     let req_body = json!({
         "name": hook_name,
-        "source": {
-            "type": "internal",
-            "event_types": ["issue.status_changed", "issue.comment_added"],
-        },
+        "event_names": ["issue.status_changed", "issue.comment_added"],
         "filter": {
             "conditions": [
                 { "field": "data.issue.id", "op": "eq", "value": id }
