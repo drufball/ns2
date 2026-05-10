@@ -34,7 +34,7 @@ enum Command {
     },
     #[command(
         about = "Inspect agent sessions (implementation detail — use `issue` to get work done).",
-        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
+        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  waiting    agent finished; session paused waiting for next message\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
     )]
     Session {
         #[command(subcommand)]
@@ -233,7 +233,7 @@ enum SessionAction {
     List {
         #[arg(
             long,
-            help = "Show only sessions in this state. Values: created, running, completed, failed, cancelled."
+            help = "Show only sessions in this state. Values: created, running, waiting, failed, cancelled."
         )]
         status: Option<String>,
         #[arg(
@@ -266,7 +266,7 @@ enum SessionAction {
         #[arg(
             long,
             requires = "message",
-            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on completed, non-zero on failed/cancelled. Requires --message."
+            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on waiting, non-zero on failed/cancelled. Requires --message."
         )]
         wait: bool,
     },
@@ -289,7 +289,7 @@ enum SessionAction {
         turns: Option<usize>,
         #[arg(
             long,
-            help = "Exit after N seconds even if the session has not finished. Exits 0 if session completed naturally, 1 if timeout fired."
+            help = "Exit after N seconds even if the session has not finished. Exits 0 if session finished naturally (waiting state), 1 if timeout fired."
         )]
         timeout: Option<u64>,
     },
@@ -307,7 +307,7 @@ enum SessionAction {
     },
     #[command(
         about = "Cancel a running or created session.",
-        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `completed` or `cancelled`."
+        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `waiting`, `failed`, or `cancelled`."
     )]
     Stop {
         #[arg(long, help = "Identify session by UUID (preferred).")]
@@ -317,7 +317,7 @@ enum SessionAction {
     },
     #[command(
         about = "Block until all specified sessions reach a terminal state.",
-        long_about = "Polls the listed sessions every second and exits once all of them are in 'completed', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions completed or were cancelled; exits 1 if any session failed or does not exist."
+        long_about = "Polls the listed sessions every second and exits once all of them are in 'waiting', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions finished (waiting or cancelled); exits 1 if any session failed or does not exist."
     )]
     Wait {
         #[arg(long = "id", num_args = 1.., help = "Session UUIDs to wait on. Repeat for multiple.")]
@@ -3126,6 +3126,162 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
+    }
+
+    // ─── Help string: session status lifecycle uses 'waiting' not 'completed' ─
+
+    #[test]
+    fn session_subcommand_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        // Find the Session subcommand
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let long_about = session_cmd
+            .get_long_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session long_about must not contain 'completed', got: {long_about}"
+        );
+    }
+
+    #[test]
+    fn session_list_status_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let list_cmd = session_cmd
+            .find_subcommand_mut("list")
+            .expect("session list subcommand must exist");
+        let status_arg = list_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "status")
+            .expect("status arg must exist");
+        let help = status_arg
+            .get_help()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session list --status help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session list --status help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_new_wait_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let new_cmd = session_cmd
+            .find_subcommand_mut("new")
+            .expect("session new subcommand must exist");
+        let wait_arg = new_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "wait")
+            .expect("wait arg must exist");
+        let help = wait_arg
+            .get_help()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session new --wait help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session new --wait help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_tail_timeout_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let tail_cmd = session_cmd
+            .find_subcommand_mut("tail")
+            .expect("session tail subcommand must exist");
+        let timeout_arg = tail_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "timeout")
+            .expect("timeout arg must exist");
+        let help = timeout_arg
+            .get_help()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session tail --timeout help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session tail --timeout help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_stop_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let stop_cmd = session_cmd
+            .find_subcommand_mut("stop")
+            .expect("session stop subcommand must exist");
+        let long_about = stop_cmd
+            .get_long_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session stop long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session stop long_about must not contain 'completed', got: {long_about}"
+        );
+    }
+
+    #[test]
+    fn session_wait_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let wait_cmd = session_cmd
+            .find_subcommand_mut("wait")
+            .expect("session wait subcommand must exist");
+        let long_about = wait_cmd
+            .get_long_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session wait long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session wait long_about must not contain 'completed', got: {long_about}"
+        );
     }
 
     // ─── Scenario C: --subscribe with session target parses ──────────────────
