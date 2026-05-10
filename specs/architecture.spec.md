@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-05-09T06:29:22Z
+verified: 2026-05-10T11:05:30Z
 ---
 
 # Architecture Spec
@@ -83,4 +83,7 @@ _Doesn't own: issue business logic — delegate to `issues`._
 **`tui`** — ratatui terminal UI. Connects to the server via SSE. Thin client: all state comes from the server.
 
 **`cli`** — the `ns2` binary. Wires crates; contains no logic of its own. Depends directly on `server` to start the in-process server, and on `types` for shared domain types. Uses `reqwest` directly for HTTP calls to the local ns2 server (health checks, issue/session/hook CRUD, SSE streaming).
+
+`ns2 issue new` accepts a `--subscribe <target>` flag (where target is `issue:<id>` or `session:<id>`). When provided, it calls the same `run_subscribe` function used by `ns2 issue subscribe`, immediately after creating the issue. This creates a hook that delivers notifications on `issue.status_changed` and `issue.comment_added` events. Stdout from `issue new` still only contains the issue ID; the hook ID goes to stderr.
+
 _Doesn't own: Anthropic client init or harness instantiation — that's `server`'s job._
