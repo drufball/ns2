@@ -1,6 +1,7 @@
 pub mod events_route;
 pub mod hook;
 pub mod issue;
+pub mod named_event;
 pub mod session;
 pub mod webhook;
 

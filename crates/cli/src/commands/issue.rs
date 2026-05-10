@@ -37,6 +37,7 @@ pub async fn run_new(
     wait: bool,
     watch: bool,
     subscribe: Option<String>,
+    recursive: bool,
 ) {
     // Validate: --wait requires --status in_progress
     if wait && status.as_deref() != Some("in_progress") {
@@ -90,7 +91,7 @@ pub async fn run_new(
     // Pass `print_id_to_stdout: false` so the hook ID stays on stderr only —
     // stdout must remain a single line (the issue ID) for `id=$(ns2 issue new …)`.
     if let Some(deliver_to) = subscribe {
-        run_subscribe(server, issue_id.clone(), deliver_to, "--subscribe", false).await;
+        run_subscribe(server, issue_id.clone(), deliver_to, "--subscribe", false, recursive).await;
     }
 
     // If --watch, start streaming SSE events to stderr in the background
@@ -660,10 +661,7 @@ pub fn build_mcp_notify_hook_body(issue_id: &str, channel_id: &str) -> serde_jso
     let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
     json!({
         "name": hook_name,
-        "source": {
-            "type": "internal",
-            "event_types": ["issue.status_changed"],
-        },
+        "event_names": ["issue.status_changed"],
         "filter": {
             "conditions": [
                 { "field": "data.issue.id", "op": "eq", "value": issue_id }
@@ -687,34 +685,44 @@ pub fn build_mcp_notify_hook_body(issue_id: &str, channel_id: &str) -> serde_jso
 /// Pass `true` when invoked as the top-level `issue subscribe` subcommand (callers
 /// capture the hook ID via `id=$(ns2 issue subscribe …)`).  Pass `false` when called
 /// from `run_new` so that stdout remains a single line — the issue ID.
+///
+/// `recursive`: when `true`, the hook fires for any descendant issue as well (by
+/// matching `ancestor_ids contains <id>` instead of `id == <id>`).
 pub async fn run_subscribe(
     server: &str,
     id: String,
     deliver_to: String,
     flag_name: &str,
     print_id_to_stdout: bool,
+    recursive: bool,
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
     // Parse "issue:<id>", "session:<id>", or "mcp:<channel_id>"
-    let hook_name = format!("subscribe-{id}");
+    let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.from }} → {{ event.data.to }}".to_string();
 
-    let req_body = {
-        #[allow(clippy::option_if_let_else)]
-        if let Some(rest) = deliver_to.strip_prefix("issue:") {
+    #[allow(clippy::option_if_let_else)]
+    let req_body = if let Some(rest) = deliver_to.strip_prefix("issue:") {
         let target_id = rest.to_string();
-        let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+        let (hook_name, filter_conditions) = if recursive {
+            let name = format!("subscribe-{id}-recursive");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
+            ]);
+            (name, conditions)
+        } else {
+            let name = format!("subscribe-{id}");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]);
+            (name, conditions)
+        };
         json!({
             "name": hook_name,
-            "source": {
-                "type": "internal",
-                "event_types": ["issue.status_changed", "issue.comment_added"],
-            },
+            "event_names": ["issue.status_changed", "issue.comment_added"],
             "filter": {
-                "conditions": [
-                    { "field": "data.issue.id", "op": "eq", "value": id }
-                ]
+                "conditions": filter_conditions
             },
             "action": {
                 "type": "send_message",
@@ -724,17 +732,24 @@ pub async fn run_subscribe(
         })
     } else if let Some(rest) = deliver_to.strip_prefix("session:") {
         let target_id = rest.to_string();
-        let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+        let (hook_name, filter_conditions) = if recursive {
+            let name = format!("subscribe-{id}-recursive");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
+            ]);
+            (name, conditions)
+        } else {
+            let name = format!("subscribe-{id}");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]);
+            (name, conditions)
+        };
         json!({
             "name": hook_name,
-            "source": {
-                "type": "internal",
-                "event_types": ["issue.status_changed", "issue.comment_added"],
-            },
+            "event_names": ["issue.status_changed", "issue.comment_added"],
             "filter": {
-                "conditions": [
-                    { "field": "data.issue.id", "op": "eq", "value": id }
-                ]
+                "conditions": filter_conditions
             },
             "action": {
                 "type": "send_message",
@@ -748,7 +763,6 @@ pub async fn run_subscribe(
     } else {
         eprintln!("Error: {flag_name} must be 'issue:<id>', 'session:<id>', or 'mcp:<channel_id>', got: {deliver_to}");
         std::process::exit(1);
-    }
     };
 
     let resp = client
@@ -793,6 +807,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
@@ -825,7 +840,7 @@ mod tests {
                 .contains("{{ event.data.issue.id }}"),
             "body template must contain event.data.issue.id"
         );
-        assert_eq!(req_body["source"]["event_types"][0], "issue.status_changed");
+        assert_eq!(req_body["event_names"][0], "issue.status_changed");
         assert_eq!(req_body["name"], "subscribe-ab12");
     }
 

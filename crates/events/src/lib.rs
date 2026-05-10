@@ -94,6 +94,7 @@ pub enum IssueEvent {
 /// do not cause a "duplicate field `type`" serde error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum SystemEvent {
     Session {
         session_id: Uuid,
@@ -101,11 +102,13 @@ pub enum SystemEvent {
     },
     Issue(IssueEvent),
     External {
-        hook_id: String,
+        event_id: String,
+        event_name: String,
         payload: serde_json::Value,
     },
     TimerFired {
-        hook_id: String,
+        event_id: String,
+        event_name: String,
         fired_at: DateTime<Utc>,
     },
     McpChannelNotification {
@@ -254,7 +257,8 @@ mod tests {
         let bus = EventBus::new(8);
         // No subscribers; this must not panic.
         bus.send(SystemEvent::TimerFired {
-            hook_id: "h1".into(),
+            event_id: "t1".into(),
+            event_name: "heartbeat".into(),
             fired_at: Utc::now(),
         });
     }
@@ -291,6 +295,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
@@ -307,13 +312,14 @@ mod tests {
     #[test]
     fn system_event_external_serde_round_trip() {
         let ev = SystemEvent::External {
-            hook_id: "hook-42".into(),
+            event_id: "evt-42".into(),
+            event_name: "ci-complete".into(),
             payload: serde_json::json!({"key": "value"}),
         };
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(decoded, SystemEvent::External { ref hook_id, .. } if hook_id == "hook-42")
+            matches!(decoded, SystemEvent::External { ref event_id, ref event_name, .. } if event_id == "evt-42" && event_name == "ci-complete")
         );
     }
 
@@ -321,13 +327,14 @@ mod tests {
     fn system_event_timer_fired_serde_round_trip() {
         let now = Utc::now();
         let ev = SystemEvent::TimerFired {
-            hook_id: "timer-1".into(),
+            event_id: "timer-1".into(),
+            event_name: "heartbeat".into(),
             fired_at: now,
         };
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(decoded, SystemEvent::TimerFired { ref hook_id, .. } if hook_id == "timer-1")
+            matches!(decoded, SystemEvent::TimerFired { ref event_id, ref event_name, .. } if event_id == "timer-1" && event_name == "heartbeat")
         );
     }
 
@@ -343,6 +350,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
