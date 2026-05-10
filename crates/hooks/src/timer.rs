@@ -133,7 +133,7 @@ mod tests {
 
     #[allow(dead_code)]
     async fn make_issue_service() -> issues::IssueService {
-        let (db, _hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _hook_store, _event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let backend: std::sync::Arc<dyn issue_backend::IssueBackend> =
             std::sync::Arc::new(issue_backend::SqliteIssueBackend::new(std::sync::Arc::clone(&db)));
         issues::IssueService::new(db, backend)

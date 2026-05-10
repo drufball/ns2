@@ -40,6 +40,7 @@ impl EventsQuery {
                 SystemEvent::Issue(_) => "issue",
                 SystemEvent::External { .. } => "external",
                 SystemEvent::TimerFired { .. } => "timer",
+                SystemEvent::Custom { .. } => "custom",
             };
             if !types_str.split(',').map(str::trim).any(|x| x == type_name) {
                 return false;

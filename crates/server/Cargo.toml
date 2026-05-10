@@ -13,6 +13,7 @@ anthropic = { path = "../anthropic" }
 tools = { path = "../tools" }
 issues = { path = "../issues" }
 hooks = { path = "../hooks" }
+agents = { path = "../agents" }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -33,3 +34,4 @@ hex = "0.4"
 
 [dev-dependencies]
 http-body-util = "0.1"
+tempfile = "3"

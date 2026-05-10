@@ -1,3 +1,4 @@
+pub mod emit;
 pub mod events_route;
 pub mod hook;
 pub mod issue;

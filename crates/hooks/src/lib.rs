@@ -44,7 +44,7 @@ pub mod evaluate {
             } => {
                 vec!["session.turn_started".into()]
             }
-            SystemEvent::Session { .. } => vec![],
+            SystemEvent::Session { .. } | SystemEvent::Custom { .. } => vec![],
             SystemEvent::External { event_name, .. } => {
                 vec![format!("external.{event_name}")]
             }
@@ -1045,7 +1045,7 @@ mod tests {
         // ── Helper: build an IssueService backed by an in-memory SQLite db ────────
 
         async fn make_issue_service() -> issues::IssueService {
-            let (db, _hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
+            let (db, _hook_store, _event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
             let backend: std::sync::Arc<dyn issue_backend::IssueBackend> =
                 std::sync::Arc::new(issue_backend::SqliteIssueBackend::new(std::sync::Arc::clone(&db)));
             issues::IssueService::new(db, backend)

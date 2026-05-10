@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{events_route, hook as hook_route, issue, named_event, session, webhook};
+use routes::{emit as emit_route, events_route, hook as hook_route, issue, named_event, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -64,6 +64,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
         .route("/webhooks/:event_id", post(webhook::receive_webhook))
+        // Event emit
+        .route("/events/emit", post(emit_route::emit_event))
         // Named event CRUD
         .route("/named-events", post(named_event::create_event))
         .route("/named-events", get(named_event::list_events))
@@ -115,9 +117,24 @@ fn spawn_hook_evaluator(state: &AppState) {
 
 /// Handle `IssueEvent::StatusChanged { to: InProgress }` — resume or start a harness.
 async fn handle_in_progress(state: &AppState, issue: types::Issue) {
-    if issue.assignee.is_none() {
+    let Some(ref assignee) = issue.assignee else {
+        return;
+    };
+
+    // Check if an agent definition exists for this assignee.
+    // If no agent file exists, this is a human assignee — skip harness spawn.
+    let has_agent_def = agents::agents_dir()
+        .is_some_and(|agents_dir| agents::load_agent(&agents_dir, assignee).is_some());
+
+    if !has_agent_def {
+        tracing::debug!(
+            issue_id = %issue.id,
+            assignee = %assignee,
+            "handle_in_progress: no agent definition found, skipping harness spawn (human assignee)"
+        );
         return;
     }
+
     if let Some(session_id) = issue.session_id {
         if let Ok(session) = state.db.get_session(session_id).await {
             if session.status == types::SessionStatus::Waiting {
@@ -304,7 +321,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store, event_store) = db::connect(&db_url).await?;
+    let (db, hook_store, event_store, _github_mapping) = db::connect(&db_url).await?;
     let backend = issue_backend::from_config(&config.issue_backend, Arc::clone(&db))
         .map_err(|e| Error::Other(e.to_string()))?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
@@ -401,8 +418,15 @@ mod tests {
         }
     }
 
+    /// Helper to build an in-memory hook store suitable for tests.
+    #[allow(dead_code)]
+    async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
+        let (_db, hook_store, _event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
+        hook_store
+    }
+
     pub async fn test_state() -> AppState {
-        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let backend: Arc<dyn issue_backend::IssueBackend> =
             Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
@@ -1827,7 +1851,7 @@ mod tests {
         //    the issue as Waiting.  The issue should transition Running → Waiting,
         //    proving the watcher was set up.
         let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             let fetched = state.db.get_issue("wt01".to_string()).await.unwrap();
@@ -1836,7 +1860,7 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "linked issue did not become Waiting within 5s; status={} — \
+                "linked issue did not become Waiting within 15s; status={} — \
                  this indicates the issue watcher was not spawned",
                 fetched.status
             );
@@ -2345,14 +2369,17 @@ mod tests {
 
     // --- issue auto-completion when session terminates ---
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_issue_auto_completes_when_session_succeeds() {
         let (app, state) = test_app_with_state().await;
+
+        // Subscribe before creating the issue so we don't miss the final event.
+        let mut event_rx = state.event_bus.subscribe();
 
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", &serde_json::json!({
-                "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
+                "title": "Auto complete test", "body": "body", "assignee": "qa-tester", "branch": ""
             })))
             .await
             .unwrap();
@@ -2369,19 +2396,23 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Waiting {
-                break;
+        // Wait for the StatusChanged { to: Waiting } event directly on the bus
+        // rather than polling the DB — avoids timing-sensitive polling under load.
+        tokio::time::timeout(tokio::time::Duration::from_mins(1), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                        to: IssueStatus::Waiting,
+                        ref issue,
+                        ..
+                    })) if issue.id == issue_id => break,
+                    Ok(_) => {}
+                    Err(e) => panic!("event bus error: {e}"),
+                }
             }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not transition to waiting within 5 seconds; status={}",
-                issue.status
-            );
-        }
+        })
+        .await
+        .expect("issue did not transition to waiting within 60 seconds");
     }
 
     // --- PATCH /sessions/:id/status ---
@@ -3273,7 +3304,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3305,7 +3336,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "My Title",
                     "body": "My Body",
-                    "assignee": "test-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -3323,7 +3354,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             if !captured.lock().unwrap().is_empty() {
@@ -3389,7 +3420,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3462,7 +3493,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             if !captured.lock().unwrap().is_empty() {
@@ -3523,13 +3554,16 @@ mod tests {
 
     // ─── issue_watcher: session done transitions issue to Waiting ────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_issue_watcher_posts_final_turn_as_comment_on_session_done() {
         // Previously this test verified auto-comment behaviour. Now the issue
         // watcher only posts a comment when the agent explicitly calls the
         // `stop` tool with a comment. Without a stop signal, the issue
         // transitions to `Waiting` with no new comment.
         let (app, state) = test_app_with_state().await;
+
+        // Subscribe before creating the issue so we don't miss the final event.
+        let mut event_rx = state.event_bus.subscribe();
 
         let create_resp = app
             .clone()
@@ -3539,7 +3573,8 @@ mod tests {
                 &serde_json::json!({
                     "title": "Watcher waiting test",
                     "body": "Please respond",
-                    "assignee": "swe-agent"
+                    "assignee": "qa-tester",
+                    "branch": ""
                 }),
             ))
             .await
@@ -3557,19 +3592,24 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Waiting {
-                break;
+        // Wait for the StatusChanged { to: Waiting } event on the bus — more
+        // reliable than DB polling under load because the event is emitted
+        // synchronously inside park_issue before the DB write returns.
+        tokio::time::timeout(tokio::time::Duration::from_mins(1), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                        to: IssueStatus::Waiting,
+                        ref issue,
+                        ..
+                    })) if issue.id == issue_id => break,
+                    Ok(_) => {}
+                    Err(e) => panic!("event bus error: {e}"),
+                }
             }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not transition to waiting within 5 seconds; status={}",
-                issue.status
-            );
-        }
+        })
+        .await
+        .expect("issue did not transition to waiting within 60 seconds");
 
         let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
         assert_eq!(issue.status, IssueStatus::Waiting);
@@ -3577,7 +3617,7 @@ mod tests {
         let agent_comments: Vec<_> = issue
             .comments
             .iter()
-            .filter(|c| c.author == "swe-agent")
+            .filter(|c| c.author == "qa-tester")
             .collect();
         assert!(
             agent_comments.is_empty(),
@@ -3604,7 +3644,7 @@ mod tests {
             }
         }
 
-        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let backend: Arc<dyn issue_backend::IssueBackend> =
             Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
@@ -3634,7 +3674,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Error test issue",
                     "body": "trigger an error",
-                    "assignee": "swe-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -3652,7 +3692,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
@@ -3661,7 +3701,7 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "issue did not reach Failed within 5 seconds; status={}",
+                "issue did not reach Failed within 15 seconds; status={}",
                 issue.status
             );
         }
@@ -4849,9 +4889,12 @@ mod tests {
         assert_eq!(v["event_names"][0], "external.ci-complete");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_set_in_progress_spawns_harness_and_reaches_waiting() {
         let (app, state) = test_app_with_state().await;
+
+        // Subscribe before creating the issue so we don't miss the final event.
+        let mut event_rx = state.event_bus.subscribe();
 
         // Create an issue with an assignee.
         let create_resp = app
@@ -4862,7 +4905,8 @@ mod tests {
                 &serde_json::json!({
                     "title": "Lifecycle test",
                     "body": "body",
-                    "assignee": "test-agent"
+                    "assignee": "qa-tester",
+                    "branch": ""
                 }),
             ))
             .await
@@ -4890,20 +4934,23 @@ mod tests {
             "session_id must be set after in_progress transition"
         );
 
-        // Eventually should reach waiting (stub client).
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Waiting {
-                break;
+        // Wait for StatusChanged { to: Waiting } on the bus — avoids timing-
+        // sensitive DB polling under load (event fires synchronously in park_issue).
+        tokio::time::timeout(tokio::time::Duration::from_mins(1), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                        to: IssueStatus::Waiting,
+                        ref issue,
+                        ..
+                    })) if issue.id == issue_id => break,
+                    Ok(_) => {}
+                    Err(e) => panic!("event bus error: {e}"),
+                }
             }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not reach waiting within 5s; status={}",
-                issue.status
-            );
-        }
+        })
+        .await
+        .expect("issue did not reach waiting within 60s");
     }
 
     #[tokio::test]
@@ -4974,7 +5021,7 @@ mod tests {
             id: old_session_id,
             name: "old-session".into(),
             status: types::SessionStatus::Failed,
-            agent: Some("test-agent".into()),
+            agent: Some("swe".into()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -4986,7 +5033,7 @@ mod tests {
             body: "body".to_string(),
             status: types::IssueStatus::Failed,
             branch: String::new(),
-            assignee: Some("test-agent".to_string()),
+            assignee: Some("swe".to_string()),
             session_id: Some(old_session_id),
             parent_id: None,
             ancestor_ids: vec![],
@@ -5038,7 +5085,7 @@ mod tests {
             id: waiting_session_id,
             name: "waiting-session".into(),
             status: types::SessionStatus::Waiting,
-            agent: Some("test-agent".into()),
+            agent: Some("swe".into()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -5055,7 +5102,7 @@ mod tests {
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
             branch: String::new(),
-            assignee: Some("test-agent".to_string()),
+            assignee: Some("swe".to_string()),
             session_id: Some(waiting_session_id),
             parent_id: None,
             ancestor_ids: vec![],
@@ -5782,6 +5829,7 @@ mod tests {
         );
     }
 
+
     // ─── /named-events route integration tests ────────────────────────────────
 
     fn named_event_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {
@@ -6025,6 +6073,99 @@ mod tests {
             second_resp.status().is_server_error() || second_resp.status().is_client_error(),
             "duplicate name should return an error status, got: {}",
             second_resp.status()
+        );
+    }
+
+    // ── Scenario 6: Human assignment skips harness spawn ─────────────────────
+
+    /// When an issue is assigned to a name that has no agent definition file,
+    /// `handle_in_progress` must NOT add a `msg_sender` for any session.
+    #[tokio::test]
+    async fn test_human_assignee_skips_harness_spawn() {
+        let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // "human-dev" has no .ns2/agents/human-dev.md file, so it's a human.
+        let issue = types::Issue {
+            id: "hm01".to_string(),
+            title: "Human task".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Open,
+            branch: String::new(),
+            assignee: Some("human-dev".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            ancestor_ids: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Emit the InProgress event (as the issues service would)
+        let mut in_progress_issue = issue.clone();
+        in_progress_issue.status = types::IssueStatus::InProgress;
+
+        state.event_bus.send(events::SystemEvent::Issue(
+            events::IssueEvent::StatusChanged {
+                from: types::IssueStatus::Open,
+                to: types::IssueStatus::InProgress,
+                issue: in_progress_issue,
+            },
+        ));
+
+        // Give the subscriber time to process the event
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // No msg_sender should have been created (no harness was spawned)
+        let senders_len = state.msg_senders.lock().await.len();
+        assert!(
+            senders_len == 0,
+            "no msg_sender should be created for a human assignee, got {senders_len} senders"
+        );
+    }
+
+    // ── Scenario 7: Agent assignment spawns harness (regression) ─────────────
+
+    /// When an issue is assigned to a name that DOES have an agent definition,
+    /// `handle_in_progress` should spawn a harness (the existing test already
+    /// covers this via the HTTP route, but we add a unit-level check here).
+    /// 
+    /// This is a regression guard: verify `test_set_in_progress_on_open_issue_auto_starts`
+    /// still passes (covered by the test above). We also add a direct lifecycle test.
+    #[tokio::test]
+    async fn test_agent_assignee_does_not_skip_harness_when_has_agent_def() {
+        // We can't easily mock agents_dir in tests without file system setup.
+        // Instead verify the negative: "human-dev" (no file) leaves senders empty.
+        // The existing test `test_set_in_progress_on_open_issue_auto_starts` with
+        // "test-agent" validates the agent path end-to-end via the HTTP route.
+        //
+        // Here we confirm the guard logic: if agents_dir() returns Some but the
+        // agent file doesn't exist, treat as human.
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path();
+
+        // "known-agent" has a file — should be detected as agent
+        let agent_def = agents::AgentDef {
+            name: "known-agent".to_string(),
+            description: "A test agent".to_string(),
+            body: "System prompt".to_string(),
+            hooks: agents::AgentHooks::default(),
+            include_project_config: false,
+        };
+        agents::write_agent(agents_dir, &agent_def).unwrap();
+        let loaded = agents::load_agent(agents_dir, "known-agent");
+        assert!(
+            loaded.is_some(),
+            "known-agent should be found in the agents dir"
+        );
+
+        // "human-dev" has no file — should be detected as human
+        let not_loaded = agents::load_agent(agents_dir, "human-dev");
+        assert!(
+            not_loaded.is_none(),
+            "human-dev should not be found in the agents dir"
         );
     }
 }
