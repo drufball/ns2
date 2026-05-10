@@ -845,7 +845,6 @@ mod tests {
     use events::SessionEvent;
     use types::*;
     use uuid::Uuid;
-    use clap::CommandFactory;
 
     #[test]
     fn issue_is_terminal_completed_is_true() {
@@ -3142,7 +3141,7 @@ mod tests {
             .expect("session subcommand must exist");
         let long_about = session_cmd
             .get_long_about()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             long_about.contains("waiting"),
@@ -3170,7 +3169,7 @@ mod tests {
             .expect("status arg must exist");
         let help = status_arg
             .get_help()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             help.contains("waiting"),
@@ -3198,7 +3197,7 @@ mod tests {
             .expect("wait arg must exist");
         let help = wait_arg
             .get_help()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             help.contains("waiting"),
@@ -3226,7 +3225,7 @@ mod tests {
             .expect("timeout arg must exist");
         let help = timeout_arg
             .get_help()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             help.contains("waiting"),
@@ -3250,7 +3249,7 @@ mod tests {
             .expect("session stop subcommand must exist");
         let long_about = stop_cmd
             .get_long_about()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             long_about.contains("waiting"),
@@ -3274,7 +3273,7 @@ mod tests {
             .expect("session wait subcommand must exist");
         let long_about = wait_cmd
             .get_long_about()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         assert!(
             long_about.contains("waiting"),
@@ -3310,32 +3309,6 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
-    }
-
-    // ─── Regression: session tail long_about must not reference stale status ─
-
-    #[test]
-    fn session_tail_long_about_does_not_contain_completed() {
-        // "completed" was removed as a session status in GH#131.
-        // This test guards against stale wording creeping back into the
-        // tail subcommand's help text.
-        let cmd = Cli::command();
-        let session_sub = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "session")
-            .expect("session subcommand should exist");
-        let tail_sub = session_sub
-            .get_subcommands()
-            .find(|s| s.get_name() == "tail")
-            .expect("tail subcommand should exist");
-        let long_about = tail_sub
-            .get_long_about()
-            .expect("tail subcommand should have long_about")
-            .to_string();
-        assert!(
-            !long_about.contains("completed"),
-            "session tail long_about must not contain 'completed' (stale status removed in GH#131); got: {long_about}"
-        );
     }
 
     // ─── Regression: session tail long_about must not reference stale status ─
