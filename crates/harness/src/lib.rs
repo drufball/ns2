@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_updates_session_status_to_completed() {
+    async fn test_run_updates_session_status_to_waiting() {
         let session = make_session();
         let session_id = session.id;
 
