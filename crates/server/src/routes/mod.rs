@@ -26,6 +26,10 @@ impl From<issues::Error> for Error {
     fn from(e: issues::Error) -> Self {
         match e {
             issues::Error::Db(db_err) => Self::Db(db_err),
+            issues::Error::Backend(issue_backend::Error::NotFound) => Self::NotFound,
+            issues::Error::Backend(other) => {
+                Self::BadRequest(other.to_string())
+            }
             issues::Error::BadRequest(msg) => Self::BadRequest(msg),
         }
     }

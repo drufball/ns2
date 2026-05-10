@@ -304,7 +304,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let (db, hook_store, event_store) = db::connect(&db_url).await?;
-    let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+    let backend: Arc<dyn issue_backend::IssueBackend> =
+        Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
+    let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 
     let state = AppState {
@@ -401,8 +403,10 @@ mod tests {
     pub async fn test_state() -> AppState {
         let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
+        let backend: Arc<dyn issue_backend::IssueBackend> =
+            Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
         let issue_service =
-            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+            issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         AppState {
             db,
@@ -3272,8 +3276,10 @@ mod tests {
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
+        let backend: Arc<dyn issue_backend::IssueBackend> =
+            Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
         let issue_service =
-            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+            issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
@@ -3386,8 +3392,10 @@ mod tests {
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
+        let backend: Arc<dyn issue_backend::IssueBackend> =
+            Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
         let issue_service =
-            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+            issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
@@ -3597,8 +3605,10 @@ mod tests {
 
         let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
+        let backend: Arc<dyn issue_backend::IssueBackend> =
+            Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
         let issue_service =
-            issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
+            issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let state = AppState {
             db,
