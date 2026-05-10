@@ -3,7 +3,7 @@ targets:
   - crates/cli/src/commands/event.rs
   - crates/cli/src/main.rs
   - crates/server/src/routes/named_event.rs
-verified: 2026-05-10T17:00:01Z
+verified: 2026-05-10T18:05:27Z
 ---
 
 # ns2 event
