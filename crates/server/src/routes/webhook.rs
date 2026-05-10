@@ -5,23 +5,23 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use hooks::HookSource;
+use db::EventKind;
 
 use crate::state::AppState;
 
-/// `POST /webhooks/:hook_id`
+/// `POST /webhooks/:event_id`
 ///
 /// Receives an external webhook event, validates the HMAC signature (if the
-/// hook has a secret configured), parses the payload and publishes a
+/// named event has a secret configured), parses the payload and publishes a
 /// [`events::SystemEvent::External`] to the event bus.
 pub async fn receive_webhook(
     State(state): State<AppState>,
-    Path(hook_id): Path<String>,
+    Path(event_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Look up the hook.
-    let Ok(hook) = state.hook_store.get_hook(&hook_id).await else {
+    // 1. Look up the NamedEvent.
+    let Ok(event) = state.event_store.get_event(&event_id).await else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -29,8 +29,8 @@ pub async fn receive_webhook(
             .into_response();
     };
 
-    // 2. Must be an External hook that is enabled.
-    let HookSource::External { secret } = &hook.source else {
+    // 2. Must be a Webhook kind event.
+    let EventKind::Webhook { ref secret } = event.kind else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -38,7 +38,8 @@ pub async fn receive_webhook(
             .into_response();
     };
 
-    if !hook.enabled {
+    // 3. Must be enabled.
+    if !event.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -48,7 +49,7 @@ pub async fn receive_webhook(
 
     let secret = secret.clone();
 
-    // 3. HMAC verification (only when secret is Some).
+    // 4. HMAC verification (only when secret is Some).
     if let Some(secret_str) = &secret {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
@@ -96,7 +97,7 @@ pub async fn receive_webhook(
         }
     }
 
-    // 4. Parse body as JSON.
+    // 5. Parse body as JSON.
     let Ok(payload): Result<serde_json::Value, _> = serde_json::from_slice(&body) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -105,11 +106,13 @@ pub async fn receive_webhook(
             .into_response();
     };
 
-    // 5. Emit event.
-    state
-        .event_bus
-        .send(events::SystemEvent::External { hook_id, payload });
+    // 6. Emit event.
+    state.event_bus.send(events::SystemEvent::External {
+        event_id: event.id.clone(),
+        event_name: event.name.clone(),
+        payload,
+    });
 
-    // 6. Return 200 OK.
+    // 7. Return 200 OK.
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }

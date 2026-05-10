@@ -6,7 +6,7 @@ use axum::{
 };
 use chrono::Utc;
 use db::Error as StoreError;
-use hooks::{generate_hook_id, Hook, HookAction, HookFilter, HookSource};
+use hooks::{generate_hook_id, Hook, HookAction, HookFilter};
 use serde::Deserialize;
 
 use crate::state::AppState;
@@ -16,7 +16,14 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize)]
 pub struct CreateHookRequest {
     pub name: String,
-    pub source: HookSource,
+    /// Event name patterns this hook should match.
+    ///
+    /// Examples:
+    /// - `["issue.status_changed"]` — built-in issue event
+    /// - `["external.ci-complete"]` — external webhook event named "ci-complete"
+    /// - `["timer.heartbeat"]` — timer event named "heartbeat"
+    /// - `["*"]` — all events
+    pub event_names: Vec<String>,
     pub filter: Option<HookFilter>,
     pub action: HookAction,
     #[serde(default = "default_true")]
@@ -38,7 +45,6 @@ pub struct UpdateHookRequest {
 #[derive(Debug, Deserialize)]
 pub struct ListHooksQuery {
     pub enabled: Option<bool>,
-    pub source_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,21 +85,10 @@ pub async fn create_hook(
     State(state): State<AppState>,
     Json(req): Json<CreateHookRequest>,
 ) -> impl IntoResponse {
-    // Validate timer hook schedule
-    if let HookSource::Timer { ref schedule } = req.source {
-        if let Err(e) = hooks::cron::next_after(schedule, chrono::Utc::now()) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
-    }
-
     let hook = Hook {
         id: generate_hook_id(),
         name: req.name,
-        source: req.source,
+        event_names: req.event_names,
         filter: req.filter,
         action: req.action,
         enabled: req.enabled,
@@ -113,11 +108,7 @@ pub async fn list_hooks(
     State(state): State<AppState>,
     Query(q): Query<ListHooksQuery>,
 ) -> impl IntoResponse {
-    match state
-        .hook_store
-        .list_hooks(q.enabled, q.source_type.as_deref())
-        .await
-    {
+    match state.hook_store.list_hooks(q.enabled).await {
         Ok(hooks) => Json(hooks).into_response(),
         Err(e) => HookApiError(e).into_response(),
     }
@@ -149,12 +140,6 @@ pub async fn update_hook(
     if let Some(enabled) = req.enabled {
         hook.enabled = enabled;
     }
-    // filter: explicit null clears it, absent leaves unchanged
-    // We can't easily distinguish absent vs explicit null with Option<serde_json::Value>
-    // without a custom deserializer. Use a sentinel: if the key is present, apply.
-    // For now: if filter field is present in the JSON (even null), treat it.
-    // Since Option<Value> will be None for both absent and null, we skip here.
-    // Callers that want to clear filter should send the full hook update.
 
     hook.updated_at = Utc::now();
 

@@ -76,39 +76,8 @@ fn spawn_hook_evaluator(state: &AppState) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    // Special handling for External events: look up the hook directly
-                    // by hook_id and run its action (bypassing matches_event which
-                    // only handles Internal hooks).
-                    if let events::SystemEvent::External {
-                        hook_id: ref ext_hook_id,
-                        ..
-                    } = event
-                    {
-                        let hook_result = hook_store_eval.get_hook(ext_hook_id).await;
-                        if let Ok(hook) = hook_result {
-                            if hook.enabled {
-                                let event_clone = event.clone();
-                                let hook_clone = hook.clone();
-                                let issue_svc = issue_svc_eval.clone();
-                                let hook_store_clone = Arc::clone(&hook_store_eval);
-                                tokio::spawn(async move {
-                                    hooks::execute::run_action(
-                                        &hook_clone,
-                                        &event_clone,
-                                        &issue_svc,
-                                        hook_store_clone.as_ref(),
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        // External events are handled exclusively here — skip the
-                        // general matches_event loop below.
-                        continue;
-                    }
-
                     let hooks = hook_store_eval
-                        .list_hooks(Some(true), None)
+                        .list_hooks(Some(true))
                         .await
                         .unwrap_or_default();
                     for hook in hooks {
@@ -329,7 +298,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store) = db::connect(&db_url).await?;
+    let (db, hook_store, event_store) = db::connect(&db_url).await?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 
@@ -343,6 +312,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         model: config.model,
         event_bus,
         hook_store,
+        event_store,
     };
 
     // Spawn the hook evaluator background task.
@@ -352,7 +322,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     spawn_issue_lifecycle_subscriber(&state);
 
     // Spawn the timer scheduler background task.
-    hooks::timer::spawn_timer_scheduler(&state.hook_store, &state.event_bus, &state.issue_service);
+    hooks::timer::spawn_timer_scheduler(&state.event_store, &state.event_bus);
 
     // Recover orphaned sessions before accepting any connections.
     state.issue_service.orphan_sweep().await;
@@ -425,12 +395,18 @@ mod tests {
 
     /// Helper to build an in-memory hook store suitable for tests.
     async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
-        let (_db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (_db, hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
         hook_store
     }
 
+    /// Helper to build an in-memory event store suitable for tests.
+    async fn make_test_event_store() -> Arc<dyn db::EventStore> {
+        let (_db, _hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
+        event_store
+    }
+
     pub async fn test_state() -> AppState {
-        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
@@ -445,6 +421,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         }
     }
 
@@ -2995,7 +2972,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3003,6 +2980,7 @@ mod tests {
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let hook_store = make_test_hook_store().await;
+        let event_store = make_test_event_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3013,6 +2991,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3109,7 +3088,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3117,6 +3096,7 @@ mod tests {
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let hook_store = make_test_hook_store().await;
+        let event_store = make_test_event_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3127,6 +3107,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3322,12 +3303,13 @@ mod tests {
             }
         }
 
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
         let hook_store = make_test_hook_store().await;
+        let event_store = make_test_event_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3338,6 +3320,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -4048,7 +4031,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "test-hook",
-                    "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                    "event_names": ["issue.status_changed"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "abc1" },
@@ -4070,7 +4053,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "my-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "watcher" },
@@ -4115,7 +4098,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "hook-one",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4151,7 +4134,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "get-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4206,7 +4189,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "old-name",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4246,7 +4229,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "toggle-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4303,7 +4286,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "del-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4352,7 +4335,7 @@ mod tests {
             .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "enabled-hook",
                 "enabled": true,
-                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "event_names": ["issue.created"],
                 "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
             })))
             .await.unwrap();
@@ -4362,7 +4345,7 @@ mod tests {
             .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "disabled-hook",
                 "enabled": false,
-                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "event_names": ["issue.created"],
                 "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
             })))
             .await.unwrap();
@@ -4395,7 +4378,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "exec-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4452,7 +4435,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "notify",
-                    "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                    "event_names": ["issue.status_changed"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": watcher_id.clone() },
@@ -4514,7 +4497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_timer_hook_with_valid_schedule_returns_201() {
+    async fn test_create_hook_with_timer_event_name_returns_201() {
         let app = test_app().await;
         let resp = app
             .oneshot(hook_req(
@@ -4522,63 +4505,61 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "timer-hook",
-                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
+                    "event_names": ["timer.heartbeat"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "abc1" },
-                        "body": "Monday morning"
+                        "body": "Tick"
                     }
                 }),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["event_names"][0], "timer.heartbeat");
     }
 
     #[tokio::test]
-    async fn test_create_timer_hook_with_invalid_schedule_returns_400() {
+    async fn test_create_hook_with_external_event_name_returns_201() {
         let app = test_app().await;
         let resp = app
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "bad-timer",
-                    "source": { "type": "timer", "schedule": "not-a-cron" },
+                    "name": "external-hook",
+                    "event_names": ["external.ci-complete"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "abc1" },
-                        "body": "bad"
+                        "body": "CI done"
                     }
                 }),
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"].is_string(), "response must contain 'error' field");
-        let err = v["error"].as_str().unwrap();
-        assert!(
-            err.contains("invalid cron schedule"),
-            "error must mention 'invalid cron schedule', got: {err}"
-        );
+        assert_eq!(v["event_names"][0], "external.ci-complete");
     }
 
     #[tokio::test]
-    async fn test_create_timer_hook_source_serialized_correctly() {
+    async fn test_create_hook_event_names_round_trips() {
         let app = test_app().await;
         let resp = app
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "timer-check",
-                    "source": { "type": "timer", "schedule": "* * * * *" },
+                    "name": "multi-event-hook",
+                    "event_names": ["issue.created", "issue.status_changed"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
-                        "body": "tick"
+                        "body": "event"
                     }
                 }),
             ))
@@ -4587,24 +4568,26 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["source"]["type"], "timer");
-        assert_eq!(v["source"]["schedule"], "* * * * *");
+        let event_names = v["event_names"].as_array().unwrap();
+        assert_eq!(event_names.len(), 2);
+        assert_eq!(event_names[0], "issue.created");
+        assert_eq!(event_names[1], "issue.status_changed");
     }
 
-    // ─── Timer hook list filtering ────────────────────────────────────────────
+    // ─── Hook list filtering by enabled ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_list_hooks_source_type_timer_filter() {
+    async fn test_list_hooks_enabled_filter_only() {
         let app = test_app().await;
 
-        // Create an internal hook and a timer hook
+        // Create an enabled hook and a disabled hook
         app.clone()
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "internal-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "name": "enabled-hook",
+                    "event_names": ["issue.created"],
                     "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
                 }),
             ))
@@ -4616,8 +4599,9 @@ mod tests {
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "timer-hook",
-                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
+                    "name": "disabled-hook",
+                    "enabled": false,
+                    "event_names": ["timer.heartbeat"],
                     "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
                 }),
             ))
@@ -4627,7 +4611,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/hooks?source_type=timer")
+                    .uri("/hooks?enabled=true")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4637,9 +4621,8 @@ mod tests {
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arr = v.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "only timer hooks should be returned");
-        assert_eq!(arr[0]["name"], "timer-hook");
-        assert_eq!(arr[0]["source"]["type"], "timer");
+        assert_eq!(arr.len(), 1, "only enabled hooks should be returned");
+        assert_eq!(arr[0]["name"], "enabled-hook");
     }
 
     #[tokio::test]
@@ -4654,7 +4637,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "limit-test-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "some-issue-id" },
@@ -5179,33 +5162,27 @@ mod tests {
 
     // ─── Test 4: Non-in_progress status update stores the new status ──────────
 
-    // ─── POST /webhooks/:hook_id tests ───────────────────────────────────────
+    // ─── POST /webhooks/:event_id tests ──────────────────────────────────────
 
-    /// Helper: create a hook via the API and return its id.
-    async fn create_webhook_hook(
-        app: &Router,
-        source: serde_json::Value,
+    /// Helper: create a NamedEvent (webhook kind) directly in the event store and return its id.
+    async fn create_webhook_named_event(
+        state: &AppState,
+        name: &str,
+        secret: Option<String>,
+        enabled: bool,
     ) -> String {
-        let resp = app
-            .clone()
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "test-webhook-hook",
-                    "source": source,
-                    "action": {
-                        "type": "send_message",
-                        "target": { "type": "issue", "content": "xxxx" },
-                        "body": "webhook fired"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        v["id"].as_str().unwrap().to_string()
+        use db::{EventKind, NamedEvent};
+        let event_id = hooks::generate_hook_id();
+        let named_event = NamedEvent {
+            id: event_id.clone(),
+            name: name.to_string(),
+            kind: EventKind::Webhook { secret },
+            enabled,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.event_store.create_event(&named_event).await.unwrap();
+        event_id
     }
 
     /// Compute HMAC-SHA256 of `body` using `secret` and return "sha256=<hex>".
@@ -5220,8 +5197,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_nonexistent_hook_returns_404() {
-        let app = test_app().await;
+    async fn test_webhook_nonexistent_event_returns_404() {
+        let (app, _state) = test_app_with_state().await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5237,18 +5214,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_internal_hook_returns_404() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "internal", "event_types": ["issue.created"] }),
-        )
-        .await;
+    async fn test_webhook_timer_event_returns_404() {
+        // A Timer kind NamedEvent should not be accessible via the webhook route
+        let (app, state) = test_app_with_state().await;
+        use db::{EventKind, NamedEvent};
+        let event_id = hooks::generate_hook_id();
+        let named_event = NamedEvent {
+            id: event_id.clone(),
+            name: "heartbeat".to_string(),
+            kind: EventKind::Timer { schedule: "* * * * *".to_string() },
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.event_store.create_event(&named_event).await.unwrap();
+
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"test"}"#))
                     .unwrap(),
@@ -5259,19 +5244,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_no_secret_no_signature_returns_200() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+    async fn test_webhook_no_secret_no_signature_returns_200() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, true).await;
         let body = r#"{"event":"push","repo":"ns2"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5285,20 +5266,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_correct_signature_returns_200() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_with_secret_correct_signature_returns_200() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(
+            &state, "ci-complete", Some("test-secret".to_string()), true
+        ).await;
         let body = r#"{"event":"push"}"#;
         let sig = compute_hmac_sig("test-secret", body.as_bytes());
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .header("x-hub-signature-256", sig)
                     .body(Body::from(body))
@@ -5313,19 +5292,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_missing_signature_returns_401() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_with_secret_missing_signature_returns_401() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(
+            &state, "ci-complete", Some("test-secret".to_string()), true
+        ).await;
         let body = r#"{"event":"push"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5336,19 +5313,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_wrong_signature_returns_401() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_with_secret_wrong_signature_returns_401() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(
+            &state, "ci-complete", Some("test-secret".to_string()), true
+        ).await;
         let body = r#"{"event":"push"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .header("x-hub-signature-256", "sha256=badhash")
                     .body(Body::from(body))
@@ -5361,17 +5336,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_webhook_invalid_json_returns_400() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, true).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from("not-json"))
                     .unwrap(),
@@ -5382,36 +5353,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_disabled_hook_returns_404() {
-        let app = test_app().await;
-        // Create a disabled external hook
-        let resp = app
-            .clone()
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "disabled-webhook",
-                    "enabled": false,
-                    "source": { "type": "external" },
-                    "action": {
-                        "type": "send_message",
-                        "target": { "type": "issue", "content": "xxxx" },
-                        "body": "hi"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let hook_id = v["id"].as_str().unwrap().to_string();
-
+    async fn test_webhook_disabled_event_returns_404() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, false).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"push"}"#))
                     .unwrap(),
@@ -5425,17 +5374,13 @@ mod tests {
     async fn test_webhook_emits_system_event_external() {
         let (app, state) = test_app_with_state().await;
         let mut rx = state.event_bus.subscribe();
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, true).await;
         let body = r#"{"event":"push","ref":"main"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5448,8 +5393,9 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
         loop {
             match rx.try_recv() {
-                Ok(events::SystemEvent::External { hook_id: hid, payload }) => {
-                    assert_eq!(hid, hook_id);
+                Ok(events::SystemEvent::External { event_id: eid, event_name, payload }) => {
+                    assert_eq!(eid, event_id);
+                    assert_eq!(event_name, "ci-complete");
                     assert_eq!(payload["event"], "push");
                     break;
                 }
@@ -5483,15 +5429,17 @@ mod tests {
         let watcher: serde_json::Value = serde_json::from_slice(&watcher_body).unwrap();
         let watcher_id = watcher["id"].as_str().unwrap().to_string();
 
-        // Create an external hook targeting the watcher issue
-        let create_resp = app
-            .clone()
+        // Create a webhook NamedEvent for "ci-complete"
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, true).await;
+
+        // Create a hook that subscribes to external.ci-complete and posts to the watcher
+        app.clone()
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "external-webhook",
-                    "source": { "type": "external" },
+                    "name": "external-webhook-hook",
+                    "event_names": ["external.ci-complete"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": watcher_id.clone() },
@@ -5501,16 +5449,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        let create_body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-        let hook_id = created["id"].as_str().unwrap().to_string();
 
         // POST a valid webhook
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"push"}"#))
                     .unwrap(),
@@ -5535,6 +5481,74 @@ mod tests {
                 "hook evaluator never dispatched action for external event within 3s"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_wrong_event_name_hook_does_not_fire() {
+        // A hook with event_names = ["external.wrong"] should NOT fire
+        // when an external.ci-complete event arrives
+        let (app, state) = test_app_with_state().await;
+
+        // Create a watcher issue
+        let watcher_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({ "title": "Watcher2", "body": "watch" }),
+            ))
+            .await
+            .unwrap();
+        let watcher_body = response_body_bytes(watcher_resp).await;
+        let watcher: serde_json::Value = serde_json::from_slice(&watcher_body).unwrap();
+        let watcher_id = watcher["id"].as_str().unwrap().to_string();
+
+        // Create a webhook NamedEvent for "ci-complete"
+        let event_id = create_webhook_named_event(&state, "ci-complete", None, true).await;
+
+        // Create a hook that subscribes to external.WRONG (not external.ci-complete)
+        app.clone()
+            .oneshot(hook_req(
+                "POST",
+                "/hooks",
+                &serde_json::json!({
+                    "name": "wrong-hook",
+                    "event_names": ["external.wrong"],
+                    "action": {
+                        "type": "send_message",
+                        "target": { "type": "issue", "content": watcher_id.clone() },
+                        "body": "should not appear"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+
+        // POST to the ci-complete webhook
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/{event_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"push"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Give the evaluator time to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // The watcher should have NO comments
+        let watcher_issue = state.db.get_issue(watcher_id.clone()).await.unwrap();
+        assert!(
+            watcher_issue.comments.is_empty(),
+            "hook with wrong event_name should NOT fire, but got comments: {:?}",
+            watcher_issue.comments
+        );
     }
 
     #[tokio::test]

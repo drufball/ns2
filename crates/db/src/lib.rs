@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 use std::sync::Arc;
 use types::{ContentBlock, Issue, IssueComment, IssueStatus, Role, Session, SessionStatus, Turn};
 use uuid::Uuid;
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("not found")]
@@ -99,16 +99,18 @@ impl SqliteDb {
 }
 
 /// Connect to the `SQLite` database at `url`, run migrations, and return
-/// trait-object handles for [`Db`] and [`HookStore`].
+/// trait-object handles for [`Db`], [`HookStore`], and [`EventStore`].
 ///
 /// # Errors
 ///
 /// Returns an error if the database connection or migration fails.
-pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>)> {
+pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>, Arc<dyn EventStore>)> {
     let sqlite_db = SqliteDb::connect(url).await?;
-    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let pool = sqlite_db.pool().clone();
+    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(pool.clone()));
+    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventStore::new(pool));
     let db: Arc<dyn Db> = Arc::new(sqlite_db);
-    Ok((db, hook_store))
+    Ok((db, hook_store, event_store))
 }
 
 fn parse_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
@@ -499,9 +501,143 @@ impl IssueDb for SqliteDb {
     }
 }
 
+/// The kind of a named event — determines how it is triggered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKind {
+    /// An external webhook event.  Incoming HTTP POST to `/webhooks/:event_id`
+    /// validates the optional HMAC secret then emits `SystemEvent::External`.
+    Webhook { secret: Option<String> },
+    /// A scheduled timer event.  The timer scheduler fires `SystemEvent::TimerFired`
+    /// whenever the cron expression matches the current time.
+    Timer { schedule: String },
+}
+
+/// A named event source (webhook endpoint or timer schedule).
+///
+/// Hooks subscribe to these events by including `"external.<name>"` or
+/// `"timer.<name>"` in their `event_names` list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedEvent {
+    pub id: String,
+    pub name: String,
+    pub kind: EventKind,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Persistence interface for [`NamedEvent`] records.
+#[async_trait]
+pub trait EventStore: Send + Sync {
+    async fn create_event(&self, event: &NamedEvent) -> Result<()>;
+    async fn get_event(&self, id: &str) -> Result<NamedEvent>;
+    async fn list_events(&self) -> Result<Vec<NamedEvent>>;
+    async fn delete_event(&self, id: &str) -> Result<()>;
+}
+
+pub(crate) struct SqliteEventStore {
+    pool: SqlitePool,
+}
+
+impl SqliteEventStore {
+    #[must_use]
+    pub(crate) const fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+fn parse_rfc3339_event(s: &str) -> Result<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| Error::Parse(e.to_string()))
+}
+
+fn parse_named_event_row(row: &sqlx::sqlite::SqliteRow) -> Result<NamedEvent> {
+    use sqlx::Row;
+    let id: String = row.get("id");
+    let name: String = row.get("name");
+    let kind_json: String = row.get("kind");
+    let enabled: i64 = row.get("enabled");
+    let created_at_str: String = row.get("created_at");
+    let updated_at_str: String = row.get("updated_at");
+
+    let kind: EventKind =
+        serde_json::from_str(&kind_json).map_err(|e| Error::Parse(format!("kind: {e}")))?;
+
+    Ok(NamedEvent {
+        id,
+        name,
+        kind,
+        enabled: enabled != 0,
+        created_at: parse_rfc3339_event(&created_at_str)?,
+        updated_at: parse_rfc3339_event(&updated_at_str)?,
+    })
+}
+
+#[async_trait]
+impl EventStore for SqliteEventStore {
+    async fn create_event(&self, event: &NamedEvent) -> Result<()> {
+        let kind_type = match &event.kind {
+            EventKind::Webhook { .. } => "webhook",
+            EventKind::Timer { .. } => "timer",
+        };
+        let kind_json =
+            serde_json::to_string(&event.kind).map_err(|e| Error::Parse(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO named_events (id, name, kind_type, kind, enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&event.id)
+        .bind(&event.name)
+        .bind(kind_type)
+        .bind(&kind_json)
+        .bind(i64::from(event.enabled))
+        .bind(event.created_at.to_rfc3339())
+        .bind(event.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_event(&self, id: &str) -> Result<NamedEvent> {
+        let row = sqlx::query(
+            "SELECT id, name, kind, enabled, created_at, updated_at \
+             FROM named_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        parse_named_event_row(&row)
+    }
+
+    async fn list_events(&self) -> Result<Vec<NamedEvent>> {
+        let rows = sqlx::query(
+            "SELECT id, name, kind, enabled, created_at, updated_at \
+             FROM named_events ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(parse_named_event_row).collect()
+    }
+
+    async fn delete_event(&self, id: &str) -> Result<()> {
+        let affected = sqlx::query("DELETE FROM named_events WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+}
+
 // ── HookStore ─────────────────────────────────────────────────────────────────
 
-use types::{ExecutionStatus, Hook, HookAction, HookExecution, HookFilter, HookSource};
+use types::{ExecutionStatus, Hook, HookAction, HookExecution, HookFilter};
 
 #[async_trait]
 pub trait HookStore: Send + Sync {
@@ -509,7 +645,6 @@ pub trait HookStore: Send + Sync {
     async fn list_hooks(
         &self,
         enabled: Option<bool>,
-        source_type: Option<&str>,
     ) -> Result<Vec<Hook>>;
     async fn get_hook(&self, id: &str) -> Result<Hook>;
     async fn update_hook(&self, hook: &Hook) -> Result<()>;
@@ -527,14 +662,6 @@ impl SqliteHookStore {
     #[must_use]
     pub(crate) const fn new(pool: SqlitePool) -> Self {
         Self { pool }
-    }
-}
-
-const fn source_type_str(source: &HookSource) -> &'static str {
-    match source {
-        HookSource::Internal { .. } => "internal",
-        HookSource::External { .. } => "external",
-        HookSource::Timer { .. } => "timer",
     }
 }
 
@@ -556,7 +683,7 @@ fn parse_hook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Hook> {
     use sqlx::Row;
     let id: String = row.get("id");
     let name: String = row.get("name");
-    let source_json: String = row.get("source");
+    let event_names_json: String = row.get("event_names");
     let filter_json: Option<String> = row.get("filter");
     let action_json: String = row.get("action");
     let enabled: i64 = row.get("enabled");
@@ -564,8 +691,8 @@ fn parse_hook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Hook> {
     let created_at_str: String = row.get("created_at");
     let updated_at_str: String = row.get("updated_at");
 
-    let source: HookSource =
-        serde_json::from_str(&source_json).map_err(|e| Error::Parse(format!("source: {e}")))?;
+    let event_names: Vec<String> = serde_json::from_str(&event_names_json)
+        .map_err(|e| Error::Parse(format!("event_names: {e}")))?;
     let filter: Option<HookFilter> = filter_json
         .as_deref()
         .map(|s| serde_json::from_str(s).map_err(|e| Error::Parse(format!("filter: {e}"))))
@@ -576,7 +703,7 @@ fn parse_hook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Hook> {
     Ok(Hook {
         id,
         name,
-        source,
+        event_names,
         filter,
         action,
         enabled: enabled != 0,
@@ -618,8 +745,8 @@ fn parse_execution_row(row: &sqlx::sqlite::SqliteRow) -> Result<HookExecution> {
 #[async_trait]
 impl HookStore for SqliteHookStore {
     async fn create_hook(&self, hook: &Hook) -> Result<()> {
-        let source_json =
-            serde_json::to_string(&hook.source).map_err(|e| Error::Parse(e.to_string()))?;
+        let event_names_json =
+            serde_json::to_string(&hook.event_names).map_err(|e| Error::Parse(e.to_string()))?;
         let filter_json = hook
             .filter
             .as_ref()
@@ -630,13 +757,12 @@ impl HookStore for SqliteHookStore {
             serde_json::to_string(&hook.action).map_err(|e| Error::Parse(e.to_string()))?;
 
         sqlx::query(
-            "INSERT INTO hooks (id, name, source_type, source, filter, action_type, action, \
-             enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO hooks (id, name, event_names, filter, action_type, action, \
+             enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&hook.id)
         .bind(&hook.name)
-        .bind(source_type_str(&hook.source))
-        .bind(&source_json)
+        .bind(&event_names_json)
         .bind(&filter_json)
         .bind(action_type_str(&hook.action))
         .bind(&action_json)
@@ -652,39 +778,21 @@ impl HookStore for SqliteHookStore {
     async fn list_hooks(
         &self,
         enabled: Option<bool>,
-        source_type: Option<&str>,
     ) -> Result<Vec<Hook>> {
         let rows =
-            match (enabled, source_type) {
-                (None, None) => sqlx::query(
-                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+            match enabled {
+                None => sqlx::query(
+                    "SELECT id, name, event_names, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks ORDER BY created_at ASC",
                 )
                 .fetch_all(&self.pool)
                 .await?,
-                (Some(en), None) => sqlx::query(
-                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+                Some(en) => sqlx::query(
+                    "SELECT id, name, event_names, filter, action_type, action, enabled, \
                      created_by, created_at, updated_at FROM hooks WHERE enabled = ? \
                      ORDER BY created_at ASC",
                 )
                 .bind(i64::from(en))
-                .fetch_all(&self.pool)
-                .await?,
-                (None, Some(st)) => sqlx::query(
-                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
-                     created_by, created_at, updated_at FROM hooks WHERE source_type = ? \
-                     ORDER BY created_at ASC",
-                )
-                .bind(st)
-                .fetch_all(&self.pool)
-                .await?,
-                (Some(en), Some(st)) => sqlx::query(
-                    "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
-                     created_by, created_at, updated_at FROM hooks \
-                     WHERE enabled = ? AND source_type = ? ORDER BY created_at ASC",
-                )
-                .bind(i64::from(en))
-                .bind(st)
                 .fetch_all(&self.pool)
                 .await?,
             };
@@ -693,7 +801,7 @@ impl HookStore for SqliteHookStore {
 
     async fn get_hook(&self, id: &str) -> Result<Hook> {
         let row = sqlx::query(
-            "SELECT id, name, source_type, source, filter, action_type, action, enabled, \
+            "SELECT id, name, event_names, filter, action_type, action, enabled, \
              created_by, created_at, updated_at FROM hooks WHERE id = ?",
         )
         .bind(id)
@@ -704,8 +812,8 @@ impl HookStore for SqliteHookStore {
     }
 
     async fn update_hook(&self, hook: &Hook) -> Result<()> {
-        let source_json =
-            serde_json::to_string(&hook.source).map_err(|e| Error::Parse(e.to_string()))?;
+        let event_names_json =
+            serde_json::to_string(&hook.event_names).map_err(|e| Error::Parse(e.to_string()))?;
         let filter_json = hook
             .filter
             .as_ref()
@@ -716,13 +824,12 @@ impl HookStore for SqliteHookStore {
             serde_json::to_string(&hook.action).map_err(|e| Error::Parse(e.to_string()))?;
 
         let affected = sqlx::query(
-            "UPDATE hooks SET name = ?, source_type = ?, source = ?, filter = ?, \
+            "UPDATE hooks SET name = ?, event_names = ?, filter = ?, \
              action_type = ?, action = ?, enabled = ?, created_by = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(&hook.name)
-        .bind(source_type_str(&hook.source))
-        .bind(&source_json)
+        .bind(&event_names_json)
         .bind(&filter_json)
         .bind(action_type_str(&hook.action))
         .bind(&action_json)
@@ -1515,9 +1622,7 @@ mod tests {
         types::Hook {
             id: id.into(),
             name: "test-hook".into(),
-            source: types::HookSource::Internal {
-                event_types: vec!["issue.created".into()],
-            },
+            event_names: vec!["issue.created".into()],
             filter: None,
             action: types::HookAction::SendMessage {
                 target: types::MessageTarget::Issue("x".into()),
@@ -1530,58 +1635,53 @@ mod tests {
         }
     }
 
-    // test: create_then_list_hooks_returns_correct_source_type
+    // test: create_then_list_hooks_returns_correct_event_names
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_create_then_list_hooks_returns_correct_source_type(pool: SqlitePool) {
+    async fn test_create_then_list_hooks_returns_correct_event_names(pool: SqlitePool) {
         let store = SqliteHookStore::new(pool);
         let hook = make_hook("hook-001");
         store.create_hook(&hook).await.unwrap();
 
-        let hooks = store.list_hooks(None, None).await.unwrap();
+        let hooks = store.list_hooks(None).await.unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].id, "hook-001");
-        assert!(
-            matches!(
-                &hooks[0].source,
-                types::HookSource::Internal { event_types }
-                    if event_types == &["issue.created"]
-            ),
-            "source should be Internal with correct event_types"
+        assert_eq!(
+            hooks[0].event_names,
+            vec!["issue.created"],
+            "event_names should be preserved correctly"
         );
     }
 
-    // test: source_type_str filters correctly
+    // test: hooks with different event_names can be listed
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_list_hooks_filter_by_source_type(pool: SqlitePool) {
+    async fn test_list_hooks_with_various_event_names(pool: SqlitePool) {
         let store = SqliteHookStore::new(pool);
 
-        let internal_hook = make_hook("h-internal");
-        store.create_hook(&internal_hook).await.unwrap();
+        let mut hook1 = make_hook("h-issue");
+        hook1.event_names = vec!["issue.created".into(), "issue.status_changed".into()];
+        store.create_hook(&hook1).await.unwrap();
 
-        let mut external_hook = make_hook("h-external");
-        external_hook.source = types::HookSource::External { secret: None };
-        store.create_hook(&external_hook).await.unwrap();
+        let mut hook2 = make_hook("h-external");
+        hook2.event_names = vec!["external.ci-complete".into()];
+        store.create_hook(&hook2).await.unwrap();
 
-        let mut timer_hook = make_hook("h-timer");
-        timer_hook.source = types::HookSource::Timer {
-            schedule: "*/5 * * * *".into(),
-        };
-        store.create_hook(&timer_hook).await.unwrap();
+        let mut hook3 = make_hook("h-timer");
+        hook3.event_names = vec!["timer.heartbeat".into()];
+        store.create_hook(&hook3).await.unwrap();
 
-        // Filter by "internal" — should return only the internal hook
-        let internal_list = store.list_hooks(None, Some("internal")).await.unwrap();
-        assert_eq!(internal_list.len(), 1);
-        assert_eq!(internal_list[0].id, "h-internal");
+        // All hooks should be listed
+        let all = store.list_hooks(None).await.unwrap();
+        assert_eq!(all.len(), 3);
 
-        // Filter by "external"
-        let external_list = store.list_hooks(None, Some("external")).await.unwrap();
-        assert_eq!(external_list.len(), 1);
-        assert_eq!(external_list[0].id, "h-external");
+        // Verify event_names round-trip
+        let h1 = all.iter().find(|h| h.id == "h-issue").unwrap();
+        assert_eq!(h1.event_names, vec!["issue.created", "issue.status_changed"]);
 
-        // Filter by "timer"
-        let timer_list = store.list_hooks(None, Some("timer")).await.unwrap();
-        assert_eq!(timer_list.len(), 1);
-        assert_eq!(timer_list[0].id, "h-timer");
+        let h2 = all.iter().find(|h| h.id == "h-external").unwrap();
+        assert_eq!(h2.event_names, vec!["external.ci-complete"]);
+
+        let h3 = all.iter().find(|h| h.id == "h-timer").unwrap();
+        assert_eq!(h3.event_names, vec!["timer.heartbeat"]);
     }
 
     // test: action_type_str_round_trips_correctly
@@ -1639,7 +1739,7 @@ mod tests {
         store.create_hook(&hook).await.unwrap();
 
         // List hooks and assert enabled == false
-        let hooks = store.list_hooks(None, None).await.unwrap();
+        let hooks = store.list_hooks(None).await.unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(!hooks[0].enabled, "hook should be disabled after creation");
 
@@ -1666,12 +1766,12 @@ mod tests {
         disabled_hook.enabled = false;
         store.create_hook(&disabled_hook).await.unwrap();
 
-        let enabled_only = store.list_hooks(Some(true), None).await.unwrap();
+        let enabled_only = store.list_hooks(Some(true)).await.unwrap();
         assert_eq!(enabled_only.len(), 1);
         assert_eq!(enabled_only[0].id, "h-enabled");
         assert!(enabled_only[0].enabled);
 
-        let disabled_only = store.list_hooks(Some(false), None).await.unwrap();
+        let disabled_only = store.list_hooks(Some(false)).await.unwrap();
         assert_eq!(disabled_only.len(), 1);
         assert_eq!(disabled_only[0].id, "h-disabled");
         assert!(!disabled_only[0].enabled);
@@ -1708,14 +1808,14 @@ mod tests {
         store.create_hook(&hook).await.unwrap();
 
         // Confirm it exists
-        let before = store.list_hooks(None, None).await.unwrap();
+        let before = store.list_hooks(None).await.unwrap();
         assert_eq!(before.len(), 1);
 
         // Delete it
         store.delete_hook("hook-to-delete").await.unwrap();
 
         // Confirm it's gone
-        let after = store.list_hooks(None, None).await.unwrap();
+        let after = store.list_hooks(None).await.unwrap();
         assert!(after.is_empty());
 
         // get_hook should return NotFound

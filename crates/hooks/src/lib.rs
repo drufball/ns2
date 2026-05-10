@@ -1,6 +1,6 @@
 pub use types::{
-    ExecutionStatus, FieldCondition, Hook, HookAction, HookExecution, HookFilter, HookSource,
-    MessageTarget, Op,
+    ExecutionStatus, FieldCondition, Hook, HookAction, HookExecution, HookFilter, MessageTarget,
+    Op,
 };
 
 pub mod cron;
@@ -9,54 +9,64 @@ pub mod timer;
 // ── Filter evaluation ─────────────────────────────────────────────────────────
 
 pub mod evaluate {
-    use super::{FieldCondition, Hook, HookFilter, HookSource, Op};
+    use super::{FieldCondition, Hook, HookFilter, Op};
     use events::{IssueEvent, SessionEvent, SystemEvent};
 
     /// Map a `SystemEvent` to its canonical event-type string(s).
+    ///
+    /// External and TimerFired events are named as `"external.<event_name>"` and
+    /// `"timer.<event_name>"` respectively so hooks can subscribe to them by name.
     #[must_use]
-    pub fn event_type_strings(event: &SystemEvent) -> Vec<&'static str> {
+    pub fn event_type_strings(event: &SystemEvent) -> Vec<String> {
         match event {
-            SystemEvent::Issue(IssueEvent::Created(_)) => vec!["issue.created"],
-            SystemEvent::Issue(IssueEvent::StatusChanged { .. }) => vec!["issue.status_changed"],
-            SystemEvent::Issue(IssueEvent::CommentAdded { .. }) => vec!["issue.comment_added"],
+            SystemEvent::Issue(IssueEvent::Created(_)) => vec!["issue.created".into()],
+            SystemEvent::Issue(IssueEvent::StatusChanged { .. }) => {
+                vec!["issue.status_changed".into()]
+            }
+            SystemEvent::Issue(IssueEvent::CommentAdded { .. }) => {
+                vec!["issue.comment_added".into()]
+            }
             SystemEvent::Session {
                 event: SessionEvent::Done,
                 ..
-            } => vec!["session.done"],
+            } => vec!["session.done".into()],
             SystemEvent::Session {
                 event: SessionEvent::TurnDone { .. },
                 ..
             } => {
-                vec!["session.turn_done"]
+                vec!["session.turn_done".into()]
             }
             SystemEvent::Session {
                 event: SessionEvent::Error { .. },
                 ..
             } => {
-                vec!["session.error"]
+                vec!["session.error".into()]
             }
             SystemEvent::Session {
                 event: SessionEvent::TurnStarted { .. },
                 ..
             } => {
-                vec!["session.turn_started"]
+                vec!["session.turn_started".into()]
             }
-            SystemEvent::Session { .. }
-            | SystemEvent::External { .. }
-            | SystemEvent::TimerFired { .. } => vec![],
+            SystemEvent::Session { .. } => vec![],
+            SystemEvent::External { event_name, .. } => {
+                vec![format!("external.{event_name}")]
+            }
+            SystemEvent::TimerFired { event_name, .. } => {
+                vec![format!("timer.{event_name}")]
+            }
         }
     }
 
     /// Returns `true` when `event` should trigger the given `hook`.
+    ///
+    /// Matches when any entry in `hook.event_names` equals `"*"` or equals one of
+    /// the event's canonical type strings.  Then the optional filter is applied.
     #[must_use]
     pub fn matches_event(hook: &Hook, event: &SystemEvent) -> bool {
-        let HookSource::Internal { event_types } = &hook.source else {
-            return false;
-        };
-
-        let type_match = event_types
-            .iter()
-            .any(|et| et == "*" || event_type_strings(event).contains(&et.as_str()));
+        let type_match = hook.event_names.iter().any(|et| {
+            et == "*" || event_type_strings(event).iter().any(|s| s == et)
+        });
         if !type_match {
             return false;
         }
@@ -268,13 +278,11 @@ mod tests {
         }
     }
 
-    fn make_internal_hook(event_types: Vec<&str>, filter: Option<HookFilter>) -> Hook {
+    fn make_hook(event_names: Vec<&str>, filter: Option<HookFilter>) -> Hook {
         Hook {
             id: "h001".into(),
             name: "test hook".into(),
-            source: HookSource::Internal {
-                event_types: event_types.into_iter().map(String::from).collect(),
-            },
+            event_names: event_names.into_iter().map(String::from).collect(),
             filter,
             action: HookAction::SendMessage {
                 target: MessageTarget::Issue("watcher".into()),
@@ -291,14 +299,14 @@ mod tests {
 
     #[test]
     fn matches_issue_created_event_type() {
-        let hook = make_internal_hook(vec!["issue.created"], None);
+        let hook = make_hook(vec!["issue.created"], None);
         let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
         assert!(evaluate::matches_event(&hook, &event));
     }
 
     #[test]
     fn does_not_match_wrong_event_type() {
-        let hook = make_internal_hook(vec!["issue.created"], None);
+        let hook = make_hook(vec!["issue.created"], None);
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(),
             from: IssueStatus::Open,
@@ -309,7 +317,7 @@ mod tests {
 
     #[test]
     fn matches_issue_status_changed() {
-        let hook = make_internal_hook(vec!["issue.status_changed"], None);
+        let hook = make_hook(vec!["issue.status_changed"], None);
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(),
             from: IssueStatus::Open,
@@ -320,7 +328,7 @@ mod tests {
 
     #[test]
     fn matches_issue_comment_added() {
-        let hook = make_internal_hook(vec!["issue.comment_added"], None);
+        let hook = make_hook(vec!["issue.comment_added"], None);
         let comment = IssueComment {
             author: "user".into(),
             created_at: Utc::now(),
@@ -335,7 +343,7 @@ mod tests {
 
     #[test]
     fn matches_session_done() {
-        let hook = make_internal_hook(vec!["session.done"], None);
+        let hook = make_hook(vec!["session.done"], None);
         let event = SystemEvent::Session {
             session_id: Uuid::new_v4(),
             event: SessionEvent::Done,
@@ -345,7 +353,7 @@ mod tests {
 
     #[test]
     fn matches_session_turn_done() {
-        let hook = make_internal_hook(vec!["session.turn_done"], None);
+        let hook = make_hook(vec!["session.turn_done"], None);
         let event = SystemEvent::Session {
             session_id: Uuid::new_v4(),
             event: SessionEvent::TurnDone {
@@ -357,7 +365,7 @@ mod tests {
 
     #[test]
     fn matches_session_error() {
-        let hook = make_internal_hook(vec!["session.error"], None);
+        let hook = make_hook(vec!["session.error"], None);
         let event = SystemEvent::Session {
             session_id: Uuid::new_v4(),
             event: SessionEvent::Error {
@@ -370,7 +378,7 @@ mod tests {
     #[test]
     fn matches_session_turn_started() {
         use types::Turn;
-        let hook = make_internal_hook(vec!["session.turn_started"], None);
+        let hook = make_hook(vec!["session.turn_started"], None);
         let turn = Turn {
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
@@ -386,7 +394,7 @@ mod tests {
 
     #[test]
     fn wildcard_matches_any_event() {
-        let hook = make_internal_hook(vec!["*"], None);
+        let hook = make_hook(vec!["*"], None);
         let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
         assert!(evaluate::matches_event(&hook, &event));
 
@@ -398,23 +406,58 @@ mod tests {
     }
 
     #[test]
-    fn external_hook_does_not_match_live_events() {
-        let hook = Hook {
-            id: "ext1".into(),
-            name: "external".into(),
-            source: HookSource::External { secret: None },
-            filter: None,
-            action: HookAction::SendMessage {
-                target: MessageTarget::Issue("x".into()),
-                body: "hi".into(),
-            },
-            enabled: true,
-            created_by: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+    fn hook_with_external_event_name_matches_external_event() {
+        let hook = make_hook(vec!["external.ci-complete"], None);
+        let event = SystemEvent::External {
+            event_id: "e001".into(),
+            event_name: "ci-complete".into(),
+            payload: serde_json::json!({ "status": "green" }),
         };
-        let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn hook_with_external_event_name_does_not_match_wrong_name() {
+        let hook = make_hook(vec!["external.ci-complete"], None);
+        let event = SystemEvent::External {
+            event_id: "e002".into(),
+            event_name: "deploy-done".into(),
+            payload: serde_json::json!({}),
+        };
         assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn hook_with_timer_event_name_matches_timer_event() {
+        let hook = make_hook(vec!["timer.heartbeat"], None);
+        let event = SystemEvent::TimerFired {
+            event_id: "t001".into(),
+            event_name: "heartbeat".into(),
+            fired_at: Utc::now(),
+        };
+        assert!(evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn hook_with_timer_event_name_does_not_match_wrong_name() {
+        let hook = make_hook(vec!["timer.heartbeat"], None);
+        let event = SystemEvent::TimerFired {
+            event_id: "t002".into(),
+            event_name: "daily-report".into(),
+            fired_at: Utc::now(),
+        };
+        assert!(!evaluate::matches_event(&hook, &event));
+    }
+
+    #[test]
+    fn hook_with_issue_event_name_matches_status_changed() {
+        let hook = make_hook(vec!["issue.status_changed"], None);
+        let event = SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue: make_issue(),
+            from: IssueStatus::Open,
+            to: IssueStatus::InProgress,
+        });
+        assert!(evaluate::matches_event(&hook, &event));
     }
 
     // ── FieldCondition evaluation tests ───────────────────────────────────────
@@ -429,7 +472,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+        let hook = make_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
         issue.status = IssueStatus::InProgress;
@@ -451,7 +494,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+        let hook = make_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
         issue.status = IssueStatus::InProgress;
@@ -473,7 +516,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+        let hook = make_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
         issue.status = IssueStatus::InProgress;
@@ -495,7 +538,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -542,7 +585,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.blocked_on = vec!["dep-1".into(), "urgent".into()];
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -560,7 +603,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.blocked_on = vec!["bug".into()];
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -579,7 +622,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -594,7 +637,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let event = SystemEvent::Issue(IssueEvent::Created(make_issue()));
         assert!(!evaluate::matches_event(&hook, &event));
     }
@@ -610,7 +653,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "Test issue".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -628,7 +671,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "barfoo".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -646,7 +689,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "foobar".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -664,7 +707,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "foobaz".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -682,7 +725,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "foo-baz-bar".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -700,7 +743,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "foo-baz-baz".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -718,7 +761,7 @@ mod tests {
             }],
             expression: None,
         };
-        let hook = make_internal_hook(vec!["issue.created"], Some(filter));
+        let hook = make_hook(vec!["issue.created"], Some(filter));
         let mut issue = make_issue();
         issue.title = "anything".into();
         let event = SystemEvent::Issue(IssueEvent::Created(issue));
@@ -816,7 +859,7 @@ mod tests {
         // ── Helper: build an IssueService backed by an in-memory SQLite db ────────
 
         async fn make_issue_service() -> issues::IssueService {
-            let (db, _hook_store) = db::connect("sqlite::memory:").await.unwrap();
+            let (db, _hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
             issues::IssueService::new(db)
         }
 
@@ -846,7 +889,6 @@ mod tests {
             async fn list_hooks(
                 &self,
                 _enabled: Option<bool>,
-                _source_type: Option<&str>,
             ) -> db::Result<Vec<types::Hook>> {
                 Ok(vec![])
             }
@@ -888,9 +930,7 @@ mod tests {
             Hook {
                 id: "exec01".into(),
                 name: "exec-hook".into(),
-                source: HookSource::Internal {
-                    event_types: vec!["issue.created".into()],
-                },
+                event_names: vec!["issue.created".into()],
                 filter: None,
                 action: HookAction::SendMessage {
                     target: MessageTarget::Issue(issue_id.into()),
@@ -907,9 +947,7 @@ mod tests {
             Hook {
                 id: "exec02".into(),
                 name: "exec-hook-2".into(),
-                source: HookSource::Internal {
-                    event_types: vec!["issue.created".into()],
-                },
+                event_names: vec!["issue.created".into()],
                 filter: None,
                 action,
                 enabled: true,

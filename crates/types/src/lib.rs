@@ -162,21 +162,20 @@ pub struct ToolDefinition {
 pub struct Hook {
     pub id: String,
     pub name: String,
-    pub source: HookSource,
+    /// Event name patterns this hook listens to.
+    ///
+    /// Examples:
+    /// - `"issue.created"`, `"issue.status_changed"`, `"session.done"` (built-in events)
+    /// - `"external.ci-complete"` (external webhook events)
+    /// - `"timer.heartbeat"` (timer events)
+    /// - `"*"` (all events)
+    pub event_names: Vec<String>,
     pub filter: Option<HookFilter>,
     pub action: HookAction,
     pub enabled: bool,
     pub created_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookSource {
-    Internal { event_types: Vec<String> },
-    External { secret: Option<String> },
-    Timer { schedule: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

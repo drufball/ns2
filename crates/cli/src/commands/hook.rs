@@ -16,23 +16,13 @@ fn parse_filter_field(s: &str) -> (String, serde_json::Value) {
     }
 }
 
-// ── Helper: build timer source JSON ──────────────────────────────────────────
-
-fn build_timer_source(schedule: Option<&str>) -> serde_json::Value {
-    let Some(sched) = schedule else {
-        eprintln!("Error: --schedule is required when --source timer is used. Example: --schedule \"0 9 * * 1\"");
-        std::process::exit(1);
-    };
-    json!({ "type": "timer", "schedule": sched })
-}
-
 // ── run_new ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_new(
     server: &str,
     name: String,
-    source: String,
+    _source: String,  // kept for CLI backwards compat but ignored — use event_names
     event_types: Vec<String>,
     filter_fields: Vec<String>,
     action: String,
@@ -40,24 +30,15 @@ pub async fn run_new(
     body_template: Option<String>,
     title: Option<String>,
     assignee: Option<String>,
-    schedule: Option<String>,
+    _schedule: Option<String>,  // kept for CLI backwards compat but ignored
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
-    // Build source JSON
-    let source_json = match source.as_str() {
-        "internal" => json!({
-            "type": "internal",
-            "event_types": event_types,
-        }),
-        "external" => json!({ "type": "external" }),
-        "timer" => build_timer_source(schedule.as_deref()),
-        other => {
-            eprintln!("Error: unknown source type '{other}'. Use: internal, external, timer");
-            std::process::exit(1);
-        }
-    };
+    // event_names: the caller can pass event types directly (e.g. "issue.created",
+    // "external.ci-complete", "timer.heartbeat") or legacy --source internal --event-type
+    // style which gets the event_types vec. Use event_types directly as event_names.
+    let event_names = event_types;
 
     // Build filter JSON
     let filter_json = if filter_fields.is_empty() {
@@ -67,34 +48,34 @@ pub async fn run_new(
             .iter()
             .map(|f| {
                 let (field, value) = parse_filter_field(f);
-                json!({ "field": field, "op": "eq", "value": value })
+                serde_json::json!({ "field": field, "op": "eq", "value": value })
             })
             .collect();
-        json!({ "conditions": conditions })
+        serde_json::json!({ "conditions": conditions })
     };
 
     // Build action JSON
     let action_json = match action.as_str() {
         "send-message" | "send_message" => {
             let (target_type, target_id) = parse_target(target.as_deref());
-            json!({
+            serde_json::json!({
                 "type": "send_message",
                 "target": { "type": target_type, "content": target_id },
                 "body": body_template.unwrap_or_default(),
             })
         }
         "create-issue" | "create_issue" => {
-            json!({
+            serde_json::json!({
                 "type": "create_issue",
                 "title": title.unwrap_or_default(),
                 "body": body_template.unwrap_or_default(),
                 "assignee": assignee,
-                "parent": null,
+                "parent": serde_json::Value::Null,
                 "start": false,
             })
         }
         "run-shell" | "run_shell" => {
-            json!({
+            serde_json::json!({
                 "type": "run_shell",
                 "command": body_template.unwrap_or_default(),
                 "timeout_secs": 30,
@@ -109,9 +90,9 @@ pub async fn run_new(
         }
     };
 
-    let mut req_body = json!({
+    let mut req_body = serde_json::json!({
         "name": name,
-        "source": source_json,
+        "event_names": event_names,
         "action": action_json,
     });
     if filter_json != serde_json::Value::Null {
@@ -161,14 +142,11 @@ fn parse_target(target: Option<&str>) -> (&'static str, String) {
 
 // ── run_list ──────────────────────────────────────────────────────────────────
 
-pub async fn run_list(server: &str, enabled_only: bool, source_type: Option<String>) {
+pub async fn run_list(server: &str, enabled_only: bool, _source_type: Option<String>) {
     let client = reqwest::Client::new();
     let mut params: Vec<String> = vec![];
     if enabled_only {
         params.push("enabled=true".into());
-    }
-    if let Some(st) = &source_type {
-        params.push(format!("source_type={st}"));
     }
     let url = if params.is_empty() {
         format!("{server}/hooks")
@@ -190,7 +168,7 @@ pub async fn run_list(server: &str, enabled_only: bool, source_type: Option<Stri
         println!("No hooks found.");
     } else {
         println!(
-            "{:<6}  {:<20}  {:<10}  {:<12}  source",
+            "{:<6}  {:<20}  {:<10}  {:<12}  events",
             "id", "name", "enabled", "action"
         );
         for hook in &hooks {
@@ -202,8 +180,16 @@ pub async fn run_list(server: &str, enabled_only: bool, source_type: Option<Stri
                 "no"
             };
             let action_type = hook["action"]["type"].as_str().unwrap_or("?");
-            let source_type_str = hook["source"]["type"].as_str().unwrap_or("?");
-            println!("{id:<6}  {name:<20}  {enabled:<10}  {action_type:<12}  {source_type_str}");
+            let event_names = hook["event_names"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "?".to_string());
+            println!("{id:<6}  {name:<20}  {enabled:<10}  {action_type:<12}  {event_names}");
         }
     }
 }
