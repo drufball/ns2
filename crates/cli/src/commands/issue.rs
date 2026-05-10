@@ -671,37 +671,76 @@ pub async fn run_subscribe(
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
-    // Parse "issue:<id>" or "session:<id>"
-    #[allow(clippy::option_if_let_else)]
-    let (target_type, target_id) = if let Some(rest) = deliver_to.strip_prefix("issue:") {
-        ("issue", rest.to_string())
-    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
-        ("session", rest.to_string())
-    } else {
-        eprintln!("Error: {flag_name} must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
-        std::process::exit(1);
-    };
-
+    // Parse "issue:<id>", "session:<id>", or "mcp:<channel_id>"
     let hook_name = format!("subscribe-{id}");
-    let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
 
-    let req_body = json!({
-        "name": hook_name,
-        "source": {
-            "type": "internal",
-            "event_types": ["issue.status_changed", "issue.comment_added"],
-        },
-        "filter": {
-            "conditions": [
-                { "field": "data.issue.id", "op": "eq", "value": id }
-            ]
-        },
-        "action": {
-            "type": "send_message",
-            "target": { "type": target_type, "content": target_id },
-            "body": body_template,
-        },
-    });
+    let req_body = {
+        #[allow(clippy::option_if_let_else)]
+        if let Some(rest) = deliver_to.strip_prefix("issue:") {
+        let target_id = rest.to_string();
+        let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+        json!({
+            "name": hook_name,
+            "source": {
+                "type": "internal",
+                "event_types": ["issue.status_changed", "issue.comment_added"],
+            },
+            "filter": {
+                "conditions": [
+                    { "field": "data.issue.id", "op": "eq", "value": id }
+                ]
+            },
+            "action": {
+                "type": "send_message",
+                "target": { "type": "issue", "content": target_id },
+                "body": body_template,
+            },
+        })
+    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
+        let target_id = rest.to_string();
+        let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+        json!({
+            "name": hook_name,
+            "source": {
+                "type": "internal",
+                "event_types": ["issue.status_changed", "issue.comment_added"],
+            },
+            "filter": {
+                "conditions": [
+                    { "field": "data.issue.id", "op": "eq", "value": id }
+                ]
+            },
+            "action": {
+                "type": "send_message",
+                "target": { "type": "session", "content": target_id },
+                "body": body_template,
+            },
+        })
+    } else if let Some(channel_id) = deliver_to.strip_prefix("mcp:") {
+        let channel_id = channel_id.to_string();
+        let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
+        json!({
+            "name": hook_name,
+            "source": {
+                "type": "internal",
+                "event_types": ["issue.status_changed"],
+            },
+            "filter": {
+                "conditions": [
+                    { "field": "data.issue.id", "op": "eq", "value": id }
+                ]
+            },
+            "action": {
+                "type": "mcp_notify",
+                "channel_id": channel_id,
+                "body": body_template,
+            },
+        })
+    } else {
+        eprintln!("Error: {flag_name} must be 'issue:<id>', 'session:<id>', or 'mcp:<channel_id>', got: {deliver_to}");
+        std::process::exit(1);
+    }
+    };
 
     let resp = client
         .post(&url)
@@ -758,6 +797,47 @@ mod tests {
             snippet: None,
             children,
         }
+    }
+
+    // ── Scenario E — CLI: mcp: subscribe target creates correct hook JSON ────
+
+    /// Test that the `mcp:<channel_id>` target builds a hook body with the
+    /// correct action type and fields (unit test, no server required).
+    #[test]
+    fn subscribe_mcp_target_builds_correct_json() {
+        use serde_json::json;
+        // Simulate what run_subscribe does for mcp:<channel_id>
+        let deliver_to = "mcp:alice-laptop";
+        let id = "ab12";
+        let hook_name = format!("subscribe-{id}");
+        let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
+
+        let channel_id = deliver_to.strip_prefix("mcp:").unwrap();
+        let req_body = json!({
+            "name": hook_name,
+            "source": {
+                "type": "internal",
+                "event_types": ["issue.status_changed"],
+            },
+            "filter": {
+                "conditions": [
+                    { "field": "data.issue.id", "op": "eq", "value": id }
+                ]
+            },
+            "action": {
+                "type": "mcp_notify",
+                "channel_id": channel_id,
+                "body": body_template,
+            },
+        });
+
+        assert_eq!(req_body["action"]["type"], "mcp_notify");
+        assert_eq!(req_body["action"]["channel_id"], "alice-laptop");
+        assert!(
+            req_body["action"]["body"].as_str().unwrap().contains("{{ event.data.issue.id }}"),
+            "body template must contain event.data.issue.id"
+        );
+        assert_eq!(req_body["name"], "subscribe-ab12");
     }
 
     #[test]

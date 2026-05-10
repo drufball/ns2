@@ -80,6 +80,11 @@ enum Command {
         #[command(subcommand)]
         action: WorktreeAction,
     },
+    #[command(
+        about = "MCP channel plugin — receive push-based issue notifications.",
+        long_about = "Starts the ns2 MCP server plugin. Reads channel-id from ns2.local.toml, subscribes to the ns2 server's SSE stream, and bridges McpChannelNotification events to JSON-RPC stdout messages.\n\nReads:\n  ns2.toml         → [server] url (default: http://127.0.0.1:9876)\n  ns2.local.toml   → channel-id = \"<id>\"\n\nHandles initialize requests from stdin and forwards channel notifications to stdout as JSON-RPC notifications/claude/channel messages."
+    )]
+    Mcp,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -825,6 +830,9 @@ async fn main() {
                 commands::worktree::run_delete(branch, force).await;
             }
         },
+        Command::Mcp => {
+            commands::mcp::run_mcp().await;
+        }
     }
 }
 

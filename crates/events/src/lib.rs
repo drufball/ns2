@@ -108,6 +108,11 @@ pub enum SystemEvent {
         hook_id: String,
         fired_at: DateTime<Utc>,
     },
+    McpChannelNotification {
+        channel_id: String,
+        body: String,
+        meta: std::collections::HashMap<String, String>,
+    },
 }
 
 // ── EventBus ──────────────────────────────────────────────────────────────────
@@ -153,6 +158,39 @@ impl EventBus {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // ── Scenario B: McpChannelNotification round-trip ────────────────────────
+
+    #[test]
+    fn system_event_mcp_channel_notification_serde_round_trip() {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("issue_id".to_string(), "ab12".to_string());
+        let ev = SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "hi".into(),
+            meta,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "mcp_channel_notification");
+        assert_eq!(v["data"]["channel_id"], "alice");
+        assert_eq!(v["data"]["body"], "hi");
+        assert_eq!(v["data"]["meta"]["issue_id"], "ab12");
+
+        let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SystemEvent::McpChannelNotification {
+                channel_id,
+                body,
+                meta,
+            } => {
+                assert_eq!(channel_id, "alice");
+                assert_eq!(body, "hi");
+                assert_eq!(meta.get("issue_id").map(String::as_str), Some("ab12"));
+            }
+            _ => panic!("expected McpChannelNotification variant"),
+        }
+    }
 
     // ── EventBus unit tests ───────────────────────────────────────────────────
 
