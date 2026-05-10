@@ -99,16 +99,18 @@ impl SqliteDb {
 }
 
 /// Connect to the `SQLite` database at `url`, run migrations, and return
-/// trait-object handles for [`Db`] and [`HookStore`].
+/// trait-object handles for [`Db`], [`HookStore`], and [`EventStore`].
 ///
 /// # Errors
 ///
 /// Returns an error if the database connection or migration fails.
-pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>)> {
+pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>, Arc<dyn EventStore>)> {
     let sqlite_db = SqliteDb::connect(url).await?;
-    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let pool = sqlite_db.pool().clone();
+    let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(pool.clone()));
+    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventStore::new(pool));
     let db: Arc<dyn Db> = Arc::new(sqlite_db);
-    Ok((db, hook_store))
+    Ok((db, hook_store, event_store))
 }
 
 fn parse_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
@@ -798,6 +800,134 @@ impl HookStore for SqliteHookStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(parse_execution_row).collect()
+    }
+}
+
+// ── EventStore ────────────────────────────────────────────────────────────────
+
+use types::{Event, EventKind};
+
+#[async_trait]
+pub trait EventStore: Send + Sync {
+    async fn create_event(&self, event: &Event) -> Result<()>;
+    async fn get_event(&self, id: &str) -> Result<Event>;
+    async fn get_event_by_name(&self, name: &str) -> Result<Event>;
+    async fn list_events(&self) -> Result<Vec<Event>>;
+    async fn delete_event(&self, id: &str) -> Result<()>;
+}
+
+pub(crate) struct SqliteEventStore {
+    pool: SqlitePool,
+}
+
+impl SqliteEventStore {
+    #[must_use]
+    pub(crate) const fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+const fn event_kind_type_str(kind: &EventKind) -> &'static str {
+    match kind {
+        EventKind::Webhook { .. } => "webhook",
+        EventKind::Timer { .. } => "timer",
+    }
+}
+
+fn parse_rfc3339_event(s: &str) -> Result<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| Error::Parse(e.to_string()))
+}
+
+fn parse_event_row(row: &sqlx::sqlite::SqliteRow) -> Result<Event> {
+    use sqlx::Row;
+    let id: String = row.get("id");
+    let name: String = row.get("name");
+    let kind_json: String = row.get("kind");
+    let description: Option<String> = row.get("description");
+    let created_at_str: String = row.get("created_at");
+    let updated_at_str: String = row.get("updated_at");
+
+    let kind: EventKind =
+        serde_json::from_str(&kind_json).map_err(|e| Error::Parse(format!("kind: {e}")))?;
+
+    Ok(Event {
+        id,
+        name,
+        kind,
+        description,
+        created_at: parse_rfc3339_event(&created_at_str)?,
+        updated_at: parse_rfc3339_event(&updated_at_str)?,
+    })
+}
+
+#[async_trait]
+impl EventStore for SqliteEventStore {
+    async fn create_event(&self, event: &Event) -> Result<()> {
+        let kind_json =
+            serde_json::to_string(&event.kind).map_err(|e| Error::Parse(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO events (id, name, kind_type, kind, description, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&event.id)
+        .bind(&event.name)
+        .bind(event_kind_type_str(&event.kind))
+        .bind(&kind_json)
+        .bind(&event.description)
+        .bind(event.created_at.to_rfc3339())
+        .bind(event.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_event(&self, id: &str) -> Result<Event> {
+        let row = sqlx::query(
+            "SELECT id, name, kind, description, created_at, updated_at \
+             FROM events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        parse_event_row(&row)
+    }
+
+    async fn get_event_by_name(&self, name: &str) -> Result<Event> {
+        let row = sqlx::query(
+            "SELECT id, name, kind, description, created_at, updated_at \
+             FROM events WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        parse_event_row(&row)
+    }
+
+    async fn list_events(&self) -> Result<Vec<Event>> {
+        let rows = sqlx::query(
+            "SELECT id, name, kind, description, created_at, updated_at \
+             FROM events ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(parse_event_row).collect()
+    }
+
+    async fn delete_event(&self, id: &str) -> Result<()> {
+        let affected = sqlx::query("DELETE FROM events WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
 }
 
@@ -1933,5 +2063,155 @@ mod tests {
         assert_eq!(executions[0].id, "exec-order-2");
         assert_eq!(executions[1].id, "exec-order-1");
         assert_eq!(executions[2].id, "exec-order-0");
+    }
+
+    // ── SqliteEventStore tests ────────────────────────────────────────────────
+
+    fn make_event(id: &str, name: &str) -> types::Event {
+        types::Event {
+            id: id.into(),
+            name: name.into(),
+            kind: types::EventKind::Webhook { secret: None },
+            description: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_create_and_get(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = make_event("e001", "ci-complete");
+        store.create_event(&event).await.unwrap();
+
+        let fetched = store.get_event("e001").await.unwrap();
+        assert_eq!(fetched.id, "e001");
+        assert_eq!(fetched.name, "ci-complete");
+        assert!(matches!(fetched.kind, types::EventKind::Webhook { secret: None }));
+        assert!(fetched.description.is_none());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_get_by_name(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = make_event("e001", "ci-complete");
+        store.create_event(&event).await.unwrap();
+
+        let fetched = store.get_event_by_name("ci-complete").await.unwrap();
+        assert_eq!(fetched.id, "e001");
+        assert_eq!(fetched.name, "ci-complete");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_list_empty(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let events = store.list_events().await.unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_list_returns_created_events(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        store.create_event(&make_event("e001", "ci-complete")).await.unwrap();
+        store.create_event(&make_event("e002", "deploy-done")).await.unwrap();
+
+        let events = store.list_events().await.unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_duplicate_name_returns_error(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = make_event("e001", "ci-complete");
+        store.create_event(&event).await.unwrap();
+
+        // Duplicate name (different id) — UNIQUE constraint on name
+        let dup = make_event("e002", "ci-complete");
+        let result = store.create_event(&dup).await;
+        assert!(result.is_err(), "duplicate name must return error");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_delete(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = make_event("e001", "ci-complete");
+        store.create_event(&event).await.unwrap();
+
+        store.delete_event("e001").await.unwrap();
+
+        let result = store.get_event("e001").await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_get_not_found(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let result = store.get_event("no-such").await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_get_by_name_not_found(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let result = store.get_event_by_name("no-such").await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_delete_not_found(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let result = store.delete_event("no-such").await;
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_timer_kind_round_trips(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = types::Event {
+            id: "t001".into(),
+            name: "daily-report".into(),
+            kind: types::EventKind::Timer {
+                schedule: "0 9 * * 1".into(),
+            },
+            description: Some("Weekly Monday report".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.create_event(&event).await.unwrap();
+
+        let fetched = store.get_event("t001").await.unwrap();
+        assert_eq!(fetched.name, "daily-report");
+        assert_eq!(fetched.description.as_deref(), Some("Weekly Monday report"));
+        assert!(
+            matches!(fetched.kind, types::EventKind::Timer { ref schedule } if schedule == "0 9 * * 1")
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_webhook_with_secret_round_trips(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool);
+        let event = types::Event {
+            id: "w001".into(),
+            name: "github-push".into(),
+            kind: types::EventKind::Webhook {
+                secret: Some("my-secret".into()),
+            },
+            description: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.create_event(&event).await.unwrap();
+
+        let fetched = store.get_event("w001").await.unwrap();
+        assert!(
+            matches!(fetched.kind, types::EventKind::Webhook { ref secret } if secret.as_deref() == Some("my-secret"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_returns_triple_with_usable_event_store() {
+        let (_db, _hook_store, event_store) = connect("sqlite::memory:").await.unwrap();
+        let events = event_store.list_events().await.unwrap();
+        assert!(events.is_empty());
     }
 }
