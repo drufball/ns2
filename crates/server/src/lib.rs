@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{events_route, hook as hook_route, issue, session, webhook};
+use routes::{events_route, hook as hook_route, issue, named_event, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -63,6 +63,11 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
         .route("/webhooks/:event_id", post(webhook::receive_webhook))
+        // Named event CRUD
+        .route("/named-events", post(named_event::create_event))
+        .route("/named-events", get(named_event::list_events))
+        .route("/named-events/:id", get(named_event::get_event))
+        .route("/named-events/:id", delete(named_event::delete_event))
         .with_state(state)
 }
 

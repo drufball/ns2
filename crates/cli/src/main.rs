@@ -73,6 +73,14 @@ enum Command {
         action: HookSubcommand,
     },
     #[command(
+        about = "Manage named events (webhooks and timers).",
+        long_about = "Named events are triggers that hooks can listen to. Each event has a name, a type (webhook or timer), and optional metadata.\n\nSubcommands:\n  new     Create a new named event\n  list    List all named events\n  delete  Delete a named event by ID\n\nTypical workflow:\n  id=$(ns2 event new ci-complete --type webhook --secret abc123)\n  ns2 event list\n  ns2 event delete --id \"$id\""
+    )]
+    Event {
+        #[command(subcommand)]
+        action: EventSubcommand,
+    },
+    #[command(
         about = "Manage git worktrees for branches.",
         long_about = "Worktrees let multiple branches be checked out simultaneously into separate directories.\nEach worktree maps a branch to a directory under the configured worktree base path.\n\nThe base path is read from ns2.toml ([worktrees] path = ...) or defaults to\n~/.ns2/<repo-name>/worktrees/.\n\nSubcommands:\n  list    Print all worktrees under the base path\n  create  Create a worktree for a branch (idempotent)\n  delete  Remove a worktree and its branch"
     )]
@@ -148,6 +156,33 @@ enum HookSubcommand {
             help = "Maximum number of executions to show."
         )]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventSubcommand {
+    #[command(
+        about = "Create a new named event.",
+        long_about = "Create a named event that hooks can listen to.\n\nExamples:\n  ns2 event new ci-complete --type webhook --secret abc123\n  ns2 event new heartbeat --type timer --schedule \"* * * * *\""
+    )]
+    New {
+        #[arg(help = "The event name (e.g. ci-complete, deploy-done).")]
+        name: String,
+        #[arg(long = "type", help = "Event type: webhook or timer. Required.")]
+        event_type: String,
+        #[arg(long, help = "HMAC secret for webhook events (optional).")]
+        secret: Option<String>,
+        #[arg(long, help = "Cron schedule for timer events (e.g. '* * * * *'). Required for --type timer.")]
+        schedule: Option<String>,
+        #[arg(long, help = "Optional human-readable description.")]
+        description: Option<String>,
+    },
+    #[command(about = "List all named events.")]
+    List,
+    #[command(about = "Delete a named event by ID.")]
+    Delete {
+        #[arg(long, help = "The event ID to delete. Required.")]
+        id: String,
     },
 }
 
@@ -799,6 +834,31 @@ async fn main() {
             }
             HookSubcommand::Logs { id, limit } => {
                 commands::hook::run_logs(&cli.server, id, limit).await;
+            }
+        },
+        Command::Event { action } => match action {
+            EventSubcommand::New {
+                name,
+                event_type,
+                secret,
+                schedule,
+                description,
+            } => {
+                commands::event::run_new(
+                    &cli.server,
+                    name,
+                    event_type,
+                    secret,
+                    schedule,
+                    description,
+                )
+                .await;
+            }
+            EventSubcommand::List => {
+                commands::event::run_list(&cli.server).await;
+            }
+            EventSubcommand::Delete { id } => {
+                commands::event::run_delete(&cli.server, id).await;
             }
         },
         Command::Worktree { action } => match action {

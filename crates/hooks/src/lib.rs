@@ -245,6 +245,18 @@ pub fn generate_hook_id() -> String {
         .collect()
 }
 
+// ── Event ID generation ───────────────────────────────────────────────────────
+
+#[must_use]
+pub fn generate_event_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let id = uuid::Uuid::new_v4();
+    let bytes = id.as_bytes();
+    (0..4)
+        .map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
