@@ -66,12 +66,14 @@ pub(crate) async fn process_timer_hooks(
         let hook_store_clone = Arc::clone(hook_store);
         let issue_svc_clone = issue_svc.clone();
         let hook_clone = hook.clone();
+        let event_bus_clone = event_bus.clone();
         tokio::spawn(async move {
             crate::execute::run_action(
                 &hook_clone,
                 &event,
                 &issue_svc_clone,
                 hook_store_clone.as_ref(),
+                &event_bus_clone,
             )
             .await;
         });

@@ -43,7 +43,8 @@ pub mod evaluate {
             }
             SystemEvent::Session { .. }
             | SystemEvent::External { .. }
-            | SystemEvent::TimerFired { .. } => vec![],
+            | SystemEvent::TimerFired { .. }
+            | SystemEvent::McpChannelNotification { .. } => vec![],
         }
     }
 
@@ -163,13 +164,14 @@ pub mod execute {
     use super::{ExecutionStatus, Hook, HookAction, HookExecution, MessageTarget};
     use chrono::Utc;
     use db::HookStore;
-    use events::SystemEvent;
+    use events::{EventBus, SystemEvent};
 
     pub async fn run_action(
         hook: &Hook,
         event: &SystemEvent,
         issue_svc: &issues::IssueService,
         hook_store: &dyn HookStore,
+        event_bus: &EventBus,
     ) {
         let event_json = serde_json::to_value(event).unwrap_or_default();
         let exec_id = uuid::Uuid::new_v4().to_string();
@@ -184,7 +186,7 @@ pub mod execute {
         };
         let _ = hook_store.create_execution(&exec).await;
 
-        let result = execute_action_inner(hook, &event_json, issue_svc).await;
+        let result = execute_action_inner(hook, event, &event_json, issue_svc, event_bus).await;
 
         exec.completed_at = Some(Utc::now());
         match result {
@@ -202,8 +204,10 @@ pub mod execute {
 
     pub(crate) async fn execute_action_inner(
         hook: &Hook,
+        event: &SystemEvent,
         event_json: &serde_json::Value,
         issue_svc: &issues::IssueService,
+        event_bus: &EventBus,
     ) -> Result<String, String> {
         match &hook.action {
             HookAction::SendMessage {
@@ -225,7 +229,32 @@ pub mod execute {
                 Ok("create_issue action not yet implemented".to_string())
             }
             HookAction::RunShell { .. } => Ok("run_shell action not yet implemented".to_string()),
+            HookAction::McpNotify { channel_id, body } => {
+                let rendered = render_template(body, event_json);
+                // Build meta from the triggering event
+                let meta = build_meta_from_event(event);
+                event_bus.send(SystemEvent::McpChannelNotification {
+                    channel_id: channel_id.clone(),
+                    body: rendered,
+                    meta,
+                });
+                Ok("mcp_notify sent".to_string())
+            }
         }
+    }
+
+    /// Extract metadata from the triggering `SystemEvent` for use in
+    /// `McpChannelNotification`.
+    fn build_meta_from_event(
+        event: &SystemEvent,
+    ) -> std::collections::HashMap<String, String> {
+        let mut meta = std::collections::HashMap::new();
+        if let SystemEvent::Issue(events::IssueEvent::StatusChanged { issue, from, to }) = event {
+            meta.insert("issue_id".to_string(), issue.id.clone());
+            meta.insert("from".to_string(), from.to_string());
+            meta.insert("to".to_string(), to.to_string());
+        }
+        meta
     }
 }
 
@@ -938,6 +967,10 @@ mod tests {
 
         // ── execute_action_inner tests ────────────────────────────────────────────
 
+        fn make_event_bus() -> events::EventBus {
+            events::EventBus::new(64)
+        }
+
         #[tokio::test]
         async fn execute_action_inner_sends_comment_to_issue() {
             let svc = make_issue_service().await;
@@ -957,9 +990,11 @@ mod tests {
             let issue_id = issue.id.clone();
 
             let hook = make_send_message_hook(&issue_id, "hello");
-            let event_json = serde_json::to_value(dummy_event()).unwrap();
+            let event = dummy_event();
+            let event_json = serde_json::to_value(&event).unwrap();
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(result.is_ok(), "expected Ok, got {result:?}");
             assert_eq!(result.unwrap(), "comment added");
@@ -998,9 +1033,11 @@ mod tests {
             let issue_id = issue.id.clone();
 
             let hook = make_send_message_hook(&issue_id, "issue {{ event.data.id }} changed");
+            let event = dummy_event();
             let event_json = serde_json::json!({"data": {"id": "test-id"}});
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(result.is_ok(), "expected Ok, got {result:?}");
 
@@ -1019,9 +1056,11 @@ mod tests {
             let svc = make_issue_service().await;
 
             let hook = make_send_message_hook("no-such-issue", "hello");
+            let event = dummy_event();
             let event_json = serde_json::json!({});
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(
                 result.is_err(),
@@ -1039,9 +1078,11 @@ mod tests {
                 target: MessageTarget::Session("some-session".into()),
                 body: "hi".into(),
             });
+            let event = dummy_event();
             let event_json = serde_json::json!({});
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(result.is_ok(), "expected Ok for session target");
             assert!(
@@ -1061,9 +1102,11 @@ mod tests {
                 parent: None,
                 start: false,
             });
+            let event = dummy_event();
             let event_json = serde_json::json!({});
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(result.is_ok(), "expected Ok for CreateIssue action");
             assert!(
@@ -1081,15 +1124,70 @@ mod tests {
                 timeout_secs: 30,
                 blocking: false,
             });
+            let event = dummy_event();
             let event_json = serde_json::json!({});
+            let bus = make_event_bus();
 
-            let result = execute::execute_action_inner(&hook, &event_json, &svc).await;
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
 
             assert!(result.is_ok(), "expected Ok for RunShell action");
             assert!(
                 result.unwrap().contains("not yet implemented"),
                 "expected 'not yet implemented' message"
             );
+        }
+
+        // ── Scenario C: McpNotify emits McpChannelNotification on bus ──────────
+
+        #[tokio::test]
+        async fn execute_action_inner_mcp_notify_emits_channel_notification() {
+            let svc = make_issue_service().await;
+            let bus = make_event_bus();
+            let mut rx = bus.subscribe();
+
+            let hook = make_hook_with_action(HookAction::McpNotify {
+                channel_id: "chan1".into(),
+                body: "Issue {{ event.data.issue.id }}: {{ event.data.from }} → {{ event.data.to }}".into(),
+            });
+
+            // Build a StatusChanged event
+            let issue = types::Issue {
+                id: "ab12".into(),
+                title: "Test".into(),
+                body: "Body".into(),
+                status: types::IssueStatus::InProgress,
+                branch: "main".into(),
+                assignee: None,
+                session_id: None,
+                parent_id: None,
+                blocked_on: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let event = events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                issue,
+                from: types::IssueStatus::Open,
+                to: types::IssueStatus::InProgress,
+            });
+            let event_json = serde_json::to_value(&event).unwrap();
+
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
+            assert!(result.is_ok(), "expected Ok, got {result:?}");
+            assert_eq!(result.unwrap(), "mcp_notify sent");
+
+            // Check the bus received the notification
+            let received = rx.try_recv().expect("should have received a McpChannelNotification");
+            match received {
+                events::SystemEvent::McpChannelNotification { channel_id, body, meta } => {
+                    assert_eq!(channel_id, "chan1");
+                    assert_eq!(body, "Issue ab12: open → in_progress");
+                    assert_eq!(meta.get("issue_id").map(String::as_str), Some("ab12"));
+                    assert_eq!(meta.get("from").map(String::as_str), Some("open"));
+                    assert_eq!(meta.get("to").map(String::as_str), Some("in_progress"));
+                }
+                other => panic!("expected McpChannelNotification, got: {other:?}"),
+            }
         }
 
         // ── run_action tests ──────────────────────────────────────────────────────
@@ -1114,8 +1212,9 @@ mod tests {
             let hook = make_send_message_hook(&issue.id, "triggered");
             let event = dummy_event();
             let spy = SpyHookStore::new();
+            let bus = make_event_bus();
 
-            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+            execute::run_action(&hook, &event, &svc, spy.as_ref(), &bus).await;
 
             let created = spy.created.lock().unwrap();
             assert_eq!(created.len(), 1, "create_execution should be called once");
@@ -1146,8 +1245,9 @@ mod tests {
             let hook = make_send_message_hook("no-such-issue", "triggered");
             let event = dummy_event();
             let spy = SpyHookStore::new();
+            let bus = make_event_bus();
 
-            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+            execute::run_action(&hook, &event, &svc, spy.as_ref(), &bus).await;
 
             let created = spy.created.lock().unwrap();
             assert_eq!(created.len(), 1, "create_execution should be called once");
@@ -1187,8 +1287,9 @@ mod tests {
             let hook = make_send_message_hook(&issue.id, "ping");
             let event = dummy_event();
             let spy = SpyHookStore::new();
+            let bus = make_event_bus();
 
-            execute::run_action(&hook, &event, &svc, spy.as_ref()).await;
+            execute::run_action(&hook, &event, &svc, spy.as_ref(), &bus).await;
 
             let updated = spy.updated.lock().unwrap();
             assert!(

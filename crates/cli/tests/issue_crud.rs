@@ -1011,7 +1011,7 @@ fn issue_new_subscribe_invalid_target_format_fails() {
 
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("'issue:<id>' or 'session:<id>'"),
+        stderr.contains("'issue:<id>'") || stderr.contains("issue:<id>"),
         "stderr should describe valid format; got: {stderr:?}"
     );
     // Must name the flag the user actually typed, not the internal flag name

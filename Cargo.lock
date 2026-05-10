@@ -441,6 +441,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "types",
  "ureq",
  "uuid",
