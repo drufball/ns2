@@ -1060,6 +1060,135 @@ mod tests {
         );
     }
 
+    /// Verify that `create` sends `{"op": "create", ...}` to the script stdin.
+    ///
+    /// The script reads stdin, parses the JSON, and returns ok=false with an
+    /// error message containing the actual `op` value it received — unless the
+    /// op equals "create", in which case it returns ok=true.
+    #[tokio::test]
+    async fn shell_backend_create_sends_correct_op() {
+        let script = write_test_script(
+            r#"#!/bin/sh
+input=$(cat)
+op=$(echo "$input" | grep -o '"op":"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+if [ "$op" = "create" ]; then
+  echo '{"ok": true}'
+else
+  printf '{"ok": false, "error": "wrong op: %s"}\n' "$op"
+fi
+"#,
+        );
+        let backend =
+            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+        let issue = make_issue("ab12");
+        let result = backend.create(&issue).await;
+        assert!(
+            result.is_ok(),
+            "create should send op=create, but got: {result:?}"
+        );
+    }
+
+    /// Verify that `get` sends `{"op": "get", ...}` to the script stdin.
+    #[tokio::test]
+    async fn shell_backend_get_sends_correct_op() {
+        let ij = issue_json("ab12");
+        let script = write_test_script(&format!(
+            r#"#!/bin/sh
+input=$(cat)
+op=$(echo "$input" | grep -o '"op":"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+if [ "$op" = "get" ]; then
+  printf '{{"ok": true, "issue": %s}}\n' '{ij}'
+else
+  printf '{{"ok": false, "error": "wrong op: %s"}}\n' "$op"
+fi
+"#,
+            ij = ij
+        ));
+        let backend =
+            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+        let result = backend.get("ab12").await;
+        assert!(
+            result.is_ok(),
+            "get should send op=get, but got: {result:?}"
+        );
+    }
+
+    /// Verify that `list` sends `{"op": "list", ...}` to the script stdin.
+    #[tokio::test]
+    async fn shell_backend_list_sends_correct_op() {
+        let script = write_test_script(
+            r#"#!/bin/sh
+input=$(cat)
+op=$(echo "$input" | grep -o '"op":"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+if [ "$op" = "list" ]; then
+  echo '{"ok": true, "issues": []}'
+else
+  printf '{"ok": false, "error": "wrong op: %s"}\n' "$op"
+fi
+"#,
+        );
+        let backend =
+            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+        let result = backend
+            .list(IssueFilter {
+                status: None,
+                assignee: None,
+                parent_id: None,
+            })
+            .await;
+        assert!(
+            result.is_ok(),
+            "list should send op=list, but got: {result:?}"
+        );
+    }
+
+    /// Verify that `save` sends `{"op": "save", ...}` to the script stdin.
+    #[tokio::test]
+    async fn shell_backend_save_sends_correct_op() {
+        let script = write_test_script(
+            r#"#!/bin/sh
+input=$(cat)
+op=$(echo "$input" | grep -o '"op":"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+if [ "$op" = "save" ]; then
+  echo '{"ok": true}'
+else
+  printf '{"ok": false, "error": "wrong op: %s"}\n' "$op"
+fi
+"#,
+        );
+        let backend =
+            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+        let issue = make_issue("ab12");
+        let result = backend.save(&issue).await;
+        assert!(
+            result.is_ok(),
+            "save should send op=save, but got: {result:?}"
+        );
+    }
+
+    /// Verify that `delete` sends `{"op": "delete", ...}` to the script stdin.
+    #[tokio::test]
+    async fn shell_backend_delete_sends_correct_op() {
+        let script = write_test_script(
+            r#"#!/bin/sh
+input=$(cat)
+op=$(echo "$input" | grep -o '"op":"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+if [ "$op" = "delete" ]; then
+  echo '{"ok": true}'
+else
+  printf '{"ok": false, "error": "wrong op: %s"}\n' "$op"
+fi
+"#,
+        );
+        let backend =
+            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+        let result = backend.delete("ab12").await;
+        assert!(
+            result.is_ok(),
+            "delete should send op=delete, but got: {result:?}"
+        );
+    }
+
     // ── IssueBackendConfig deserialisation ────────────────────────────────────
 
     #[test]
@@ -1373,6 +1502,59 @@ command = "/path/to/backend.sh"
 
         assert_eq!(issues.len(), 1, "only the mapped issue should be returned");
         assert_eq!(issues[0].id, "ab12");
+        mock.assert_async().await;
+    }
+
+    /// Verify that `list` with an assignee filter only returns issues carrying
+    /// the matching `ns2-assignee:<name>` label, even when GitHub returns
+    /// multiple issues (since GitHub doesn't understand ns2 assignee labels).
+    #[tokio::test]
+    async fn github_backend_list_with_assignee_filter() {
+        let mut server = mockito::Server::new_async().await;
+        // Two issues: one assigned to "agent1", one assigned to "agent2".
+        let gh_list = serde_json::json!([
+            gh_issue_json(42, "Issue 1", "open", Some("agent1")),
+            gh_issue_json(43, "Issue 2", "open", Some("agent2")),
+            gh_issue_json(44, "Issue 3", "open", None),       // no assignee
+        ]);
+
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/repos/owner/repo/issues\?".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(gh_list.to_string())
+            .create_async()
+            .await;
+
+        let mapping = make_mapping_store().await;
+        mapping.upsert_mapping("ab12", 42).await.unwrap();
+        mapping.upsert_mapping("cd34", 43).await.unwrap();
+        mapping.upsert_mapping("ef56", 44).await.unwrap();
+        let backend = make_github_backend(&server.url(), Arc::clone(&mapping));
+
+        // Filter by assignee = "agent1" — only issue 42 should come back.
+        let issues = backend
+            .list(IssueFilter {
+                status: None,
+                assignee: Some("agent1".to_string()),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            issues.len(),
+            1,
+            "only issues assigned to agent1 should be returned, got {} issues",
+            issues.len()
+        );
+        assert_eq!(issues[0].id, "ab12", "expected issue ab12 (GitHub #42)");
+        assert_eq!(
+            issues[0].assignee.as_deref(),
+            Some("agent1"),
+            "returned issue must carry the agent1 assignee"
+        );
+
         mock.assert_async().await;
     }
 

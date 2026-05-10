@@ -5816,23 +5816,17 @@ mod tests {
         drop(senders);
     }
 
-    // ── Scenario 7: Agent assignment spawns harness (regression) ─────────────
+    // ── Scenario 7: Agent assignment spawns harness ───────────────────────────
 
-    /// When an issue is assigned to a name that DOES have an agent definition,
-    /// `handle_in_progress` should spawn a harness (the existing test already
-    /// covers this via the HTTP route, but we add a unit-level check here).
-    /// 
-    /// This is a regression guard: verify `test_set_in_progress_on_open_issue_auto_starts`
-    /// still passes (covered by the test above). We also add a direct lifecycle test.
-    #[tokio::test]
-    async fn test_agent_assignee_does_not_skip_harness_when_has_agent_def() {
-        // We can't easily mock agents_dir in tests without file system setup.
-        // Instead verify the negative: "human-dev" (no file) leaves senders empty.
-        // The existing test `test_set_in_progress_on_open_issue_auto_starts` with
-        // "test-agent" validates the agent path end-to-end via the HTTP route.
-        //
-        // Here we confirm the guard logic: if agents_dir() returns Some but the
-        // agent file doesn't exist, treat as human.
+    /// Unit-level check: when `agents_dir()` returns `Some` path and the agent
+    /// file exists (or doesn't), `load_agent` correctly detects presence vs absence.
+    ///
+    /// This guards the helper logic used inside `handle_in_progress`.
+    /// The positive end-to-end path (agent WITH file → harness IS spawned) is
+    /// validated by `test_set_in_progress_on_open_issue_auto_starts` which uses
+    /// `assignee = "swe"` — a name that has `.ns2/agents/swe.md` in this repo.
+    #[test]
+    fn test_agent_file_lookup_logic() {
         let tmp = tempfile::tempdir().unwrap();
         let agents_dir = tmp.path();
 
@@ -5857,6 +5851,69 @@ mod tests {
             not_loaded.is_none(),
             "human-dev should not be found in the agents dir"
         );
+    }
+
+    /// Integration test: when an issue has an assignee with a real agent
+    /// definition (`"swe"` which has `.ns2/agents/swe.md` in this repo),
+    /// emitting an `InProgress` event causes `handle_in_progress` to call
+    /// `spawn_harness_sync`, which inserts an entry into `msg_senders`.
+    ///
+    /// This is the direct lifecycle-subscriber counterpart to the end-to-end
+    /// test `test_set_in_progress_on_open_issue_auto_starts`.
+    #[tokio::test]
+    async fn test_agent_assignee_spawns_harness_when_has_agent_def() {
+        let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // Create a session in Created state (as start_issue would do).
+        let session = types::Session {
+            id: uuid::Uuid::new_v4(),
+            name: "test-session".into(),
+            status: types::SessionStatus::Created,
+            agent: Some("swe".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Build an in-progress issue linked to that session.
+        // "swe" has .ns2/agents/swe.md so has_agent_def will be true.
+        let issue = types::Issue {
+            id: "ag01".to_string(),
+            title: "Agent task".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("swe".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Emit StatusChanged{to: InProgress} — this is what the issues service does.
+        state.event_bus.send(events::SystemEvent::Issue(
+            events::IssueEvent::StatusChanged {
+                from: types::IssueStatus::Open,
+                to: types::IssueStatus::InProgress,
+                issue: issue.clone(),
+            },
+        ));
+
+        // Give the subscriber time to process the event and spawn the harness.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // A msg_sender MUST have been inserted (harness was spawned).
+        let senders = state.msg_senders.lock().await;
+        assert!(
+            senders.contains_key(&session.id),
+            "msg_sender must be created for an agent assignee with an agent def file, \
+             but senders map is empty"
+        );
+        drop(senders);
     }
 }
 
