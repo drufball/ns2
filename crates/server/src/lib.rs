@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub pid_file: PathBuf,
     pub model: String,
+    pub issue_backend: issue_backend::IssueBackendConfig,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -304,8 +305,8 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let (db, hook_store, event_store) = db::connect(&db_url).await?;
-    let backend: Arc<dyn issue_backend::IssueBackend> =
-        Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
+    let backend = issue_backend::from_config(&config.issue_backend, Arc::clone(&db))
+        .map_err(|e| Error::Other(e.to_string()))?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 

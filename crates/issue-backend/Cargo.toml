@@ -8,7 +8,12 @@ types = { path = "../types" }
 db = { path = "../db" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 chrono = { workspace = true }
+tempfile = "3"
+toml = "0.8"
