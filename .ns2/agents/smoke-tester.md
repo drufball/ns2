@@ -46,10 +46,10 @@ SESSION[NN]=$(ns2 session new --agent qa-tester --message "Container: ns2-flow-N
 $(cat $REPO_ROOT/product-flows/NN-name.md)")
 ```
 
-Once all sessions are started, poll until every one reaches `completed` or `failed`:
+Once all sessions are started, wait for every one to reach a terminal state (`waiting`, `failed`, or `cancelled`). Use `ns2 session wait` for each session — it blocks until the session is done and exits 0 regardless of success or failure:
 
 ```bash
-ns2 session list --id "${SESSION[NN]}"
+ns2 session wait --id "${SESSION[NN]}"
 ```
 
 When all are done, collect the summary from each result:

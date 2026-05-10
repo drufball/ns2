@@ -34,7 +34,7 @@ Streams events as Claude responds. Response time depends on API latency — typi
 Expected output shape:
 ```
 [assistant] Hello! How can I help you today?
-Session completed.
+[done]
 ```
 
 The exact wording varies. It must be coherent natural language — not the stub string "I'm a stub assistant."
@@ -53,7 +53,7 @@ Expected: the session appears with status `waiting`.
 ns2 session tail --id "$SESSION"
 ```
 
-Re-tailing a completed session replays stored content. Confirm the response reads like a real Claude reply.
+Re-tailing a waiting session replays stored content. Confirm the response reads like a real Claude reply.
 
 ## Acceptance Criteria
 
