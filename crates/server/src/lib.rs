@@ -6254,6 +6254,7 @@ mod tests {
             parent_id: None,
             blocked_on: vec![],
             comments: vec![],
+            ancestor_ids: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

@@ -1,8 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/issue.rs
-  - crates/cli/src/main.rs
-verified: 2026-05-10T18:25:57Z
+verified: 2026-05-10T21:00:00Z
 ---
 
 # ns2 issue

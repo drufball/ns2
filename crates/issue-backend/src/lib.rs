@@ -1100,8 +1100,7 @@ if [ "$op" = "get" ]; then
 else
   printf '{{"ok": false, "error": "wrong op: %s"}}\n' "$op"
 fi
-"#,
-            ij = ij
+"#
         ));
         let backend =
             ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
