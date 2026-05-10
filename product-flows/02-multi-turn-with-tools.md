@@ -3,25 +3,13 @@
 
 Claude writes and reads files using tools across multiple turns within a session. Combines tool-use and conversation-history verification in a single flow.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
 
 ```bash
-git init /tmp/ns2-smoke && cd /tmp/ns2-smoke
-git commit --allow-empty -m "init"
-echo "The magic number is: 7742" > multi-turn-test.txt
-git add . && git commit -m "seed"
-ns2 server start
-```
-
-## Fixture Setup
-
-```bash
-docker exec ns2-flow-02 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && echo "The magic number is: 7742" > /tmp/ns2-smoke/multi-turn-test.txt && git -C /tmp/ns2-smoke add . && git -C /tmp/ns2-smoke commit -m "seed"'
-docker exec -d ns2-flow-02 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+/fixtures/init-git-repo.sh
+/fixtures/seed-multi-turn.sh
+/fixtures/copy-env.sh
+cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
 sleep 3
 ```
 
@@ -81,7 +69,7 @@ echo "Session: $SESSION2"
 ns2 session tail --id "$SESSION2"
 ```
 
-Expected: Claude reads the file and reports `7742`. Session transitions to `completed`.
+Expected: Claude reads the file and reports `7742`. Session transitions to `waiting`.
 
 #### Send a follow-up message
 

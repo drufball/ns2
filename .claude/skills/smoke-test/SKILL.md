@@ -82,10 +82,10 @@ After all containers are started, spawn one subagent per non-SKIPPED, non-CRITIC
 Each subagent receives:
 - The full text of the flow `.spec.md` file
 - The container name assigned to it (e.g. `ns2-flow-03`)
-- This instruction: **All bash commands in this flow must be run via `docker exec <container-name> bash -c '...'`. Do not run commands on the host. The Fixture Setup section contains the setup commands already formatted as `docker exec` calls — run them exactly as written.**
+- This instruction: **All bash commands in this flow must be run via `docker exec <container-name> bash -c '...'`. Do not run commands on the host. The Setup section lists the setup commands in plain form. Wrap each line in `docker exec <container-name> bash -c '...'` before running. Lines that chain environment setup with a long command (e.g. `set -a; . /tmp/ns2-host.env; ...`) must be wrapped as a single `docker exec` call.**
 
 Each subagent follows the flow file exactly:
-1. Run the Fixture Setup commands (already formatted as `docker exec` calls)
+1. Run the Setup commands, wrapping each in `docker exec <container-name> bash -c '...'`
 2. Execute each Step in order, using `docker exec ns2-flow-NN bash -c '...'` for every command
 3. Evaluate each Acceptance Criterion
 4. Do not run Cleanup — the orchestrating agent handles container removal

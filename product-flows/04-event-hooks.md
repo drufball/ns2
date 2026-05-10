@@ -2,26 +2,14 @@
 
 Create internal hooks that react to issue state changes and deliver notifications without blocking. This is the primary orchestration smoke test for the hook system.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
 
 ```bash
-git init /tmp/ns2-smoke && cd /tmp/ns2-smoke
-git commit --allow-empty -m "init"
-ns2 server start
-ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion."
-```
-
-## Fixture Setup
-
-```bash
-docker exec ns2-flow-04 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
-docker exec -d ns2-flow-04 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+/fixtures/init-git-repo.sh
+/fixtures/copy-env.sh
+cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
 sleep 3
-docker exec ns2-flow-04 bash -c 'cd /tmp/ns2-smoke && ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion."'
+/fixtures/create-swe-agent.sh
 ```
 
 ## Steps
@@ -64,22 +52,21 @@ Expected: a table showing the hook with the work issue ID in its name/filter, en
 ### Step 5: Start the work issue and wait for completion
 
 ```bash
-ns2 issue start --id "$WORK"
+ns2 issue set-status --id "$WORK" --status in_progress
 ns2 issue wait --id "$WORK"
 ```
 
-Expected: exits 0 when the work issue completes.
+Expected: exits 0 when the work issue reaches a terminal state. (`ns2 issue start` no longer exists; use `set-status --status in_progress` to auto-start execution.)
 
 ### Step 6: Verify the watcher received a notification comment
 
 ```bash
 sleep 2  # allow hook delivery to complete
 
-curl -sf "http://localhost:9876/issues/$WATCHER" | python3 -c "
-import sys, json, os
+ns2 issue show --id "$WATCHER" --json | python3 -c "
+import sys, json
 d = json.load(sys.stdin)
-work = os.environ.get('WORK', '')
-comments = [c for c in d['comments'] if work in c['body'] or 'completed' in c['body'].lower() or 'running' in c['body'].lower()]
+comments = [c for c in d['comments'] if 'completed' in c['body'].lower() or 'running' in c['body'].lower()]
 print('Notification comments:', len(comments))
 print('OK' if comments else 'FAIL — no notification comment found')
 "
@@ -98,14 +85,14 @@ Expected: SSE data lines are printed (stream is live, may be empty if no active 
 ### Step 8: Stream issue-specific events
 
 ```bash
-ISSUE2=$(ns2 issue new --title "Test issue events" --body "test")
+ISSUE2=$(ns2 issue new --title "Test issue events" --body "test" --assignee swe)
 timeout 5 curl -sN "http://localhost:9876/events?issue_id=$ISSUE2" &
 sleep 1
-ns2 issue start --id "$ISSUE2" 2>/dev/null || true
+ns2 issue set-status --id "$ISSUE2" --status in_progress 2>/dev/null || true
 sleep 2
 ```
 
-Expected: SSE events appear for that issue when it starts (status_changed).
+Expected: SSE events appear for that issue when it starts (status_changed). `--assignee swe` is required for `set-status in_progress` to auto-start execution.
 
 ### Step 9: Hook lifecycle — disable, enable, delete
 

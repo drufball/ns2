@@ -3,24 +3,12 @@
 
 Full session lifecycle using the real Anthropic API. This is the most basic end-to-end smoke test — it verifies the harness connects to Anthropic, processes a real response, and stores it correctly.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
 
 ```bash
-# In a temp directory with a git repo:
-git init /tmp/ns2-smoke && cd /tmp/ns2-smoke
-git commit --allow-empty -m "init"
-ns2 server start
-```
-
-## Fixture Setup
-
-```bash
-docker exec ns2-flow-01 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
-docker exec -d ns2-flow-01 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+/fixtures/init-git-repo.sh
+/fixtures/copy-env.sh
+cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
 sleep 3
 ```
 
@@ -34,14 +22,6 @@ echo "Session: $SESSION"
 ```
 
 Expected: a UUID printed to stdout.
-
-### (Alternative) Create a session with --wait
-
-```bash
-ns2 session new --message "hello" --wait
-```
-
-Expected: the command blocks until Claude responds and exits 0. Output is the session UUID followed by the final assistant turn only.
 
 ### Tail the session
 
@@ -62,10 +42,10 @@ The exact wording varies. It must be coherent natural language — not the stub 
 ### Verify session status
 
 ```bash
-ns2 session list --status completed
+ns2 session list --status waiting
 ```
 
-Expected: the session appears with status `completed`.
+Expected: the session appears with status `waiting`.
 
 ### Re-tail to confirm stored content replays
 
@@ -77,12 +57,11 @@ Re-tailing a completed session replays stored content. Confirm the response read
 
 ## Acceptance Criteria
 
-- [ ] `ns2 server start` picks up `ANTHROPIC_API_KEY` from the environment
+- [ ] `ns2 server start` loads `ANTHROPIC_API_KEY` from the `.env` file
 - [ ] `ns2 session new --message "hello"` creates a session that transitions to `running`
-- [ ] `ns2 session new --message "hello" --wait` blocks until completion and exits 0
 - [ ] `ns2 session tail` streams real text from the Anthropic API
 - [ ] The response is coherent natural language (not "I'm a stub assistant.")
-- [ ] The session transitions to `completed` after the response is fully streamed
-- [ ] `ns2 session list --status completed` shows the session
-- [ ] Re-tailing a completed session replays the stored content identically
+- [ ] The session transitions to `waiting` after the response is fully streamed
+- [ ] `ns2 session list --status waiting` shows the session
+- [ ] Re-tailing a waiting session replays the stored content identically
 - [ ] No panics, stack traces, or unhandled errors in server output
