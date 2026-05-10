@@ -946,6 +946,13 @@ fn issue_new_subscribe_hook_id_on_stderr_not_stdout() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
 
+    // Fail fast if the hook ID could not be extracted — the guard below would
+    // silently pass and the test would give a false green.
+    assert!(
+        hook_id.is_some(),
+        "could not extract hook id from hooks JSON: {hooks_json}"
+    );
+
     // hook id must NOT appear on stdout
     if let Some(hid) = hook_id {
         assert!(
@@ -1018,13 +1025,13 @@ fn issue_new_subscribe_invalid_target_format_fails() {
     );
 }
 
-// Scenario G: --subscribe combined with --wait — issue ID (not hook ID) on stdout,
-// hook is visible in /hooks before the wait loop begins.
+// Scenario G: --subscribe combined with --status — issue ID (not hook ID) on stdout,
+// hook is visible in /hooks. Note: --wait is NOT exercised here; this only confirms
+// the stdout contract holds when both --subscribe and --status flags coexist.
 #[test]
-fn issue_new_subscribe_with_wait_stdout_is_issue_id() {
+fn issue_new_subscribe_with_status_stdout_is_issue_id() {
     let mut h = TestHarness::new();
     h.start_server();
-    write_agent(&h, "swe");
 
     // Use --status open (not in_progress) so --wait is NOT triggered — we just
     // want to confirm the stdout contract holds when both flags coexist structurally.
@@ -1068,5 +1075,148 @@ fn issue_new_subscribe_with_wait_stdout_is_issue_id() {
     assert!(
         hooks_json.contains(&format!("subscribe-{issue_id}")),
         "hook should be named subscribe-{{issue_id}}; hooks: {hooks_json}"
+    );
+}
+
+// Issue 3: Hook payload shape verification.
+// Verifies that the hook created by --subscribe has the correct event_types,
+// filter condition (issue ID match), and action fields.
+#[test]
+fn issue_new_subscribe_hook_payload_shape() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    let out = h
+        .ns2()
+        .args([
+            "issue",
+            "new",
+            "--title",
+            "Shape Test",
+            "--body",
+            "b",
+            "--subscribe",
+            "issue:ab12",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "issue new --subscribe should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let issue_id = stdout.trim();
+
+    // Fetch the hooks list and parse as JSON
+    let hooks_json = h.http_get("/hooks");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&hooks_json).expect("GET /hooks should return valid JSON");
+
+    // Find the hook named subscribe-{issue_id}
+    let hook = hooks
+        .as_array()
+        .expect("hooks response should be a JSON array")
+        .iter()
+        .find(|h| h["name"].as_str() == Some(&format!("subscribe-{issue_id}")))
+        .unwrap_or_else(|| panic!("hook named subscribe-{issue_id} should exist in the hooks list"));
+
+    // Verify event_types contains both required event types
+    let event_types = hook["source"]["event_types"]
+        .as_array()
+        .expect("source.event_types should be an array");
+    let event_type_strings: Vec<&str> = event_types
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        event_type_strings.contains(&"issue.status_changed"),
+        "event_types should contain 'issue.status_changed'; got: {event_types:?}"
+    );
+    assert!(
+        event_type_strings.contains(&"issue.comment_added"),
+        "event_types should contain 'issue.comment_added'; got: {event_types:?}"
+    );
+
+    // Verify filter condition matches the issue ID
+    let conditions = hook["filter"]["conditions"]
+        .as_array()
+        .expect("filter.conditions should be an array");
+    assert!(
+        !conditions.is_empty(),
+        "filter.conditions should have at least one condition"
+    );
+    let condition_value = conditions[0]["value"].as_str().unwrap_or("");
+    assert_eq!(
+        condition_value, issue_id,
+        "filter.conditions[0].value should equal the issue ID"
+    );
+}
+
+// Issue 4: session: target integration test.
+// Verifies that --subscribe with a session: target creates a hook with session target type.
+#[test]
+fn issue_new_subscribe_with_session_target_creates_hook() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    let out = h
+        .ns2()
+        .args([
+            "issue",
+            "new",
+            "--title",
+            "Session Sub",
+            "--body",
+            "b",
+            "--subscribe",
+            "session:abc123",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "issue new --subscribe session:abc123 should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+
+    // stdout must be exactly ONE line: the issue ID
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout should have exactly 1 line (the issue ID), got: {stdout:?}"
+    );
+    let issue_id = lines[0].trim();
+    assert_eq!(issue_id.len(), 4, "issue ID should be 4 chars, got: {issue_id}");
+
+    // Verify the hook was created for this issue
+    let hooks_json = h.http_get("/hooks");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&hooks_json).expect("GET /hooks should return valid JSON");
+
+    let hook = hooks
+        .as_array()
+        .expect("hooks response should be a JSON array")
+        .iter()
+        .find(|h| h["name"].as_str() == Some(&format!("subscribe-{issue_id}")))
+        .unwrap_or_else(|| panic!("hook named subscribe-{issue_id} should exist"));
+
+    // Verify action target type is "session" and content is "abc123"
+    let action_target = &hook["action"]["target"];
+    assert_eq!(
+        action_target["type"].as_str().unwrap_or(""),
+        "session",
+        "action.target.type should be 'session' for session: subscribe target"
+    );
+    assert_eq!(
+        action_target["content"].as_str().unwrap_or(""),
+        "abc123",
+        "action.target.content should be 'abc123'"
     );
 }
