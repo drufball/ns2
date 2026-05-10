@@ -46,7 +46,7 @@ SESSION[NN]=$(ns2 session new --agent qa-tester --message "Container: ns2-flow-N
 $(cat $REPO_ROOT/product-flows/NN-name.md)")
 ```
 
-Once all sessions are started, wait for every one to reach a terminal state (`waiting`, `failed`, or `cancelled`). Use `ns2 session wait` for each session — it blocks until the session is done and exits 0 regardless of success or failure:
+Once all sessions are started, use `ns2 session wait` for each session — it blocks until the session is done. Exits 0 if all sessions finished in `waiting` or `cancelled` state; exits 1 if any session `failed`. Check the exit code and mark the flow accordingly:
 
 ```bash
 ns2 session wait --id "${SESSION[NN]}"
