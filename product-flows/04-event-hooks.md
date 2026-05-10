@@ -110,6 +110,36 @@ ns2 hook list
 # Expected: hook no longer appears
 ```
 
+### Step 10: MCP subscribe — create a McpNotify hook
+
+```bash
+MCP_HOOK=$(ns2 issue subscribe --id "$WORK" --deliver-to "mcp:alice-laptop")
+echo "MCP hook: $MCP_HOOK"
+```
+
+Expected: a 4-character hook ID printed to stdout; the hook is visible via `ns2 hook list` with action type `mcp_notify`.
+
+### Step 11: MCP channel notification SSE filter
+
+```bash
+# After an issue status change, an McpChannelNotification is emitted on the bus.
+# Verify it is visible on the filtered SSE endpoint:
+timeout 3 curl -sN "http://localhost:9876/events?event_type=mcp.channel_notification&channel_id=alice-laptop" | head -10 || true
+```
+
+Expected: SSE data lines appear with `"type":"mcp_channel_notification"` when a subscribed issue changes status.
+
+### Step 12: ns2 mcp — MCP handshake and notification forwarding
+
+```bash
+# ns2 mcp performs an MCP initialization handshake on stdin/stdout.
+# Verify it advertises the claude/channel experimental capability.
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' \
+  | ns2 mcp | head -3
+```
+
+Expected: a JSON-RPC response containing `"experimental":{"claude/channel":{}}` in the capabilities.
+
 ## Acceptance Criteria
 
 - [ ] `ns2 issue subscribe` creates an internal hook visible via `ns2 hook list`
@@ -119,4 +149,11 @@ ns2 hook list
 - [ ] `ns2 hook list` shows active hooks with their status
 - [ ] `ns2 hook disable` / `ns2 hook enable` toggle the enabled flag
 - [ ] `ns2 hook delete` removes a hook permanently
+- [ ] `ns2 issue subscribe --deliver-to mcp:<channel-id>` creates a `McpNotify` hook
+- [ ] `McpNotify` hook action emits `SystemEvent::McpChannelNotification` onto the event bus when triggered
+- [ ] `GET /events?event_type=mcp.channel_notification&channel_id=<id>` filters the stream to MCP notifications for that channel
+- [ ] `ns2 mcp` performs the MCP JSON-RPC initialization handshake (experimental `claude/channel` capability)
+- [ ] `ns2 mcp` forwards `McpChannelNotification` events as `notifications/claude/channel` JSON-RPC notifications to stdout
+- [ ] `ns2 mcp` reads `channel-id` from `ns2.local.toml`; exits with clear error if missing
+- [ ] `ns2.local.toml` is gitignored
 - [ ] No panics or unhandled errors in server output
