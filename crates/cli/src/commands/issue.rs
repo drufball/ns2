@@ -538,7 +538,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 
     // Print stdout contract: one line per waited issue
     for (id, status) in &final_statuses {
-        println!("{id}  {status}");
+        eprintln!("{id}  {status}");
     }
 
     if any_failed {

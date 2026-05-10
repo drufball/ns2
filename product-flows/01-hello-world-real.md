@@ -58,7 +58,7 @@ Re-tailing a completed session replays stored content. Confirm the response read
 ## Acceptance Criteria
 
 - [ ] `ns2 server start` loads `ANTHROPIC_API_KEY` from the `.env` file
-- [ ] `ns2 session new --message "hello"` creates a session that transitions to `running`
+- [ ] `ns2 session new --message "hello"` creates a session (note: the `running` state is transient for short responses and may not be observable via polling — verify via `ns2 session tail` which confirms the session ran)
 - [ ] `ns2 session tail` streams real text from the Anthropic API
 - [ ] The response is coherent natural language (not "I'm a stub assistant.")
 - [ ] The session transitions to `waiting` after the response is fully streamed

@@ -22,9 +22,9 @@ ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hell
 echo "Issue: $ISSUE"
 ```
 
-Expected: the command blocks until the issue reaches a terminal state. `--wait` prints a status line (`<id>  <status>`) to stdout before the final ID line, so `tail -1` extracts just the 4-character issue ID. The `--wait` flag requires `--status in_progress`.
+Expected: the command blocks until the issue reaches a terminal state. `--wait` prints a status line (`<id>  <status>`) to stderr before the final ID line, so `ISSUE=$(...)` captures just the 4-character issue ID. The `--wait` flag requires `--status in_progress`.
 
-Note: `run_wait` (issue.rs:540–542) prints `{id}  {status}` to stdout when done, then `run_new` (issue.rs:112) prints `{issue_id}` — two stdout lines total. `tail -1` captures only the bare ID.
+Note: `run_wait` prints `{id}  {status}` to stderr and then `run_new` prints `{issue_id}` to stdout. `ISSUE=$(...)` captures only the bare ID — no need for `tail -1`.
 
 ### Step 2: Verify the issue exists with status open (without --wait)
 
