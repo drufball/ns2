@@ -302,7 +302,7 @@ mod tests {
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(),
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(!evaluate::matches_event(&hook, &event));
     }
@@ -313,7 +313,7 @@ mod tests {
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(),
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -425,18 +425,18 @@ mod tests {
             conditions: vec![FieldCondition {
                 field: "data.issue.status".into(),
                 op: Op::Eq,
-                value: serde_json::json!("running"),
+                value: serde_json::json!("in_progress"),
             }],
             expression: None,
         };
         let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue,
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(evaluate::matches_event(&hook, &event));
     }
@@ -454,11 +454,11 @@ mod tests {
         let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue,
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(!evaluate::matches_event(&hook, &event));
     }
@@ -476,11 +476,11 @@ mod tests {
         let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
 
         let mut issue = make_issue();
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         let event = SystemEvent::Issue(IssueEvent::StatusChanged {
             issue,
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(evaluate::matches_event(&hook, &event));
     }

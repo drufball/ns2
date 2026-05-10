@@ -1,4 +1,4 @@
-use events::{SessionEvent, StopEventStatus, SystemEvent};
+use events::{SessionEvent, SystemEvent};
 use std::sync::Arc;
 use types::SessionStatus;
 
@@ -9,18 +9,20 @@ use crate::state::AppState;
 ///
 /// All events are published to the global `EventBus` wrapped in
 /// `SystemEvent::Session { session_id, event }`.
+///
+/// Issue lifecycle transitions (session done/error → issue waiting/failed) are
+/// handled by the global issue lifecycle subscriber started in `server/lib.rs`,
+/// not here.
 #[allow(clippy::too_many_lines)]
 pub fn spawn_harness_sync(
     state: &AppState,
     session: types::Session,
-    issue_id: Option<String>,
 ) -> tokio::sync::mpsc::Sender<String> {
     let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<String>(16);
 
     let msg_senders_map = Arc::clone(&state.msg_senders);
     let spawning_set = Arc::clone(&state.spawning);
     let db = Arc::clone(&state.db);
-    let issue_service = state.issue_service.clone();
     let client = Arc::clone(&state.client);
     let session_clone = session;
     let msg_tx_ret = msg_tx.clone();
@@ -38,56 +40,8 @@ pub fn spawn_harness_sync(
 
     let session_id = session_clone.id;
 
-    // Issue watcher: subscribe to the global bus and filter by session_id.
-    let issue_watcher = issue_id.map(|id| {
-        let mut rx = event_bus.subscribe();
-        let svc = issue_service;
-        tokio::spawn(async move {
-            // Track the most recent Stopped event so we can use it on Done.
-            let mut stopped_status: Option<StopEventStatus> = None;
-            let mut stopped_comment: Option<String> = None;
-
-            while let Ok(event) = rx.recv().await {
-                match event {
-                    SystemEvent::Session {
-                        session_id: sid,
-                        event: SessionEvent::Stopped { status, comment },
-                    } if sid == session_id => {
-                        stopped_status = Some(status);
-                        stopped_comment = comment;
-                    }
-                    SystemEvent::Session {
-                        session_id: sid,
-                        event: SessionEvent::Done,
-                    } if sid == session_id => {
-                        // Use the Stopped signal if present; otherwise default to Waiting.
-                        let park_status = if matches!(stopped_status, Some(StopEventStatus::Complete)) {
-                            types::IssueStatus::Completed
-                        } else {
-                            types::IssueStatus::Waiting
-                        };
-                        let _ = svc
-                            .park_issue(&id, park_status, stopped_comment.take(), None)
-                            .await;
-                        break;
-                    }
-                    SystemEvent::Session {
-                        session_id: sid,
-                        event: SessionEvent::Error { message },
-                    } if sid == session_id => {
-                        let _ = svc.fail_issue(&id, message).await;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        })
-    });
-
-    // A one-shot broadcast channel (capacity = 1) acts as a signal channel
-    // for the harness event bridge.  The harness emits SessionEvents via its
-    // legacy broadcast::Sender; we subscribe here and forward them to the
-    // global EventBus.
+    // A broadcast channel for per-session events emitted by the harness.
+    // We subscribe here and forward them to the global EventBus.
     let (event_tx, _) = tokio::sync::broadcast::channel::<SessionEvent>(256);
     let event_tx_for_harness = event_tx.clone();
 
@@ -141,7 +95,6 @@ pub fn spawn_harness_sync(
             smap.remove(&session_id);
         }
 
-        drop(issue_watcher);
         drop(bus_forwarder);
     });
 
@@ -149,12 +102,11 @@ pub fn spawn_harness_sync(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use events::StopEventStatus;
+    use events::{SessionEvent, StopEventStatus, SystemEvent};
     use types::{IssueStatus, Session, SessionStatus};
     use uuid::Uuid;
 
@@ -172,16 +124,20 @@ mod tests {
         session
     }
 
-    /// Create a minimal issue with `Running` status in the DB.
-    async fn make_running_issue(state: &crate::state::AppState, id: &str, title: &str) {
+    /// Create a minimal issue linked to `session_id` with `InProgress` status.
+    async fn make_linked_issue(
+        state: &crate::state::AppState,
+        id: &str,
+        session_id: Uuid,
+    ) -> types::Issue {
         let issue = types::Issue {
             id: id.to_string(),
-            title: title.to_string(),
+            title: "Test issue".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
-            session_id: None,
+            session_id: Some(session_id),
             parent_id: None,
             blocked_on: vec![],
             comments: vec![],
@@ -189,6 +145,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         state.db.create_issue(&issue).await.unwrap();
+        issue
     }
 
     /// Helper: wait for an issue to reach `target_status` within 3 seconds.
@@ -213,13 +170,17 @@ mod tests {
     }
 
     /// Scenario 7a: Stopped{Complete, comment} then Done → issue Completed with comment.
+    /// The global subscriber (spawn_issue_lifecycle_subscriber) handles the transition.
     #[tokio::test]
     async fn test_stopped_complete_with_comment_marks_issue_completed() {
         let state = crate::tests::test_state().await;
-        let session1 = make_session(&state).await;
-        make_running_issue(&state, "sw-c1", "Issue Complete").await;
+        // Start the global subscriber
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
-        let _tx = spawn_harness_sync(&state, session1.clone(), Some("sw-c1".into()));
+        let session1 = make_session(&state).await;
+        make_linked_issue(&state, "sw-c1", session1.id).await;
+
+        let _tx = spawn_harness_sync(&state, session1.clone());
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Emit Stopped{Complete, "done"} then Done
@@ -250,10 +211,12 @@ mod tests {
     #[tokio::test]
     async fn test_stopped_waiting_marks_issue_waiting_no_comment() {
         let state = crate::tests::test_state().await;
-        let session1 = make_session(&state).await;
-        make_running_issue(&state, "sw-w1", "Issue Waiting").await;
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
-        let _tx = spawn_harness_sync(&state, session1.clone(), Some("sw-w1".into()));
+        let session1 = make_session(&state).await;
+        make_linked_issue(&state, "sw-w1", session1.id).await;
+
+        let _tx = spawn_harness_sync(&state, session1.clone());
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         state.event_bus.send(SystemEvent::Session {
@@ -279,10 +242,12 @@ mod tests {
     #[tokio::test]
     async fn test_done_without_stopped_marks_issue_waiting() {
         let state = crate::tests::test_state().await;
-        let session1 = make_session(&state).await;
-        make_running_issue(&state, "sw-d1", "Issue No Stop").await;
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
-        let _tx = spawn_harness_sync(&state, session1.clone(), Some("sw-d1".into()));
+        let session1 = make_session(&state).await;
+        make_linked_issue(&state, "sw-d1", session1.id).await;
+
+        let _tx = spawn_harness_sync(&state, session1.clone());
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         state.event_bus.send(SystemEvent::Session {
@@ -297,25 +262,25 @@ mod tests {
         assert!(issue.comments.is_empty(), "no comment expected");
     }
 
-    /// A Done event for session2 must NOT finish issue1 (whose watcher is bound
-    /// to session1).  Only a Done event for session1 should transition issue1.
+    /// Done event for session2 must NOT finish issue1 linked to session1.
     #[tokio::test]
     async fn test_harness_spawn_done_only_finishes_own_issue() {
         let state = crate::tests::test_state().await;
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
-        // Create two sessions and two running issues.
+        // Create two sessions and two issues linked to each session.
         let session1 = make_session(&state).await;
         let session2 = make_session(&state).await;
-        make_running_issue(&state, "hs-d-i1", "Issue 1").await;
-        make_running_issue(&state, "hs-d-i2", "Issue 2").await;
+        make_linked_issue(&state, "hs-d-i1", session1.id).await;
+        make_linked_issue(&state, "hs-d-i2", session2.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("hs-d-i1".into()));
-        let _tx2 = spawn_harness_sync(&state, session2.clone(), Some("hs-d-i2".into()));
+        let _tx1 = spawn_harness_sync(&state, session1.clone());
+        let _tx2 = spawn_harness_sync(&state, session2.clone());
 
-        // Give the watcher tasks a moment to subscribe to the event bus.
+        // Give the subscriber a moment.
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Emit Done for session2 — issue1's watcher must ignore it.
+        // Emit Done for session2 — issue1 must NOT be affected.
         state.event_bus.send(SystemEvent::Session {
             session_id: session2.id,
             event: SessionEvent::Done,
@@ -324,15 +289,15 @@ mod tests {
         // Brief pause to let the event propagate.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // issue1 must still be Running.
+        // issue1 must still be InProgress.
         let issue1 = state.db.get_issue("hs-d-i1".into()).await.unwrap();
         assert_eq!(
             issue1.status,
-            IssueStatus::Running,
-            "issue1 must remain Running after a Done event for a different session"
+            IssueStatus::InProgress,
+            "issue1 must remain InProgress after a Done event for a different session"
         );
 
-        // Emit Done for session1 — now issue1's watcher should respond (→ Waiting).
+        // Emit Done for session1 — now issue1 should transition to Waiting.
         state.event_bus.send(SystemEvent::Session {
             session_id: session1.id,
             event: SessionEvent::Done,
@@ -347,7 +312,7 @@ mod tests {
             "issue1 must be Waiting after its own session's Done event"
         );
 
-        // issue2 should also be Waiting (its watcher received session2's Done above).
+        // issue2 should also be Waiting.
         let issue2_final = state.db.get_issue("hs-d-i2".into()).await.unwrap();
         assert_eq!(
             issue2_final.status,
@@ -356,21 +321,21 @@ mod tests {
         );
     }
 
-    /// An Error event for a different session must NOT fail issue1.  Only an
-    /// Error event for issue1's own session should mark it Failed.
+    /// Error event for a different session must NOT fail issue1.
     #[tokio::test]
     async fn test_harness_spawn_error_only_fails_own_issue() {
         let state = crate::tests::test_state().await;
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         let session2 = make_session(&state).await;
-        make_running_issue(&state, "hs-e-i1", "Error Filter Issue").await;
+        make_linked_issue(&state, "hs-e-i1", session1.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("hs-e-i1".into()));
+        let _tx1 = spawn_harness_sync(&state, session1.clone());
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Emit Error for the unrelated session2 — watcher must ignore it.
+        // Emit Error for the unrelated session2 — issue1 must NOT be affected.
         state.event_bus.send(SystemEvent::Session {
             session_id: session2.id,
             event: SessionEvent::Error {
@@ -383,11 +348,11 @@ mod tests {
         let issue1 = state.db.get_issue("hs-e-i1".into()).await.unwrap();
         assert_eq!(
             issue1.status,
-            IssueStatus::Running,
-            "issue1 must remain Running after an Error event for a different session"
+            IssueStatus::InProgress,
+            "issue1 must remain InProgress after an Error event for a different session"
         );
 
-        // Emit Error for session1 — watcher should now fail issue1.
+        // Emit Error for session1 — issue1 should fail.
         state.event_bus.send(SystemEvent::Session {
             session_id: session1.id,
             event: SessionEvent::Error {
@@ -409,15 +374,16 @@ mod tests {
     #[tokio::test]
     async fn test_stopped_event_only_applies_to_own_session() {
         let state = crate::tests::test_state().await;
+        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         let session2 = make_session(&state).await;
-        make_running_issue(&state, "sw-s1", "Session filter test").await;
+        make_linked_issue(&state, "sw-s1", session1.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone(), Some("sw-s1".into()));
+        let _tx1 = spawn_harness_sync(&state, session1.clone());
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Emit Stopped for session2 (should be ignored by issue1's watcher)
+        // Emit Stopped for session2 (should be ignored for issue linked to session1)
         state.event_bus.send(SystemEvent::Session {
             session_id: session2.id,
             event: SessionEvent::Stopped {

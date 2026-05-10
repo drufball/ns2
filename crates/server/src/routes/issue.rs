@@ -7,7 +7,6 @@ use serde::{Deserialize, Deserializer};
 use types::{Issue, IssueStatus, SessionStatus};
 
 use super::Error;
-use crate::harness_spawn::spawn_harness_sync;
 use crate::state::AppState;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -180,16 +179,14 @@ pub async fn add_comment(
     Ok(Json(issue))
 }
 
-/// Internal helper: start an issue by calling `issue_service.start_issue()` and
-/// spawning the harness.  Used by `update_issue_status` when the new status is
-/// `InProgress`.
+/// Internal helper: start an issue by calling `issue_service.start_issue()`.
+/// The global issue lifecycle subscriber will handle spawning the harness
+/// when it receives the `IssueEvent::StatusChanged { to: InProgress }` event.
 async fn do_start_issue(
     state: &AppState,
     id: String,
 ) -> std::result::Result<Json<Issue>, Error> {
     let outcome = state.issue_service.start_issue(id).await?;
-    let msg_tx = spawn_harness_sync(state, outcome.session, Some(outcome.issue.id.clone()));
-    msg_tx.send(outcome.initial_message).await.ok();
     Ok(Json(outcome.issue))
 }
 
@@ -248,8 +245,7 @@ pub async fn cancel_issue(
 /// 3. If the issue is in `Waiting` state (has an existing session), directly
 ///    spawns the harness against the existing session (resume mode).
 /// 4. Otherwise calls `issue_service.start_issue()` and spawns the harness.
-/// 5. Returns the issue in `running` state (never `in_progress` — that status
-///    is only accepted as input, never stored).
+/// 5. Returns the issue in `in_progress` state.
 ///
 /// For any other status the issue's status is updated directly in the DB.
 pub async fn update_issue_status(
@@ -273,20 +269,22 @@ pub async fn update_issue_status(
             ));
         }
 
-        // If the issue is Waiting with an existing session, resume it directly
-        // (spawn harness against existing session without creating a new one).
+        // If the issue is Waiting with an existing session, emit a StatusChanged event
+        // so the global lifecycle subscriber can resume the harness.
         if issue.status == types::IssueStatus::Waiting {
-            if let Some(session_id) = issue.session_id {
-                let session = state.db.get_session(session_id).await?;
-                // Update the issue to Running state.
+            if let Some(_session_id) = issue.session_id {
+                // Update the issue to InProgress state (emits StatusChanged event).
                 let mut updated_issue = issue.clone();
-                updated_issue.status = types::IssueStatus::Running;
+                updated_issue.status = types::IssueStatus::InProgress;
                 updated_issue.updated_at = chrono::Utc::now();
                 state.db.update_issue(&updated_issue).await?;
-                // Spawn/resume the harness for the existing session.
-                let msg_tx = spawn_harness_sync(&state, session, Some(issue.id.clone()));
-                // Send a resume message to wake the agent.
-                msg_tx.send("Please continue.".to_string()).await.ok();
+                state.issue_service.event_bus().send(events::SystemEvent::Issue(
+                    events::IssueEvent::StatusChanged {
+                        issue: updated_issue.clone(),
+                        from: types::IssueStatus::Waiting,
+                        to: types::IssueStatus::InProgress,
+                    },
+                ));
                 let refreshed = state.db.get_issue(id).await?;
                 return Ok(Json(refreshed));
             }
