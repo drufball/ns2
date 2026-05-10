@@ -20,7 +20,7 @@ ns2 server start
 
 ```bash
 docker exec ns2-flow-01 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
-docker exec -d ns2-flow-01 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+docker exec ns2-flow-01 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &'
 sleep 3
 ```
 
@@ -62,10 +62,10 @@ The exact wording varies. It must be coherent natural language — not the stub 
 ### Verify session status
 
 ```bash
-ns2 session list --status completed
+ns2 session list --status waiting
 ```
 
-Expected: the session appears with status `completed`.
+Expected: the session appears with status `waiting`. Sessions transition to `waiting` after Claude responds — the stop tool controls issue status, not session status. Sessions do not reach `completed`.
 
 ### Re-tail to confirm stored content replays
 
@@ -82,7 +82,7 @@ Re-tailing a completed session replays stored content. Confirm the response read
 - [ ] `ns2 session new --message "hello" --wait` blocks until completion and exits 0
 - [ ] `ns2 session tail` streams real text from the Anthropic API
 - [ ] The response is coherent natural language (not "I'm a stub assistant.")
-- [ ] The session transitions to `completed` after the response is fully streamed
-- [ ] `ns2 session list --status completed` shows the session
-- [ ] Re-tailing a completed session replays the stored content identically
+- [ ] The session transitions to `waiting` after the response is fully streamed (sessions do not reach `completed`; the stop tool controls issue status)
+- [ ] `ns2 session list --status waiting` shows the session
+- [ ] Re-tailing a waiting session replays the stored content identically
 - [ ] No panics, stack traces, or unhandled errors in server output

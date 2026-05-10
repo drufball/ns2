@@ -20,7 +20,7 @@ ns2 agent new --name "swe" --description "Software engineer agent" --body "You a
 
 ```bash
 docker exec ns2-flow-03 bash -c 'mkdir -p /tmp/ns2-smoke && git -C /tmp/ns2-smoke init && git -C /tmp/ns2-smoke commit --allow-empty -m "init"'
-docker exec -d ns2-flow-03 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && ns2 server start'
+docker exec ns2-flow-03 bash -c 'set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &'
 sleep 3
 docker exec ns2-flow-03 bash -c 'cd /tmp/ns2-smoke && ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion. When you are done, call the stop tool with status='"'"'complete'"'"' and a brief comment summarizing what you did."'
 ```
@@ -30,11 +30,13 @@ docker exec ns2-flow-03 bash -c 'cd /tmp/ns2-smoke && ns2 agent new --name "swe"
 ### Step 1: Create and immediately start an issue with --wait
 
 ```bash
-ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hello.txt with the text Hello World" --assignee swe --status in_progress --wait)
+ISSUE=$(ns2 issue new --title "Add a greeting" --body "Create a file called hello.txt with the text Hello World" --assignee swe --status in_progress --wait | tail -1)
 echo "Issue: $ISSUE"
 ```
 
-Expected: the command blocks until the issue reaches a terminal state, then prints the issue ID to stdout (e.g., `a1b2`). The `--wait` flag requires `--status in_progress`.
+Expected: the command blocks until the issue reaches a terminal state. `--wait` prints a status line (`<id>  <status>`) to stdout before the final ID line, so `tail -1` extracts just the 4-character issue ID. The `--wait` flag requires `--status in_progress`.
+
+Note: `run_wait` (issue.rs:540–542) prints `{id}  {status}` to stdout when done, then `run_new` (issue.rs:112) prints `{issue_id}` — two stdout lines total. `tail -1` captures only the bare ID.
 
 ### Step 1b (alternative): Create separately then wait
 
@@ -66,12 +68,18 @@ Expected: exits non-zero with error message: `--wait requires --status in_progre
 
 ### Step 4: --watch streams events for the new issue
 
+**[KNOWN BROKEN]** The `--watch` flag is partially implemented but does not work as expected when used without `--wait`. When `--watch` is passed without `--wait`, `run_new` creates a background tokio task to stream SSE events to stderr (not stdout), but immediately aborts it at issue.rs:107–109 before any events can arrive — the issue ID is printed to stdout and the function returns, killing the watch task. SSE events therefore never appear.
+
 ```bash
+# This exits immediately after printing the issue ID — no events streamed
 WATCH_ISSUE=$(ns2 issue new --title "Watch test" --body "Test" --status in_progress --watch &)
 # events are printed to stdout as they arrive
 ```
 
-Expected: SSE events (status_changed, comment_added) are printed to stdout as the issue progresses. Works with any status.
+To watch events manually, use the separate `ns2 issue watch --id <id>` command or stream the SSE endpoint directly:
+```bash
+curl -sN "http://localhost:9876/events?issue_id=$WATCH_ISSUE"
+```
 
 ### Step 5: Verify issue status is completed
 
@@ -96,10 +104,12 @@ print('OK' if agent_comments else 'FAIL — no agent comment found')
 
 Expected: `OK` — the agent explicitly called the stop tool with a comment, which is posted with `author == "swe"`.
 
-### Step 7: Mark it done with a completion comment
+### Step 7: Mark an open issue done with a completion comment
+
+Note: `ns2 issue complete` errors if called on an already-completed issue (`$ISSUE` was completed by the agent's stop tool call). Use it on `$ISSUE2` which was created but never started.
 
 ```bash
-ns2 issue complete --id "$ISSUE" --comment "Verified: hello.txt created with correct content."
+ns2 issue complete --id "$ISSUE2" --comment "Decided not to proceed with this task."
 ```
 
 Expected: command exits 0.
@@ -130,8 +140,8 @@ ns2 issue list --status waiting
 - [ ] `ns2 issue new --status in_progress` auto-starts the issue (spawns the agent harness)
 - [ ] `ns2 issue new --status in_progress --wait` blocks until the issue reaches a terminal state, then prints the ID
 - [ ] `ns2 issue new --wait` without `--status in_progress` exits non-zero with error: `--wait requires --status in_progress`
-- [ ] `ns2 issue new --watch` (any status) prints SSE events to stdout as the issue progresses
-- [ ] `ns2 issue new --status in_progress --watch` starts the issue and streams events simultaneously
+- [ ] **[KNOWN BROKEN]** `ns2 issue new --watch` (any status) prints SSE events as the issue progresses — the watch task is aborted immediately before events arrive (issue.rs:107–109); use `ns2 issue watch --id <id>` instead
+- [ ] **[KNOWN BROKEN]** `ns2 issue new --status in_progress --watch` starts the issue and streams events simultaneously — broken for same reason as above
 - [ ] Setting status to `in_progress` automatically creates a session and starts execution
 - [ ] The session uses the issue's assignee as the agent type
 - [ ] `ns2 issue wait` blocks until the issue reaches a terminal state and exits 0
