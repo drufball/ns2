@@ -58,6 +58,10 @@ pub struct Issue {
     pub assignee: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_id: Option<String>,
+    /// Ancestor issue IDs from immediate parent up to root.
+    /// Populated at event-emission time, NOT persisted to the database.
+    #[serde(default)]
+    pub ancestor_ids: Vec<String>,
     pub blocked_on: Vec<String>,
     pub comments: Vec<IssueComment>,
     pub created_at: DateTime<Utc>,
@@ -569,6 +573,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec!["xy34".into()],
             comments: vec![IssueComment {
                 author: "user".into(),
@@ -587,5 +592,49 @@ mod tests {
         assert_eq!(decoded.comments.len(), 1);
         assert_eq!(decoded.comments[0].author, "user");
         assert_eq!(decoded.status, IssueStatus::Open);
+    }
+
+    #[test]
+    fn issue_ancestor_ids_defaults_to_empty_vec_when_missing_from_json() {
+        // Old DB rows won't have ancestor_ids — they must deserialize with empty vec.
+        let json = r#"{
+            "id": "ab12",
+            "title": "Test",
+            "body": "Body",
+            "status": "open",
+            "branch": "main",
+            "assignee": null,
+            "session_id": null,
+            "parent_id": null,
+            "blocked_on": [],
+            "comments": [],
+            "created_at": "2024-01-15T10:30:00Z",
+            "updated_at": "2024-01-15T10:30:00Z"
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("deserialize without ancestor_ids");
+        assert_eq!(issue.ancestor_ids, Vec::<String>::new(),
+            "ancestor_ids must default to empty vec when not in JSON");
+    }
+
+    #[test]
+    fn issue_ancestor_ids_round_trips() {
+        let issue = Issue {
+            id: "ab12".into(),
+            title: "Test".into(),
+            body: "Body".into(),
+            status: IssueStatus::Open,
+            branch: "main".into(),
+            assignee: None,
+            session_id: None,
+            parent_id: Some("parent1".into()),
+            ancestor_ids: vec!["parent1".into(), "grandparent1".into()],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&issue).expect("serialize");
+        let decoded: Issue = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.ancestor_ids, vec!["parent1", "grandparent1"]);
     }
 }

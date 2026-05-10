@@ -384,6 +384,7 @@ fn parse_issue_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue> {
         assignee: row.get("assignee"),
         session_id,
         parent_id: row.get("parent_id"),
+        ancestor_ids: vec![], // not persisted in DB — populated at event-emission time
         blocked_on,
         comments,
         created_at,
@@ -1164,6 +1165,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
