@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/**/*.rs
-verified: 2026-05-10T11:09:22Z
+verified: 2026-06-02T00:00:00Z
 ---
 
 # CLI Architecture
@@ -65,6 +65,8 @@ Each file in `commands/` corresponds to one top-level CLI noun. Command function
 | File | Noun | Responsibility |
 |------|------|----------------|
 | `agent.rs` | `ns2 agent` | `run_list`, `run_new`, `run_edit` — reads/writes `.ns2/agents/` via the `agents` crate. |
+| `event.rs` | `ns2 event` | `run_new`, `run_list`, `run_delete` — CRUD for named events (webhooks and timers) via `/named-events`. |
+| `hook.rs` | `ns2 hook` | Full hook lifecycle: new, list, show, enable, disable, delete, logs. Sends `event_names: Vec<String>` when creating hooks. |
 | `issue.rs` | `ns2 issue` | Full issue lifecycle: new, edit, comment, set-status, complete, reopen, list, wait, watch, subscribe. Owns `issue_is_terminal`, `all_nodes_terminal`, and `run_subscribe` (shared by both `issue subscribe` and the `--subscribe` flag on `issue new`). |
 | `server.rs` | `ns2 server` | `data_dir_and_pid` (shared helper), `run_start` (delegates to the `server` crate), `run_stop` (reads PID file and signals the process). |
 | `session.rs` | `ns2 session` | Full session lifecycle: list, new, tail, send, stop, wait. Owns `session_is_terminal`. |
