@@ -1190,6 +1190,107 @@ mod tests {
             }
         }
 
+        /// `McpNotify` triggered by a non-`StatusChanged` event (`IssueEvent::Created`)
+        /// must still emit `McpChannelNotification` but with empty meta.
+        #[tokio::test]
+        async fn execute_action_inner_mcp_notify_on_created_event_emits_empty_meta() {
+            let svc = make_issue_service().await;
+            let bus = make_event_bus();
+            let mut rx = bus.subscribe();
+
+            let hook = make_hook_with_action(HookAction::McpNotify {
+                channel_id: "chan2".into(),
+                body: "Created: {{ event.data.id }}".into(),
+            });
+
+            // Build a Created event (non-StatusChanged)
+            let issue = types::Issue {
+                id: "cd34".into(),
+                title: "New Issue".into(),
+                body: "Body".into(),
+                status: types::IssueStatus::Open,
+                branch: "main".into(),
+                assignee: None,
+                session_id: None,
+                parent_id: None,
+                blocked_on: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let event = events::SystemEvent::Issue(events::IssueEvent::Created(issue));
+            let event_json = serde_json::to_value(&event).unwrap();
+
+            let result = execute::execute_action_inner(&hook, &event, &event_json, &svc, &bus).await;
+            assert!(result.is_ok(), "expected Ok, got {result:?}");
+            assert_eq!(result.unwrap(), "mcp_notify sent");
+
+            // The bus must have received a notification with empty meta (no StatusChanged data)
+            let received = rx.try_recv().expect("should have received a McpChannelNotification");
+            match received {
+                events::SystemEvent::McpChannelNotification { channel_id, meta, .. } => {
+                    assert_eq!(channel_id, "chan2");
+                    assert!(
+                        meta.is_empty(),
+                        "meta must be empty for non-StatusChanged events, got: {meta:?}"
+                    );
+                }
+                other => panic!("expected McpChannelNotification, got: {other:?}"),
+            }
+        }
+
+        /// `run_action` with `McpNotify` must record the execution as `Completed`
+        /// and emit a `McpChannelNotification` on the bus.
+        #[tokio::test]
+        async fn run_action_mcp_notify_records_completed_and_emits_notification() {
+            let svc = make_issue_service().await;
+            let spy = SpyHookStore::new();
+            let bus = make_event_bus();
+            let mut rx = bus.subscribe();
+
+            let hook = make_hook_with_action(HookAction::McpNotify {
+                channel_id: "notify-chan".into(),
+                body: "hook fired".into(),
+            });
+
+            // Use a Created event (non-StatusChanged) so the action succeeds
+            // without needing a pre-existing issue.
+            let issue = types::Issue {
+                id: "ef56".into(),
+                title: "Run Action Test".into(),
+                body: "Body".into(),
+                status: types::IssueStatus::Open,
+                branch: "main".into(),
+                assignee: None,
+                session_id: None,
+                parent_id: None,
+                blocked_on: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let event = events::SystemEvent::Issue(events::IssueEvent::Created(issue));
+
+            execute::run_action(&hook, &event, &svc, spy.as_ref(), &bus).await;
+
+            // The execution must have been recorded as Completed.
+            let updated = spy.updated.lock().unwrap();
+            assert_eq!(updated.len(), 1, "update_execution must be called once");
+            assert_eq!(
+                updated[0].status,
+                ExecutionStatus::Completed,
+                "execution status must be Completed"
+            );
+            drop(updated);
+
+            // The bus must have received a McpChannelNotification.
+            let received = rx.try_recv().expect("should have received a McpChannelNotification");
+            assert!(
+                matches!(received, events::SystemEvent::McpChannelNotification { .. }),
+                "expected McpChannelNotification on bus, got: {received:?}"
+            );
+        }
+
         // ── run_action tests ──────────────────────────────────────────────────────
 
         #[tokio::test]

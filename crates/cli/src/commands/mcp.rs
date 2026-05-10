@@ -1,34 +1,34 @@
 use crate::client::handle_connection_error;
 use futures::StreamExt;
 use std::io::Write;
+use std::path::Path;
 
-/// Read the server URL from `ns2.toml` (default: `http://127.0.0.1:9876`).
-fn read_server_url() -> String {
-    if let Some(root) = workspace::git_root_sync() {
-        let path = root.join("ns2.toml");
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(value) = contents.parse::<toml::Value>() {
-                if let Some(url) = value
-                    .get("server")
-                    .and_then(|s| s.get("url"))
-                    .and_then(|u| u.as_str())
-                {
-                    return url.to_string();
-                }
+/// Read the server URL from the given `ns2.toml` path.
+///
+/// Returns the `[server] url` value if present, otherwise the default
+/// `http://127.0.0.1:9876`.  Accepts a `&Path` so it is testable with
+/// temporary files.
+pub fn read_server_url(path: &Path) -> String {
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(value) = contents.parse::<toml::Value>() {
+            if let Some(url) = value
+                .get("server")
+                .and_then(|s| s.get("url"))
+                .and_then(|u| u.as_str())
+            {
+                return url.to_string();
             }
         }
     }
     "http://127.0.0.1:9876".to_string()
 }
 
-/// Read `channel-id` from `ns2.local.toml`.
+/// Read `channel-id` from the given `ns2.local.toml` path.
+///
 /// Returns an error message if the file doesn't exist or the field is missing.
-fn read_channel_id() -> Result<String, String> {
-    let root = workspace::git_root_sync().ok_or_else(|| {
-        "Error: ns2.local.toml must contain channel-id = \"<id>\"".to_string()
-    })?;
-    let path = root.join("ns2.local.toml");
-    let contents = std::fs::read_to_string(&path).map_err(|_| {
+/// Accepts a `&Path` so it is testable with temporary files.
+pub fn read_channel_id(path: &Path) -> Result<String, String> {
+    let contents = std::fs::read_to_string(path).map_err(|_| {
         "Error: ns2.local.toml must contain channel-id = \"<id>\"".to_string()
     })?;
     let value: toml::Value = contents
@@ -51,14 +51,26 @@ fn read_channel_id() -> Result<String, String> {
 #[allow(clippy::too_many_lines)]
 pub async fn run_mcp() {
     // 1. Read server URL from ns2.toml
-    let server_url = read_server_url();
+    let server_url = {
+        let path = workspace::git_root_sync().map_or_else(
+            || std::path::PathBuf::from("ns2.toml"),
+            |r| r.join("ns2.toml"),
+        );
+        read_server_url(&path)
+    };
 
     // 2. Read channel-id from ns2.local.toml
-    let channel_id = match read_channel_id() {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+    let channel_id = {
+        let path = workspace::git_root_sync().map_or_else(
+            || std::path::PathBuf::from("ns2.local.toml"),
+            |r| r.join("ns2.local.toml"),
+        );
+        match read_channel_id(&path) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -199,6 +211,19 @@ pub async fn run_mcp() {
 
 #[cfg(test)]
 mod tests {
+    use super::{read_channel_id, read_server_url};
+    use std::io::Write;
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Write `content` to a temp file and return a `NamedTempFile` whose
+    /// lifetime keeps the file alive for the duration of the test.
+    fn write_temp(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("create tempfile");
+        f.write_all(content.as_bytes()).expect("write tempfile");
+        f
+    }
+
     // ── Scenario F — MCP handshake ────────────────────────────────────────────
 
     #[test]
@@ -226,62 +251,69 @@ mod tests {
         assert_eq!(response["result"]["serverInfo"]["name"], "ns2-mcp");
     }
 
-    // ── Scenario G — missing channel-id ──────────────────────────────────────
+    // ── Scenario F — read_channel_id: real function with temp files ──────────
 
+    /// Calling `read_channel_id` on a file containing `channel-id = "dev-local"`
+    /// must return the string `"dev-local"`.
     #[test]
-    fn missing_channel_id_returns_error_mentioning_channel_id() {
-        // Test the TOML parsing error path
-        let expected_msg = "Error: ns2.local.toml must contain channel-id = \"<id>\"";
-        assert!(expected_msg.contains("channel-id"));
+    fn read_channel_id_parses_correctly_from_temp_file() {
+        let f = write_temp("channel-id = \"dev-local\"\n");
+        let result = read_channel_id(f.path());
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(result.unwrap(), "dev-local");
     }
 
+    /// Calling `read_channel_id` on a missing path must return an error whose
+    /// message mentions `"channel-id"`.
     #[test]
-    fn read_channel_id_parses_correctly_from_toml_string() {
-        let toml_str = "channel-id = \"dev-local\"\n";
-        let value: toml::Value = toml_str.parse().unwrap();
-        let channel_id = value
-            .get("channel-id")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string)
-            .ok_or_else(|| "Error: ns2.local.toml must contain channel-id = \"<id>\"".to_string());
-        assert!(channel_id.is_ok());
-        assert_eq!(channel_id.unwrap(), "dev-local");
+    fn read_channel_id_missing_file_returns_error_mentioning_channel_id() {
+        let result = read_channel_id(std::path::Path::new("/tmp/this-file-does-not-exist.toml"));
+        assert!(result.is_err(), "expected Err for missing file");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("channel-id"),
+            "error must mention 'channel-id', got: {err:?}"
+        );
     }
 
+    /// Calling `read_channel_id` on a TOML file that is missing the field must
+    /// return an error whose message mentions `"channel-id"`.
     #[test]
-    fn read_channel_id_returns_error_when_field_missing() {
-        let toml_str = "some-other-field = \"value\"\n";
-        let value: toml::Value = toml_str.parse().unwrap();
-        let channel_id: Result<String, String> = value
-            .get("channel-id")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string)
-            .ok_or_else(|| "Error: ns2.local.toml must contain channel-id = \"<id>\"".to_string());
-        assert!(channel_id.is_err());
-        let err = channel_id.expect_err("should be error");
-        assert!(err.contains("channel-id"), "error must mention channel-id");
+    fn read_channel_id_missing_field_returns_error_mentioning_channel_id() {
+        let f = write_temp("some-other-field = \"value\"\n");
+        let result = read_channel_id(f.path());
+        assert!(result.is_err(), "expected Err when channel-id field missing");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("channel-id"),
+            "error must mention 'channel-id', got: {err:?}"
+        );
     }
 
+    // ── Scenario G — read_server_url: real function with temp files ───────────
+
+    /// Calling `read_server_url` on a file containing `[server]\nurl = "http://…"`
+    /// must return that URL.
     #[test]
-    fn read_server_url_falls_back_to_default() {
-        let toml_with_server = "[server]\nurl = \"http://localhost:1234\"\n";
-        let value: toml::Value = toml_with_server.parse().unwrap();
-        let url = value
-            .get("server")
-            .and_then(|s| s.get("url"))
-            .and_then(|u| u.as_str())
-            .unwrap_or("http://127.0.0.1:9876")
-            .to_string();
+    fn read_server_url_returns_url_from_temp_file() {
+        let f = write_temp("[server]\nurl = \"http://localhost:1234\"\n");
+        let url = read_server_url(f.path());
         assert_eq!(url, "http://localhost:1234");
+    }
 
-        let toml_without_server = "[other]\nfoo = \"bar\"\n";
-        let value2: toml::Value = toml_without_server.parse().unwrap();
-        let url2 = value2
-            .get("server")
-            .and_then(|s| s.get("url"))
-            .and_then(|u| u.as_str())
-            .unwrap_or("http://127.0.0.1:9876")
-            .to_string();
-        assert_eq!(url2, "http://127.0.0.1:9876");
+    /// Calling `read_server_url` on a missing file must return the default URL.
+    #[test]
+    fn read_server_url_missing_file_returns_default() {
+        let url = read_server_url(std::path::Path::new("/tmp/no-ns2.toml"));
+        assert_eq!(url, "http://127.0.0.1:9876");
+    }
+
+    /// Calling `read_server_url` on a TOML file without a `[server]` section
+    /// must return the default URL.
+    #[test]
+    fn read_server_url_missing_section_returns_default() {
+        let f = write_temp("[other]\nfoo = \"bar\"\n");
+        let url = read_server_url(f.path());
+        assert_eq!(url, "http://127.0.0.1:9876");
     }
 }

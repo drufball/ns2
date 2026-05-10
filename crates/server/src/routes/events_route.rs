@@ -850,4 +850,76 @@ mod tests {
             }
         }
     }
+
+    // ── Scenario D — Route-level integration test for MCP SSE path ────────────
+
+    /// Route-level test: `GET /events?event_type=mcp.channel_notification&channel_id=alice`
+    /// must only pass `McpChannelNotification` events for channel `"alice"` and
+    /// block those for `"bob"` and unrelated `Issue` events.
+    #[tokio::test]
+    async fn route_live_stream_mcp_channel_filter_passes_only_matching_channel() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Open the SSE stream filtered to alice's MCP channel.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events?event_type=mcp.channel_notification&channel_id=alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Emit three events on the bus:
+        //   1. McpChannelNotification for alice  ← should arrive
+        //   2. McpChannelNotification for bob    ← should be blocked
+        //   3. Issue event                       ← should be blocked
+        state.event_bus.send(SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "alice notification".into(),
+            meta: std::collections::HashMap::new(),
+        });
+        state.event_bus.send(SystemEvent::McpChannelNotification {
+            channel_id: "bob".into(),
+            body: "bob notification".into(),
+            meta: std::collections::HashMap::new(),
+        });
+        state
+            .event_bus
+            .send(SystemEvent::Issue(IssueEvent::Created(make_issue("ab12"))));
+
+        // Collect for a short window — all events are already queued.
+        let raw = collect_sse_body_with_timeout(
+            resp.into_body(),
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+
+        let data_lines: Vec<&str> = raw.lines().filter(|l| l.starts_with("data: ")).collect();
+
+        // Only alice's notification should arrive.
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "only 1 data line expected (alice channel filter); got: {data_lines:?}\nraw={raw:?}"
+        );
+
+        let json = &data_lines[0]["data: ".len()..];
+        let ev: SystemEvent =
+            serde_json::from_str(json).expect("SSE data must be valid SystemEvent JSON");
+        match ev {
+            SystemEvent::McpChannelNotification { channel_id, body, .. } => {
+                assert_eq!(channel_id, "alice", "must be alice's notification");
+                assert_eq!(body, "alice notification");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
 }

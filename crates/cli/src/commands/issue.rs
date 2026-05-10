@@ -651,6 +651,32 @@ async fn run_watch_to(server: &str, id: String, to_stderr: bool) {
 
 /// `ns2 issue subscribe --id X --deliver-to issue:<id>|session:<id>`
 ///
+/// Build the JSON request body for an `mcp_notify` hook subscription.
+///
+/// Pure function extracted from `run_subscribe` so it can be tested in
+/// isolation without a live server.
+pub fn build_mcp_notify_hook_body(issue_id: &str, channel_id: &str) -> serde_json::Value {
+    let hook_name = format!("subscribe-{issue_id}");
+    let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
+    json!({
+        "name": hook_name,
+        "source": {
+            "type": "internal",
+            "event_types": ["issue.status_changed"],
+        },
+        "filter": {
+            "conditions": [
+                { "field": "data.issue.id", "op": "eq", "value": issue_id }
+            ]
+        },
+        "action": {
+            "type": "mcp_notify",
+            "channel_id": channel_id,
+            "body": body_template,
+        },
+    })
+}
+
 /// Sugar for creating an internal hook that delivers a notification comment
 /// whenever issue X has a status change or a comment added.
 ///
@@ -718,24 +744,7 @@ pub async fn run_subscribe(
         })
     } else if let Some(channel_id) = deliver_to.strip_prefix("mcp:") {
         let channel_id = channel_id.to_string();
-        let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
-        json!({
-            "name": hook_name,
-            "source": {
-                "type": "internal",
-                "event_types": ["issue.status_changed"],
-            },
-            "filter": {
-                "conditions": [
-                    { "field": "data.issue.id", "op": "eq", "value": id }
-                ]
-            },
-            "action": {
-                "type": "mcp_notify",
-                "channel_id": channel_id,
-                "body": body_template,
-            },
-        })
+        build_mcp_notify_hook_body(&id, &channel_id)
     } else {
         eprintln!("Error: {flag_name} must be 'issue:<id>', 'session:<id>', or 'mcp:<channel_id>', got: {deliver_to}");
         std::process::exit(1);
@@ -801,42 +810,22 @@ mod tests {
 
     // ── Scenario E — CLI: mcp: subscribe target creates correct hook JSON ────
 
-    /// Test that the `mcp:<channel_id>` target builds a hook body with the
-    /// correct action type and fields (unit test, no server required).
+    /// Test that `build_mcp_notify_hook_body` produces a hook body with the
+    /// correct action type and fields — calling the actual function.
     #[test]
     fn subscribe_mcp_target_builds_correct_json() {
-        use serde_json::json;
-        // Simulate what run_subscribe does for mcp:<channel_id>
-        let deliver_to = "mcp:alice-laptop";
-        let id = "ab12";
-        let hook_name = format!("subscribe-{id}");
-        let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
-
-        let channel_id = deliver_to.strip_prefix("mcp:").unwrap();
-        let req_body = json!({
-            "name": hook_name,
-            "source": {
-                "type": "internal",
-                "event_types": ["issue.status_changed"],
-            },
-            "filter": {
-                "conditions": [
-                    { "field": "data.issue.id", "op": "eq", "value": id }
-                ]
-            },
-            "action": {
-                "type": "mcp_notify",
-                "channel_id": channel_id,
-                "body": body_template,
-            },
-        });
+        let req_body = build_mcp_notify_hook_body("ab12", "alice-laptop");
 
         assert_eq!(req_body["action"]["type"], "mcp_notify");
         assert_eq!(req_body["action"]["channel_id"], "alice-laptop");
         assert!(
-            req_body["action"]["body"].as_str().unwrap().contains("{{ event.data.issue.id }}"),
+            req_body["action"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("{{ event.data.issue.id }}"),
             "body template must contain event.data.issue.id"
         );
+        assert_eq!(req_body["source"]["event_types"][0], "issue.status_changed");
         assert_eq!(req_body["name"], "subscribe-ab12");
     }
 
