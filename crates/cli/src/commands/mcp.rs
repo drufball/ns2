@@ -1,4 +1,3 @@
-use crate::client::handle_connection_error;
 use futures::StreamExt;
 use std::io::Write;
 use std::path::Path;
@@ -41,13 +40,44 @@ pub fn read_channel_id(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "Error: ns2.local.toml must contain channel-id = \"<id>\"".to_string())
 }
 
+/// Build the JSON-RPC `initialize` response with the `claude/channel` capability.
+///
+/// Pure function extracted from `run_mcp` so it can be tested in isolation.
+#[must_use]
+pub fn build_initialize_response(id: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "experimental": {
+                    "claude/channel": {}
+                }
+            },
+            "serverInfo": {
+                "name": "ns2-mcp",
+                "version": "0.1.0"
+            }
+        }
+    })
+}
+
 /// `ns2 mcp` — run the MCP server plugin.
 ///
 /// Reads the `channel-id` from `ns2.local.toml` and subscribes to SSE events
 /// from the ns2 server, forwarding `McpChannelNotification` events as JSON-RPC
 /// `notifications/claude/channel` messages to stdout.
 ///
-/// Also handles JSON-RPC `initialize` requests from stdin.
+/// **Sequencing:** The MCP `initialize` handshake MUST complete BEFORE
+/// opening the SSE connection.  Claude Code sends `initialize` first and
+/// waits for a response before proceeding — opening the SSE connection
+/// prematurely causes the process to crash if the server is not yet
+/// available, breaking Claude Code's session.
+///
+/// **Failure handling:** If the SSE connection fails (server not running or
+/// temporarily unavailable), a warning is written to stderr and the process
+/// continues — Claude Code's session is not interrupted.
 #[allow(clippy::too_many_lines)]
 pub async fn run_mcp() {
     // 1. Read server URL from ns2.toml
@@ -76,34 +106,9 @@ pub async fn run_mcp() {
 
     eprintln!("ns2 mcp: channel_id={channel_id} server={server_url}");
 
-    // 3. Subscribe to SSE stream
-    let sse_url = format!(
-        "{server_url}/events?event_type=mcp.channel_notification&channel_id={channel_id}"
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(0)) // no timeout — long-lived SSE
-        .build()
-        .unwrap_or_default();
-
-    let resp = client
-        .get(&sse_url)
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-        .unwrap_or_else(|e| {
-            handle_connection_error(&e);
-        });
-
-    if !resp.status().is_success() {
-        eprintln!("ns2 mcp: failed to connect to SSE stream: {}", resp.status());
-        std::process::exit(1);
-    }
-
-    let mut sse_stream = resp.bytes_stream();
-    let mut sse_buf = String::new();
-
-    // 4. Concurrently read JSON-RPC from stdin and SSE from server
+    // 3. Start reading stdin for the MCP initialize request BEFORE connecting
+    //    to the SSE stream.  Claude Code sends `initialize` first; we must
+    //    respond before doing anything else.
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     tokio::spawn(async move {
@@ -127,6 +132,83 @@ pub async fn run_mcp() {
         }
     });
 
+    // 4. Wait for the `initialize` request and respond to it immediately.
+    //    This must complete BEFORE opening the SSE connection.
+    loop {
+        match stdin_rx.recv().await {
+            None => return, // stdin closed before initialize — nothing to do
+            Some(line) => {
+                if let Ok(req) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if req.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                        let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = build_initialize_response(&id);
+                        let stdout = std::io::stdout();
+                        let mut out = stdout.lock();
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::to_string(&response).unwrap_or_default()
+                        )
+                        .ok();
+                        out.flush().ok();
+                        break;
+                    }
+                    // Non-initialize message before initialize: ignore and keep waiting
+                }
+            }
+        }
+    }
+
+    // 5. NOW open the SSE connection (non-fatally — Claude Code's session must
+    //    survive even if the server is temporarily unavailable).
+    let sse_url = format!(
+        "{server_url}/events?event_type=mcp.channel_notification&channel_id={channel_id}"
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(0)) // no timeout — long-lived SSE
+        .build()
+        .unwrap_or_default();
+
+    let sse_stream_result = client
+        .get(&sse_url)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await;
+
+    let sse_stream = match sse_stream_result {
+        Err(e) => {
+            eprintln!("ns2 mcp: warning: could not connect to SSE stream: {e}");
+            eprintln!("ns2 mcp: continuing without live notifications");
+            // Keep stdin loop running so Claude Code's session is not interrupted
+            loop {
+                match stdin_rx.recv().await {
+                    None => return,
+                    Some(_line) => {
+                        // Silently ignore any further stdin messages (ping, etc.)
+                    }
+                }
+            }
+        }
+        Ok(resp) if !resp.status().is_success() => {
+            eprintln!(
+                "ns2 mcp: warning: SSE stream returned {}: continuing without live notifications",
+                resp.status()
+            );
+            loop {
+                match stdin_rx.recv().await {
+                    None => return,
+                    Some(_line) => {}
+                }
+            }
+        }
+        Ok(resp) => resp.bytes_stream(),
+    };
+
+    let mut sse_stream = sse_stream;
+    let mut sse_buf = String::new();
+
+    // 6. Main loop: forward SSE notifications and handle stdin (ping, etc.)
     loop {
         tokio::select! {
             // Handle incoming SSE bytes
@@ -144,7 +226,8 @@ pub async fn run_mcp() {
                                 let Some(data) = line.strip_prefix("data: ") else {
                                     continue;
                                 };
-                                let Ok(ev) = serde_json::from_str::<events::SystemEvent>(data) else {
+                                let Ok(ev) = serde_json::from_str::<events::SystemEvent>(data)
+                                else {
                                     continue;
                                 };
                                 if let events::SystemEvent::McpChannelNotification {
@@ -164,7 +247,13 @@ pub async fn run_mcp() {
                                     });
                                     let stdout = std::io::stdout();
                                     let mut out = stdout.lock();
-                                    writeln!(out, "{}", serde_json::to_string(&notification).unwrap_or_default()).ok();
+                                    writeln!(
+                                        out,
+                                        "{}",
+                                        serde_json::to_string(&notification)
+                                            .unwrap_or_default()
+                                    )
+                                    .ok();
                                     out.flush().ok();
                                 }
                             }
@@ -172,36 +261,12 @@ pub async fn run_mcp() {
                     }
                 }
             }
-            // Handle incoming JSON-RPC messages from stdin
+            // Handle incoming JSON-RPC messages from stdin (ping, etc.)
             msg = stdin_rx.recv() => {
                 match msg {
                     None => break, // stdin closed
-                    Some(line) => {
-                        if let Ok(req) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if req.get("method").and_then(|m| m.as_str()) == Some("initialize") {
-                                let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                                let response = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "result": {
-                                        "protocolVersion": "2024-11-05",
-                                        "capabilities": {
-                                            "experimental": {
-                                                "claude/channel": {}
-                                            }
-                                        },
-                                        "serverInfo": {
-                                            "name": "ns2-mcp",
-                                            "version": "0.1.0"
-                                        }
-                                    }
-                                });
-                                let stdout = std::io::stdout();
-                                let mut out = stdout.lock();
-                                writeln!(out, "{}", serde_json::to_string(&response).unwrap_or_default()).ok();
-                                out.flush().ok();
-                            }
-                        }
+                    Some(_line) => {
+                        // Additional stdin messages (ping, etc.) are silently ignored
                     }
                 }
             }
@@ -211,7 +276,7 @@ pub async fn run_mcp() {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_channel_id, read_server_url};
+    use super::{build_initialize_response, read_channel_id, read_server_url};
     use std::io::Write;
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -226,29 +291,34 @@ mod tests {
 
     // ── Scenario F — MCP handshake ────────────────────────────────────────────
 
+    /// `build_initialize_response` must return a JSON-RPC 2.0 response with
+    /// the correct `experimental.claude/channel` capability, matching id, and
+    /// server info.
     #[test]
-    fn initialize_response_has_correct_structure() {
+    fn build_initialize_response_has_correct_structure() {
         let id = serde_json::json!(1);
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "experimental": {
-                        "claude/channel": {}
-                    }
-                },
-                "serverInfo": {
-                    "name": "ns2-mcp",
-                    "version": "0.1.0"
-                }
-            }
-        });
+        let response = build_initialize_response(&id);
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
         assert!(response["result"]["capabilities"]["experimental"]["claude/channel"].is_object());
         assert_eq!(response["result"]["serverInfo"]["name"], "ns2-mcp");
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    /// `build_initialize_response` must echo back a string id.
+    #[test]
+    fn build_initialize_response_echoes_string_id() {
+        let id = serde_json::json!("req-42");
+        let response = build_initialize_response(&id);
+        assert_eq!(response["id"], "req-42");
+    }
+
+    /// `build_initialize_response` must echo back a null id.
+    #[test]
+    fn build_initialize_response_echoes_null_id() {
+        let id = serde_json::Value::Null;
+        let response = build_initialize_response(&id);
+        assert!(response["id"].is_null());
     }
 
     // ── Scenario F — read_channel_id: real function with temp files ──────────

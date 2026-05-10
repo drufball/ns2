@@ -700,8 +700,9 @@ pub async fn run_subscribe(
     let url = format!("{server}/hooks");
 
     // Parse "issue:<id>", "session:<id>", or "mcp:<channel_id>"
-    let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
+    let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.from }} → {{ event.data.to }}".to_string();
 
+    #[allow(clippy::option_if_let_else)]
     let req_body = if let Some(rest) = deliver_to.strip_prefix("issue:") {
         let target_id = rest.to_string();
         let (hook_name, filter_conditions) = if recursive {
@@ -839,7 +840,7 @@ mod tests {
                 .contains("{{ event.data.issue.id }}"),
             "body template must contain event.data.issue.id"
         );
-        assert_eq!(req_body["source"]["event_types"][0], "issue.status_changed");
+        assert_eq!(req_body["event_names"][0], "issue.status_changed");
         assert_eq!(req_body["name"], "subscribe-ab12");
     }
 

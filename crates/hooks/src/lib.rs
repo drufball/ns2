@@ -44,14 +44,13 @@ pub mod evaluate {
             } => {
                 vec!["session.turn_started".into()]
             }
-            SystemEvent::Session { .. } => vec![],
+            SystemEvent::Session { .. } | SystemEvent::McpChannelNotification { .. } => vec![],
             SystemEvent::External { event_name, .. } => {
                 vec![format!("external.{event_name}")]
             }
             SystemEvent::TimerFired { event_name, .. } => {
                 vec![format!("timer.{event_name}")]
             }
-            SystemEvent::McpChannelNotification { .. } => vec![],
         }
     }
 
@@ -653,6 +652,49 @@ mod tests {
             &event_json,
         );
         assert_eq!(rendered, "Issue ab12 is now running");
+    }
+
+    /// Verify that the `run_subscribe` send-message template renders correctly
+    /// for a real `StatusChanged` event — both `event.data.from` and
+    /// `event.data.to` must produce the expected status strings.
+    #[test]
+    fn template_renders_send_message_body_for_status_changed_event() {
+        // This is the actual JSON produced by serde when serializing
+        // SystemEvent::Issue(IssueEvent::StatusChanged { ... })
+        // (adjacently tagged: type=issue, data = inner IssueEvent)
+        let issue = types::Issue {
+            id: "ab12".into(),
+            title: "Test".into(),
+            body: String::new(),
+            status: types::IssueStatus::InProgress,
+            branch: "main".into(),
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let ev = events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+            issue,
+            from: types::IssueStatus::Open,
+            to: types::IssueStatus::InProgress,
+        });
+        let event_json = serde_json::to_value(&ev).expect("serialize event");
+
+        // Template used by `run_subscribe` for send_message hooks
+        // (the `from → to` format is consistent with the MCP notify template)
+        let rendered = template::render_template(
+            "Issue {{ event.data.issue.id }}: {{ event.data.from }} → {{ event.data.to }}",
+            &event_json,
+        );
+        assert_eq!(
+            rendered,
+            "Issue ab12: open → in_progress",
+            "send_message template must include both from and to status for StatusChanged events"
+        );
     }
 
     #[test]
@@ -1385,6 +1427,7 @@ mod tests {
                 assignee: None,
                 session_id: None,
                 parent_id: None,
+                ancestor_ids: vec![],
                 blocked_on: vec![],
                 comments: vec![],
                 created_at: Utc::now(),
@@ -1438,6 +1481,7 @@ mod tests {
                 assignee: None,
                 session_id: None,
                 parent_id: None,
+                ancestor_ids: vec![],
                 blocked_on: vec![],
                 comments: vec![],
                 created_at: Utc::now(),
@@ -1489,6 +1533,7 @@ mod tests {
                 assignee: None,
                 session_id: None,
                 parent_id: None,
+                ancestor_ids: vec![],
                 blocked_on: vec![],
                 comments: vec![],
                 created_at: Utc::now(),
