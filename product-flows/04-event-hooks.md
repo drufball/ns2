@@ -39,7 +39,18 @@ HOOK=$(ns2 issue subscribe --id "$WORK" --deliver-to "issue:$WATCHER")
 echo "Hook created: $HOOK"
 ```
 
-Expected: a 4-character hook ID printed to stdout; a hook is created in the system.
+Expected: a 4-character hook ID printed to stdout; a hook is created in the system with name `subscribe-<WORK>`.
+
+### Step 3b (optional): Subscribe recursively to an issue tree
+
+```bash
+ROOT=$(ns2 issue new --title "Root Task" --body "Parent issue")
+CHILD=$(ns2 issue new --title "Child Task" --body "Child issue" --parent "$ROOT")
+RHOOK=$(ns2 issue subscribe --id "$ROOT" --deliver-to "issue:$WATCHER" --recursive)
+echo "Recursive hook: $RHOOK"
+```
+
+Expected: a 4-character hook ID printed to stdout; a hook named `subscribe-<ROOT>-recursive` is created with a `contains` condition on `data.issue.ancestor_ids`.
 
 ### Step 4: Verify the hook exists
 
@@ -113,6 +124,9 @@ ns2 hook list
 ## Acceptance Criteria
 
 - [ ] `ns2 issue subscribe` creates an internal hook visible via `ns2 hook list`
+- [ ] `ns2 issue subscribe --recursive` creates a hook named `subscribe-<id>-recursive` with a `contains` condition on `data.issue.ancestor_ids`
+- [ ] When `--recursive` is passed to `issue new --subscribe`, the created hook uses the recursive filter
+- [ ] `ancestor_ids` is populated on the `Issue` type and included in all event payloads by walking the parent chain
 - [ ] When a subscribed issue changes status, a notification comment is posted to the delivery target issue
 - [ ] `GET /events` returns a live SSE stream of all events
 - [ ] `GET /events?issue_id=<id>` filters the stream to events for that issue

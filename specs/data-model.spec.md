@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-05-10T16:59:58Z
+verified: 2026-05-10T18:25:58Z
 ---
 
 # Data Model Spec
@@ -126,7 +126,7 @@ The `types` crate mirrors the DB schema in Rust:
 - `Session`, `SessionStatus` — maps to the `sessions` table
 - `Turn` — maps to the `turns` table
 - `ContentBlock`, `Role` — maps to `content_blocks`
-- `Issue`, `IssueStatus`, `IssueComment` — maps to the `issues` table
+- `Issue`, `IssueStatus`, `IssueComment` — maps to the `issues` table; `Issue` also carries a runtime-only `ancestor_ids: Vec<String>` field (all parent IDs from immediate parent up to root, populated at event-emission time and not stored in the DB)
 - `Event`, `EventKind` — maps to the `events` table
 - `Hook`, `HookAction`, `HookFilter` — maps to the `hooks` table
 - `HookExecution`, `ExecutionStatus` — maps to the `hook_executions` table

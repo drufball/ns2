@@ -34,7 +34,7 @@ enum Command {
     },
     #[command(
         about = "Inspect agent sessions (implementation detail — use `issue` to get work done).",
-        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
+        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  waiting    agent finished; session paused waiting for next message\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
     )]
     Session {
         #[command(subcommand)]
@@ -262,7 +262,7 @@ enum SessionAction {
     List {
         #[arg(
             long,
-            help = "Show only sessions in this state. Values: created, running, completed, failed, cancelled."
+            help = "Show only sessions in this state. Values: created, running, waiting, failed, cancelled."
         )]
         status: Option<String>,
         #[arg(
@@ -295,13 +295,13 @@ enum SessionAction {
         #[arg(
             long,
             requires = "message",
-            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on completed, non-zero on failed/cancelled. Requires --message."
+            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on waiting, non-zero on failed/cancelled. Requires --message."
         )]
         wait: bool,
     },
     #[command(
         about = "Stream a session's output to stdout.",
-        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session completed successfully\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
+        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session finished; now in waiting state\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
     )]
     Tail {
         #[arg(
@@ -318,7 +318,7 @@ enum SessionAction {
         turns: Option<usize>,
         #[arg(
             long,
-            help = "Exit after N seconds even if the session has not finished. Exits 0 if session completed naturally, 1 if timeout fired."
+            help = "Exit after N seconds even if the session has not finished. Exits 0 if session finished naturally (waiting state), 1 if timeout fired."
         )]
         timeout: Option<u64>,
     },
@@ -336,7 +336,7 @@ enum SessionAction {
     },
     #[command(
         about = "Cancel a running or created session.",
-        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `completed` or `cancelled`."
+        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `waiting`, `failed`, or `cancelled`."
     )]
     Stop {
         #[arg(long, help = "Identify session by UUID (preferred).")]
@@ -346,7 +346,7 @@ enum SessionAction {
     },
     #[command(
         about = "Block until all specified sessions reach a terminal state.",
-        long_about = "Polls the listed sessions every second and exits once all of them are in 'completed', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions completed or were cancelled; exits 1 if any session failed or does not exist."
+        long_about = "Polls the listed sessions every second and exits once all of them are in 'waiting', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions finished (waiting or cancelled); exits 1 if any session failed or does not exist."
     )]
     Wait {
         #[arg(long = "id", num_args = 1.., help = "Session UUIDs to wait on. Repeat for multiple.")]
@@ -440,6 +440,8 @@ enum IssueAction {
         watch: bool,
         #[arg(long, help = "Subscribe to status/comment events on this issue. Value: 'issue:<id>' or 'session:<id>'.")]
         subscribe: Option<String>,
+        #[arg(long, help = "When used with --subscribe, subscribe recursively to the entire issue tree.")]
+        recursive: bool,
     },
     #[command(
         about = "Edit an existing issue.",
@@ -571,6 +573,8 @@ enum IssueAction {
             help = "Notification target in the form 'issue:<id>' or 'session:<id>'. Required."
         )]
         deliver_to: String,
+        #[arg(long, help = "Subscribe to descendant issues as well as the root.")]
+        recursive: bool,
     },
 }
 
@@ -720,6 +724,7 @@ async fn main() {
                 wait,
                 watch,
                 subscribe,
+                recursive,
             } => {
                 commands::issue::run_new(
                     &cli.server,
@@ -733,6 +738,7 @@ async fn main() {
                     wait,
                     watch,
                     subscribe,
+                    recursive,
                 )
                 .await;
             }
@@ -788,8 +794,8 @@ async fn main() {
             IssueAction::Watch { id } => {
                 commands::issue::run_watch(&cli.server, id).await;
             }
-            IssueAction::Subscribe { id, deliver_to } => {
-                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true)
+            IssueAction::Subscribe { id, deliver_to, recursive } => {
+                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true, recursive)
                     .await;
             }
         },
@@ -888,6 +894,7 @@ mod tests {
         render_session_line, render_tree_line, session_status_symbol, spinner_char, truncate_str,
         IssueTreeNode, SPINNER_FRAMES,
     };
+    use clap::CommandFactory;
     use events::SessionEvent;
     use types::*;
     use uuid::Uuid;
@@ -1505,6 +1512,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1535,6 +1543,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1751,6 +1760,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1958,6 +1968,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::Utc::now(),
@@ -2897,7 +2908,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::Subscribe { id, deliver_to },
+                action: IssueAction::Subscribe { id, deliver_to, .. },
             } => {
                 assert_eq!(id, "ab12");
                 assert_eq!(deliver_to, "issue:watcher1");
@@ -3072,6 +3083,130 @@ mod tests {
         }
     }
 
+    // ─── `ns2 issue subscribe` --recursive CLI parse tests ───────────────────
+
+    #[test]
+    fn issue_subscribe_recursive_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "subscribe",
+            "--id",
+            "ab12",
+            "--deliver-to",
+            "issue:cd34",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Subscribe { id, deliver_to, recursive },
+            } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(deliver_to, "issue:cd34");
+                assert!(recursive, "recursive should be true when --recursive is passed");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_subscribe_no_recursive_flag_is_false() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "subscribe",
+            "--id",
+            "ab12",
+            "--deliver-to",
+            "issue:cd34",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Subscribe { recursive, .. },
+            } => {
+                assert!(!recursive, "recursive should be false when --recursive is not passed");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_recursive_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "issue:ab12",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, recursive, .. },
+            } => {
+                assert_eq!(subscribe.as_deref(), Some("issue:ab12"));
+                assert!(recursive, "recursive should be true when --recursive is passed");
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_recursive_flag_is_false() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "issue:ab12",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { recursive, .. },
+            } => {
+                assert!(!recursive, "recursive should be false when --recursive is not passed");
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_recursive_without_subscribe_parses_ok() {
+        // --recursive without --subscribe should still parse successfully
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, recursive, .. },
+            } => {
+                assert!(subscribe.is_none(), "subscribe should be None");
+                assert!(recursive, "recursive should be true");
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
     // ─── Scenario A: --subscribe parses correctly in CLI ─────────────────────
 
     #[test]
@@ -3114,6 +3249,162 @@ mod tests {
         }
     }
 
+    // ─── Help string: session status lifecycle uses 'waiting' not 'completed' ─
+
+    #[test]
+    fn session_subcommand_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        // Find the Session subcommand
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let long_about = session_cmd
+            .get_long_about()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session long_about must not contain 'completed', got: {long_about}"
+        );
+    }
+
+    #[test]
+    fn session_list_status_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let list_cmd = session_cmd
+            .find_subcommand_mut("list")
+            .expect("session list subcommand must exist");
+        let status_arg = list_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "status")
+            .expect("status arg must exist");
+        let help = status_arg
+            .get_help()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session list --status help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session list --status help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_new_wait_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let new_cmd = session_cmd
+            .find_subcommand_mut("new")
+            .expect("session new subcommand must exist");
+        let wait_arg = new_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "wait")
+            .expect("wait arg must exist");
+        let help = wait_arg
+            .get_help()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session new --wait help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session new --wait help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_tail_timeout_help_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let tail_cmd = session_cmd
+            .find_subcommand_mut("tail")
+            .expect("session tail subcommand must exist");
+        let timeout_arg = tail_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "timeout")
+            .expect("timeout arg must exist");
+        let help = timeout_arg
+            .get_help()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            help.contains("waiting"),
+            "session tail --timeout help must contain 'waiting', got: {help}"
+        );
+        assert!(
+            !help.contains("completed"),
+            "session tail --timeout help must not contain 'completed', got: {help}"
+        );
+    }
+
+    #[test]
+    fn session_stop_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let stop_cmd = session_cmd
+            .find_subcommand_mut("stop")
+            .expect("session stop subcommand must exist");
+        let long_about = stop_cmd
+            .get_long_about()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session stop long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session stop long_about must not contain 'completed', got: {long_about}"
+        );
+    }
+
+    #[test]
+    fn session_wait_long_about_contains_waiting_not_completed() {
+        use clap::CommandFactory;
+        let mut app = Cli::command();
+        let session_cmd = app
+            .find_subcommand_mut("session")
+            .expect("session subcommand must exist");
+        let wait_cmd = session_cmd
+            .find_subcommand_mut("wait")
+            .expect("session wait subcommand must exist");
+        let long_about = wait_cmd
+            .get_long_about()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            long_about.contains("waiting"),
+            "session wait long_about must contain 'waiting', got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session wait long_about must not contain 'completed', got: {long_about}"
+        );
+    }
+
     // ─── Scenario C: --subscribe with session target parses ──────────────────
 
     #[test]
@@ -3138,6 +3429,36 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
+    }
+
+    // ─── Regression: session tail long_about must not reference stale status ─
+
+    #[test]
+    fn session_tail_long_about_does_not_contain_completed() {
+        // "completed" was removed as a session status in GH#131.
+        // This test guards against stale wording creeping back into the
+        // tail subcommand's help text.
+        let cmd = Cli::command();
+        let session_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "session")
+            .expect("session subcommand should exist");
+        let tail_sub = session_sub
+            .get_subcommands()
+            .find(|s| s.get_name() == "tail")
+            .expect("tail subcommand should exist");
+        let long_about = tail_sub
+            .get_long_about()
+            .expect("tail subcommand should have long_about")
+            .to_string();
+        assert!(
+            long_about.contains("waiting"),
+            "session tail long_about must describe the 'waiting' state; got: {long_about}"
+        );
+        assert!(
+            !long_about.contains("completed"),
+            "session tail long_about must not contain 'completed', got: {long_about}"
+        );
     }
 
     // ─── `ns2 event` CLI parse tests ─────────────────────────────────────────
