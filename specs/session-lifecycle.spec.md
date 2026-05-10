@@ -4,7 +4,7 @@ targets:
   - crates/harness/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-05-10T11:07:44Z
+verified: 2026-05-10T12:14:51Z
 ---
 
 # Session Lifecycle Spec
@@ -18,7 +18,8 @@ SSE broadcast channels and the in-progress harness tasks that feed them.
 ## States and Transitions
 
 ```
-created → running → waiting
+created → running → completed
+                 ↘ waiting
                  ↘ failed
                  ↘ cancelled
 ```
@@ -27,10 +28,12 @@ created → running → waiting
   is created with no initial message, or when the server restarts and the in-memory
   harness map is empty.
 - **`running`** — a harness task is active and processing turns.
-- **`waiting`** — the harness finished. Always the terminal state after a normal run,
-  regardless of whether the agent called `stop(complete)`, `stop(waiting)`, or did not
-  call `stop` at all. Not permanently terminal — the session can receive new messages
-  and a fresh harness will resume it.
+- **`completed`** — the agent called `stop(complete)` and the harness exited cleanly.
+  Terminal. The session is not resumable via new messages.
+- **`waiting`** — the harness finished without calling `stop(complete)` (either
+  `stop(waiting)` was called, or no `stop` was called at all). The issue is paused for
+  human input. Not permanently terminal — the session can receive new messages and a
+  fresh harness will resume it.
 - **`failed`** — the harness encountered an unrecoverable error, the API key was missing,
   or the server restarted while the session was `running` (orphan recovery, see below).
   Terminal unless explicitly reopened.
@@ -92,7 +95,7 @@ connections, so clients never observe a half-recovered state.
 1. Load all turns + blocks from SQLite in order.
 2. Emit `TurnStarted`, `ContentBlockStarted`, `ContentBlockDelta` (one per stored text
    delta), `ContentBlockDone`, `TurnDone` events for each persisted turn.
-3. If the session is terminal (`waiting`, `failed`, or `cancelled`), emit `SessionDone` and close the stream.
+3. If the session is terminal (`completed`, `waiting`, `failed`, or `cancelled`), emit `SessionDone` and close the stream.
 4. If the session is live, subscribe to the broadcast channel and forward events as they
    arrive.
 

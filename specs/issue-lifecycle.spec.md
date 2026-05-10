@@ -4,7 +4,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
   - crates/cli/src/**/*.rs
-verified: 2026-05-10T11:09:26Z
+verified: 2026-05-10T12:13:04Z
 ---
 
 # Issue Lifecycle Spec
@@ -18,37 +18,40 @@ holds no authoritative issue state in memory.
 ## States and Transitions
 
 ```
-open → running → completed
-              ↘ failed
-              ↘ waiting
-         ↑ (reopen)
+open → in_progress → completed
+                   ↘ failed
+                   ↘ waiting
+     ↑ (reopen)
 ```
 
 - **`open`** — issue created, not yet started. The default state after `ns2 issue new`.
-- **`running`** — `PATCH /issues/:id/status` with `in_progress` has been called; a session is active.
+- **`in_progress`** — `PATCH /issues/:id/status` with `in_progress` has been called; a session is active.
 - **`completed`** — the agent called `stop(complete)`. Terminal.
 - **`waiting`** — the agent called `stop(waiting)` or the session ended without calling
   `stop`. The issue is paused for human input. Terminal (the session is still associated
   and its history is preserved; reopen to continue).
 - **`failed`** — the agent session hit an error, or the server restarted while the
   session was active (orphan recovery). Terminal unless explicitly reopened.
+- **`cancelled`** — manually cancelled. Terminal.
 
 `failed`, `completed`, and `waiting` issues can be moved back to `open` via
 `ns2 issue reopen`. The behavior differs by prior state — see the Reopen section below.
 
 ## Stop-Tool-Driven Issue Completion
 
-When `PATCH /issues/:id/status` with `in_progress` is received, the server spawns an `issue_watcher` task
-that subscribes to the session's event bus. The watcher drives the issue to its terminal
-state using the `Stopped` SSE event emitted by the harness just before `Done`.
+When `PATCH /issues/:id/status` with `in_progress` is received, the server starts or resumes the
+linked session via `spawn_harness_sync`. A single global **issue lifecycle subscriber**
+(`spawn_issue_lifecycle_subscriber` in `server/lib.rs`) subscribes to the `EventBus` and
+drives all issues to their terminal states — there is no per-session watcher task.
 
 **Event flow:**
 
 1. Agent calls `stop(status, [comment])` during a turn → harness captures a `StopSignal`.
 2. After `end_turn`, the harness emits `SessionEvent::Stopped { status, comment }` if a
    stop signal was received, then emits `SessionEvent::Done`.
-3. The `issue_watcher` holds the most recent `Stopped` event in memory. On `Done`, it
-   calls `park_issue(id, park_status, comment)`:
+3. The lifecycle subscriber holds a `stop_map` (keyed by `session_id`). On `Stopped`, it
+   inserts the status and comment. On `Done`, it looks up the entry and calls
+   `park_issue(id, park_status, comment)`:
    - `stop(complete)` → `park_status = Completed`
    - `stop(waiting)` or no stop call → `park_status = Waiting`
 
@@ -62,15 +65,28 @@ state using the `Stopped` SSE event emitted by the harness just before `Done`.
 4. On `Error { message }` — posts `message` as a comment (author = `"system"`), then
    marks the issue `failed`.
 
-The `Stopped` event for a different session is ignored (the watcher filters by
-`session_id`).
-
 **If the agent never calls `stop`:** the session ends as `Waiting` and the issue
 transitions to `Waiting` with no comment added.
+
+## Issue State → Session Actions
+
+The lifecycle subscriber also reacts to issue `StatusChanged` events:
+
+- **`InProgress`** — calls `handle_in_progress`, which spawns a new harness (or resumes
+  an existing `Waiting` session). This is the bridge from status change to agent execution.
+- **`Cancelled`** — kills the active session if one is linked: drops the `msg_senders`
+  entry and marks the session `Cancelled` in the DB.
 
 ## Comment Protocol
 
 Comments are stored in the `issues.comments` JSON array with `author`, `created_at`, and `body` fields. The `author` is `"user"` for human comments, the agent name for agent output, and `"system"` for server-generated notices such as orphan recovery messages. The `comment` flag on `ns2 issue complete` and `ns2 issue reopen` appends a user comment before the status transition, ensuring it is visible in history when an agent resumes.
+
+## Opening Prompt
+
+When a session is started for an issue, `issues::build_initial_message(issue)` formats the
+issue's title, body, and any comment history into the opening agent prompt. Comments are
+rendered with author, timestamp, and body under an `# Issue History` header. This is a
+pure function in the `issues` crate with no side effects.
 
 ## Orphan Recovery
 
@@ -106,13 +122,21 @@ For all states:
   **before** the status transition, so it is visible in history when the agent resumes.
 - The `updated_at` timestamp is refreshed.
 - Only `failed`, `completed`, and `waiting` issues can be reopened. Attempting to reopen
-  an `open` or `running` issue returns an error.
+  an `open` or `in_progress` issue returns an error.
 
 After reopening, the normal lifecycle applies.
 
+## Resume (`IssueService::resume_issue`)
+
+`resume_issue(id)` atomically transitions a `Waiting` issue (with a linked session) to
+`InProgress` and emits a `StatusChanged` event. The lifecycle subscriber reacts to the
+event by resuming the session. This is distinct from `start_issue` (which also handles
+`open` issues and fresh session creation) and is used when a waiting issue is continued
+directly without going through `open`.
+
 ## Validation Rules
 
-`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `running`, or `waiting` states.
+`PATCH /issues/:id/status` with `in_progress` requires the issue to have an assignee whose agent file exists in `.ns2/agents/`. `ns2 issue complete` requires a `--comment` and the issue must not already be terminal. `ns2 issue reopen` requires `failed`, `completed`, or `waiting` state. Cancellation is allowed from `open`, `in_progress`, or `waiting` states.
 
 ## Connect Sections
 

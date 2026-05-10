@@ -1,12 +1,12 @@
 ---
 targets:
   - crates/cli/src/commands/session.rs
-verified: 2026-05-10T11:07:49Z
+verified: 2026-05-10T12:14:54Z
 ---
 
 # ns2 session
 
-Sessions are the internal agent runs that power issues. In normal use you don't create them directly — `ns2 issue start` creates one automatically and links it to the issue. Session commands exist for inspection, debugging, and advanced scripting.
+Sessions are the internal agent runs that power issues. In normal use you don't create them directly — `ns2 issue edit --id <id> --status in_progress` creates one automatically and links it to the issue. Session commands exist for inspection, debugging, and advanced scripting.
 
 ## Lifecycle
 
@@ -14,6 +14,7 @@ A session moves through these states in order:
 
 - **created** — session exists but no message sent yet; agent not started
 - **running** — agent is active and processing messages
+- **completed** — agent called `stop(complete)`; terminal
 - **waiting** / **failed** / **cancelled** — terminal states
 
 ## When to use session commands directly

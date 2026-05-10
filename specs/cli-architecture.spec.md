@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/**/*.rs
-verified: 2026-05-10T11:09:22Z
+verified: 2026-05-10T12:14:54Z
 ---
 
 # CLI Architecture
@@ -65,7 +65,7 @@ Each file in `commands/` corresponds to one top-level CLI noun. Command function
 | File | Noun | Responsibility |
 |------|------|----------------|
 | `agent.rs` | `ns2 agent` | `run_list`, `run_new`, `run_edit` — reads/writes `.ns2/agents/` via the `agents` crate. |
-| `issue.rs` | `ns2 issue` | Full issue lifecycle: new, edit, comment, set-status, complete, reopen, list, wait, watch. Owns `issue_is_terminal` and `all_nodes_terminal`. |
+| `issue.rs` | `ns2 issue` | Full issue lifecycle: new, edit, comment, complete, reopen, list, wait, watch. Owns `issue_is_terminal` and `all_nodes_terminal`. |
 | `server.rs` | `ns2 server` | `data_dir_and_pid` (shared helper), `run_start` (delegates to the `server` crate), `run_stop` (reads PID file and signals the process). |
 | `session.rs` | `ns2 session` | Full session lifecycle: list, new, tail, send, stop, wait. Owns `session_is_terminal`. |
 | `spec.rs` | `ns2 spec` | `run_new`, `run_sync`, `run_verify`. Owns `verify_spec_paths` / `VerifyResult` (returned instead of calling `process::exit` so tests can assert on the result). |

@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-05-10T11:09:22Z
+verified: 2026-05-10T12:13:06Z
 ---
 
 # server crate
@@ -17,16 +17,17 @@ On startup, `run(config)` initializes the database, constructs `AppState`, spawn
 
 ## Key modules
 
-- **`lib.rs`** — router construction and the public `run()` entry point. Pure wiring, no business logic.
-- **`state.rs`** — owns `AppState` and the `spawn_harness_sync` function. Single authority over all runtime maps.
-- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+- **`lib.rs`** — router construction, the public `run()` entry point, and `spawn_issue_lifecycle_subscriber`. Pure wiring plus the global lifecycle subscriber.
+- **`harness_spawn.rs`** — owns `spawn_harness_sync(state, session)`. Spawns a harness task for a session; no issue_id parameter — issue transitions are handled by the lifecycle subscriber.
+- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, and shared error types. Delegates to `harness_spawn.rs` or the `issues` crate service.
 
 ## Background tasks
 
-Two background tasks are spawned at server startup:
+Three background tasks are spawned at server startup:
 
 - **Hook evaluator** — subscribes to the `EventBus` and fires internal hooks whose `event_types` and `filter` match incoming `SystemEvent`s.
 - **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer hooks, and emits `SystemEvent::TimerFired` for any whose 5-field cron schedule falls within the 60-second rolling window ending at `now`. The action is then executed in a spawned task identical to the evaluator path.
+- **Issue lifecycle subscriber** (`spawn_issue_lifecycle_subscriber`) — subscribes to the `EventBus` and handles all cross-cutting issue/session transitions. Session events (`Done`, `Error`, `Stopped`) drive issue state; issue `StatusChanged` events drive session actions (spawning a harness on `InProgress`, killing a session on `Cancelled`). This replaces the old per-session `issue_watcher` pattern.
 
 ## Hook validation
 

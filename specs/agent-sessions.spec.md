@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-05-10T11:07:49Z
+verified: 2026-05-10T12:14:51Z
 ---
 
 # Agent Sessions Spec
@@ -26,12 +26,13 @@ Sessions are managed primarily through the CLI (`ns2 issue start`, `ns2 issue wa
 ## Lifecycle
 
 ```
-created → running → [waiting → running → ... →] waiting | failed | cancelled
+created → running → [waiting → running → ... →] completed | waiting | failed | cancelled
 ```
 
 - **created**: session record written, agent task not yet spawned
 - **running**: agent turn loop active in background
-- **waiting**: agent finished its turn (whether it called `stop(complete)`, `stop(waiting)`, or neither); loop is paused, resumable via new message
+- **completed**: agent called `stop(complete)` — terminal, not resumable
+- **waiting**: agent finished without calling `stop(complete)` (paused for human input); loop is resumable via new message
 - **failed/cancelled**: terminal states; history retained
 - **retry:** failed sessions resume from the last completed turn, not from the beginning
 
