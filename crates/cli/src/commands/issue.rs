@@ -37,7 +37,6 @@ pub async fn run_new(
     wait: bool,
     watch: bool,
     subscribe: Option<String>,
-    recursive: bool,
 ) {
     // Validate: --wait requires --status in_progress
     if wait && status.as_deref() != Some("in_progress") {
@@ -91,7 +90,7 @@ pub async fn run_new(
     // Pass `print_id_to_stdout: false` so the hook ID stays on stderr only —
     // stdout must remain a single line (the issue ID) for `id=$(ns2 issue new …)`.
     if let Some(deliver_to) = subscribe {
-        run_subscribe(server, issue_id.clone(), deliver_to, "--subscribe", false, recursive).await;
+        run_subscribe(server, issue_id.clone(), deliver_to, "--subscribe", false).await;
     }
 
     // If --watch, start streaming SSE events to stderr in the background
@@ -662,16 +661,12 @@ async fn run_watch_to(server: &str, id: String, to_stderr: bool) {
 /// Pass `true` when invoked as the top-level `issue subscribe` subcommand (callers
 /// capture the hook ID via `id=$(ns2 issue subscribe …)`).  Pass `false` when called
 /// from `run_new` so that stdout remains a single line — the issue ID.
-///
-/// `recursive`: when `true`, the hook fires for any descendant issue as well (by
-/// matching `ancestor_ids contains <id>` instead of `id == <id>`).
 pub async fn run_subscribe(
     server: &str,
     id: String,
     deliver_to: String,
     flag_name: &str,
     print_id_to_stdout: bool,
-    recursive: bool,
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
@@ -687,27 +682,19 @@ pub async fn run_subscribe(
         std::process::exit(1);
     };
 
-    let (hook_name, filter_conditions) = if recursive {
-        let name = format!("subscribe-{id}-recursive");
-        let conditions = serde_json::json!([
-            { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
-        ]);
-        (name, conditions)
-    } else {
-        let name = format!("subscribe-{id}");
-        let conditions = serde_json::json!([
-            { "field": "data.issue.id", "op": "eq", "value": id }
-        ]);
-        (name, conditions)
-    };
-
+    let hook_name = format!("subscribe-{id}");
     let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
 
     let req_body = json!({
         "name": hook_name,
-        "event_names": ["issue.status_changed", "issue.comment_added"],
+        "source": {
+            "type": "internal",
+            "event_types": ["issue.status_changed", "issue.comment_added"],
+        },
         "filter": {
-            "conditions": filter_conditions
+            "conditions": [
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]
         },
         "action": {
             "type": "send_message",
@@ -758,7 +745,6 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),

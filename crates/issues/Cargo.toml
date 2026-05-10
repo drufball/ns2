@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 types = { path = "../types" }
 db = { path = "../db" }
+issue-backend = { path = "../issue-backend" }
 events = { path = "../events" }
 tokio = { workspace = true }
 uuid = { workspace = true }

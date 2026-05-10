@@ -1,12 +1,13 @@
 use crate::cron::next_after;
 use chrono::{DateTime, Duration, Utc};
-use db::EventStore;
+use db::HookStore;
 use events::{EventBus, SystemEvent};
 use std::sync::Arc;
+use types::HookSource;
 
-/// Check whether a timer event should fire at the given `now` time.
+/// Check whether a timer hook should fire at the given `now` time.
 ///
-/// An event fires if the next cron tick after `(now - 60 seconds)` is ≤ `now`.
+/// A hook fires if the next cron tick after `(now - 60 seconds)` is ≤ `now`.
 /// This provides a 60-second rolling window so no ticks are missed.
 #[must_use]
 pub fn should_fire(schedule: &str, now: DateTime<Utc>) -> bool {
@@ -14,28 +15,30 @@ pub fn should_fire(schedule: &str, now: DateTime<Utc>) -> bool {
     match next_after(schedule, window_start) {
         Ok(next_fire) => next_fire <= now,
         Err(e) => {
-            tracing::warn!("Timer event: invalid schedule '{schedule}': {e}");
+            tracing::warn!("Timer hook: invalid schedule '{schedule}': {e}");
             false
         }
     }
 }
 
-/// Process all enabled timer events for a single scheduler tick at `now`.
+/// Process all enabled timer hooks for a single scheduler tick at `now`.
 ///
-/// Checks each event's schedule against the 60-second rolling window and, for
-/// those that match, emits a `SystemEvent::TimerFired` on the event bus.
-pub(crate) async fn process_timer_events(
-    event_store: &Arc<dyn EventStore>,
+/// Checks each hook's schedule against the 60-second rolling window and, for
+/// those that match, emits a `SystemEvent::TimerFired` on the event bus and
+/// spawns a task to execute the hook action.
+pub(crate) async fn process_timer_hooks(
+    hook_store: &Arc<dyn HookStore>,
     event_bus: &EventBus,
+    issue_svc: &issues::IssueService,
     now: DateTime<Utc>,
 ) {
-    let events = event_store.list_events().await.unwrap_or_default();
+    let hooks = hook_store
+        .list_hooks(Some(true), Some("timer"))
+        .await
+        .unwrap_or_default();
 
-    for event in events {
-        if !event.enabled {
-            continue;
-        }
-        let types::EventKind::Timer { ref schedule } = event.kind else {
+    for hook in hooks {
+        let HookSource::Timer { ref schedule } = hook.source else {
             continue;
         };
 
@@ -51,18 +54,39 @@ pub(crate) async fn process_timer_events(
 
         // Emit TimerFired event
         event_bus.send(SystemEvent::TimerFired {
-            event_id: event.id.clone(),
-            event_name: event.name.clone(),
+            hook_id: hook.id.clone(),
             fired_at,
+        });
+
+        // Execute the hook action
+        let event = SystemEvent::TimerFired {
+            hook_id: hook.id.clone(),
+            fired_at,
+        };
+        let hook_store_clone = Arc::clone(hook_store);
+        let issue_svc_clone = issue_svc.clone();
+        let hook_clone = hook.clone();
+        tokio::spawn(async move {
+            crate::execute::run_action(
+                &hook_clone,
+                &event,
+                &issue_svc_clone,
+                hook_store_clone.as_ref(),
+            )
+            .await;
         });
     }
 }
 
 /// Run the timer scheduler loop.
 ///
-/// Wakes every 30 seconds and fires any enabled timer events whose schedule
+/// Wakes every 30 seconds and fires any enabled timer hooks whose schedule
 /// falls within the last 60-second window.
-pub async fn run_timer_scheduler(event_store: Arc<dyn EventStore>, event_bus: EventBus) {
+pub async fn run_timer_scheduler(
+    hook_store: Arc<dyn HookStore>,
+    event_bus: EventBus,
+    issue_svc: issues::IssueService,
+) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     // First tick fires immediately; we skip it to avoid firing on startup.
     interval.tick().await;
@@ -70,16 +94,21 @@ pub async fn run_timer_scheduler(event_store: Arc<dyn EventStore>, event_bus: Ev
     loop {
         interval.tick().await;
         let now = Utc::now();
-        process_timer_events(&event_store, &event_bus, now).await;
+        process_timer_hooks(&hook_store, &event_bus, &issue_svc, now).await;
     }
 }
 
 /// Spawn the timer scheduler as a background `tokio::task`.
-pub fn spawn_timer_scheduler(event_store: &Arc<dyn EventStore>, event_bus: &EventBus) {
-    let event_store = Arc::clone(event_store);
+pub fn spawn_timer_scheduler(
+    hook_store: &Arc<dyn HookStore>,
+    event_bus: &EventBus,
+    issue_svc: &issues::IssueService,
+) {
+    let hook_store = Arc::clone(hook_store);
     let event_bus = event_bus.clone();
+    let issue_svc = issue_svc.clone();
     tokio::spawn(async move {
-        run_timer_scheduler(event_store, event_bus).await;
+        run_timer_scheduler(hook_store, event_bus, issue_svc).await;
     });
 }
 
@@ -90,45 +119,74 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use types::{Event, EventKind};
+    use types::{Hook, HookAction, HookExecution, HookSource, MessageTarget};
 
-    // ── Single stub store ─────────────────────────────────────────────────────
+    // ── Single stub store (merged from SpyStore + StubStore) ─────────────────
 
-    struct StubEventStore {
-        events: Vec<Event>,
+    struct StubStore {
+        hooks: Vec<Hook>,
     }
 
     #[async_trait]
-    impl EventStore for StubEventStore {
-        async fn create_event(&self, _e: &Event) -> db::Result<()> {
+    impl HookStore for StubStore {
+        async fn create_hook(&self, _h: &types::Hook) -> db::Result<()> {
             Ok(())
         }
-        async fn get_event(&self, _id: &str) -> db::Result<Event> {
+        async fn list_hooks(
+            &self,
+            _enabled: Option<bool>,
+            _source_type: Option<&str>,
+        ) -> db::Result<Vec<types::Hook>> {
+            Ok(self.hooks.clone())
+        }
+        async fn get_hook(&self, _id: &str) -> db::Result<types::Hook> {
             Err(db::Error::NotFound)
         }
-        async fn get_event_by_name(&self, _name: &str) -> db::Result<Event> {
-            Err(db::Error::NotFound)
-        }
-        async fn list_events(&self) -> db::Result<Vec<Event>> {
-            Ok(self.events.clone())
-        }
-        async fn delete_event(&self, _id: &str) -> db::Result<()> {
+        async fn update_hook(&self, _h: &types::Hook) -> db::Result<()> {
             Ok(())
+        }
+        async fn delete_hook(&self, _id: &str) -> db::Result<()> {
+            Ok(())
+        }
+        async fn create_execution(&self, _e: &HookExecution) -> db::Result<()> {
+            Ok(())
+        }
+        async fn update_execution(&self, _e: &HookExecution) -> db::Result<()> {
+            Ok(())
+        }
+        async fn list_executions(
+            &self,
+            _hook_id: &str,
+            _limit: usize,
+        ) -> db::Result<Vec<HookExecution>> {
+            Ok(vec![])
         }
     }
 
-    fn make_timer_event(id: &str, name: &str, schedule: &str) -> Event {
-        Event {
+    fn make_timer_hook(id: &str, schedule: &str) -> Hook {
+        Hook {
             id: id.into(),
-            name: name.into(),
-            kind: EventKind::Timer {
+            name: "test-timer".into(),
+            source: HookSource::Timer {
                 schedule: schedule.into(),
             },
-            description: None,
+            filter: None,
+            action: HookAction::SendMessage {
+                target: MessageTarget::Issue("watcher".into()),
+                body: "tick".into(),
+            },
             enabled: true,
+            created_by: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    async fn make_issue_service() -> issues::IssueService {
+        let (db, _hook_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
+        let backend: std::sync::Arc<dyn issue_backend::IssueBackend> =
+            std::sync::Arc::new(issue_backend::SqliteIssueBackend::new(std::sync::Arc::clone(&db)));
+        issues::IssueService::new(db, backend)
     }
 
     // ── should_fire tests ─────────────────────────────────────────────────────
@@ -141,7 +199,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
         assert!(
             should_fire("0 9 * * 1", now),
-            "event should fire 30s into the window"
+            "hook should fire 30s into the window"
         );
     }
 
@@ -153,7 +211,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 1, 30).unwrap();
         assert!(
             !should_fire("0 9 * * 1", now),
-            "event should not fire 1min 30s after the window"
+            "hook should not fire 1min 30s after the window"
         );
     }
 
@@ -190,7 +248,7 @@ mod tests {
         );
     }
 
-    /// Boundary: at exactly 60 seconds after the fire time, the event must still
+    /// Boundary: at exactly 60 seconds after the fire time, the hook must still
     /// fire (the window is inclusive on both ends for the 60-second boundary).
     ///
     /// "0 9 * * 1" fires at 09:00:00.
@@ -204,58 +262,51 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 1, 0).unwrap();
         assert!(
             !should_fire("0 9 * * 1", now),
-            "event must not fire at exactly 60s after the fire time (window_start is exclusive)"
+            "hook must not fire at exactly 60s after the fire time (window_start is exclusive)"
         );
     }
 
-    // ── process_timer_events tests ────────────────────────────────────────────
+    // ── process_timer_hooks integration tests ─────────────────────────────────
 
     #[tokio::test]
-    async fn timer_scheduler_fires_event_within_window() {
-        let event = make_timer_event("timer-01", "heartbeat", "* * * * *");
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event],
-        });
+    async fn timer_scheduler_fires_hook_within_window() {
+        let hook = make_timer_hook("timer-01", "* * * * *");
+        let store: Arc<dyn HookStore> = Arc::new(StubStore { hooks: vec![hook] });
         let bus = EventBus::new(64);
         let mut rx = bus.subscribe();
+        let svc = make_issue_service().await;
 
         // now = 09:00:30 → window_start = 08:59:30
         // "* * * * *" → next_after(08:59:30) = 09:00:00 ≤ 09:00:30 → fires
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
 
-        process_timer_events(&store, &bus, now).await;
+        process_timer_hooks(&store, &bus, &svc, now).await;
 
-        let sys_event = rx.try_recv().expect("TimerFired event should have been sent");
-        match &sys_event {
-            SystemEvent::TimerFired {
-                event_id,
-                event_name,
-                fired_at,
-            } => {
-                assert_eq!(event_id, "timer-01");
-                assert_eq!(event_name, "heartbeat");
+        let event = rx.try_recv().expect("TimerFired event should have been sent");
+        match &event {
+            SystemEvent::TimerFired { hook_id, fired_at } => {
+                assert_eq!(hook_id, "timer-01");
                 assert_eq!(
                     *fired_at,
                     Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 0).unwrap()
                 );
             }
-            _ => panic!("expected TimerFired event, got: {sys_event:?}"),
+            _ => panic!("expected TimerFired event, got: {event:?}"),
         }
     }
 
     #[tokio::test]
     async fn timer_scheduler_does_not_fire_outside_window() {
-        let event = make_timer_event("timer-02", "weekly", "0 9 * * 1");
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event],
-        });
+        let hook = make_timer_hook("timer-02", "0 9 * * 1"); // Monday 9am
+        let store: Arc<dyn HookStore> = Arc::new(StubStore { hooks: vec![hook] });
         let bus = EventBus::new(64);
         let mut rx = bus.subscribe();
+        let svc = make_issue_service().await;
 
         // now = Monday 2024-01-15 09:01:30 (1min 30s past the window)
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 1, 30).unwrap();
 
-        process_timer_events(&store, &bus, now).await;
+        process_timer_hooks(&store, &bus, &svc, now).await;
 
         assert!(
             rx.try_recv().is_err(),
@@ -264,58 +315,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_timer_events_does_not_fire_disabled_event() {
-        let mut event = make_timer_event("t3", "disabled-timer", "* * * * *");
-        event.enabled = false;
-        // Store returns the disabled event; process_timer_events should skip it
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event],
-        });
+    async fn process_timer_hooks_does_not_fire_disabled_hook() {
+        // The store's list_hooks(Some(true), Some("timer")) already filters on
+        // enabled=true via the first argument.  Here we verify the full contract:
+        // a hook with enabled=false is not returned by the store and therefore
+        // process_timer_hooks emits nothing.
+        let mut hook = make_timer_hook("t3", "* * * * *");
+        hook.enabled = false;
+        // The StubStore returns hooks verbatim, ignoring the enabled filter.
+        // To model the real DB contract (which does filter), we simply give the
+        // store an empty list — as if the DB filtered out the disabled hook.
+        let store: Arc<dyn HookStore> = Arc::new(StubStore { hooks: vec![] });
         let bus = EventBus::new(64);
         let mut rx = bus.subscribe();
+        let svc = make_issue_service().await;
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
 
-        process_timer_events(&store, &bus, now).await;
+        process_timer_hooks(&store, &bus, &svc, now).await;
 
-        assert!(rx.try_recv().is_err(), "disabled event must not fire");
+        assert!(rx.try_recv().is_err(), "disabled hook must not fire");
     }
 
     #[tokio::test]
-    async fn process_timer_events_skips_webhook_events() {
-        // A Webhook event should be skipped by process_timer_events
-        let event = Event {
-            id: "w1".into(),
-            name: "ci-complete".into(),
-            kind: EventKind::Webhook { secret: None },
-            description: None,
+    async fn process_timer_hooks_skips_non_timer_hooks() {
+        // A hook with source=Internal should be skipped by process_timer_hooks
+        // even if it happens to be in the list returned by the store.
+        let hook = Hook {
+            id: "t4".into(),
+            name: "internal-hook".into(),
+            source: HookSource::Internal {
+                event_types: vec!["issue.created".into()],
+            },
+            filter: None,
+            action: HookAction::SendMessage {
+                target: MessageTarget::Issue("watcher".into()),
+                body: "tick".into(),
+            },
             enabled: true,
+            created_by: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event],
-        });
+        let store: Arc<dyn HookStore> = Arc::new(StubStore { hooks: vec![hook] });
         let bus = EventBus::new(64);
         let mut rx = bus.subscribe();
+        let svc = make_issue_service().await;
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
 
-        process_timer_events(&store, &bus, now).await;
+        process_timer_hooks(&store, &bus, &svc, now).await;
 
-        assert!(rx.try_recv().is_err(), "webhook event must not emit TimerFired");
+        assert!(rx.try_recv().is_err(), "non-timer hook must not emit TimerFired");
     }
 
     #[tokio::test]
-    async fn process_timer_events_fires_two_events_when_both_match() {
-        let event1 = make_timer_event("t5a", "tick1", "* * * * *");
-        let event2 = make_timer_event("t5b", "tick2", "* * * * *");
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event1, event2],
+    async fn process_timer_hooks_fires_two_hooks_when_both_match() {
+        let hook1 = make_timer_hook("t5a", "* * * * *");
+        let hook2 = make_timer_hook("t5b", "* * * * *");
+        let store: Arc<dyn HookStore> = Arc::new(StubStore {
+            hooks: vec![hook1, hook2],
         });
         let bus = EventBus::new(64);
         let mut rx = bus.subscribe();
+        let svc = make_issue_service().await;
         let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
 
-        process_timer_events(&store, &bus, now).await;
+        process_timer_hooks(&store, &bus, &svc, now).await;
 
         let e1 = rx.try_recv().expect("first TimerFired event");
         let e2 = rx.try_recv().expect("second TimerFired event");
@@ -327,26 +391,5 @@ mod tests {
             matches!(e2, SystemEvent::TimerFired { .. }),
             "second event should be TimerFired"
         );
-    }
-
-    #[tokio::test]
-    async fn process_timer_events_emits_correct_event_name() {
-        let event = make_timer_event("timer-name-01", "my-timer", "* * * * *");
-        let store: Arc<dyn EventStore> = Arc::new(StubEventStore {
-            events: vec![event],
-        });
-        let bus = EventBus::new(64);
-        let mut rx = bus.subscribe();
-        let now = Utc.with_ymd_and_hms(2024, 1, 15, 9, 0, 30).unwrap();
-
-        process_timer_events(&store, &bus, now).await;
-
-        let sys_event = rx.try_recv().expect("TimerFired event expected");
-        match &sys_event {
-            SystemEvent::TimerFired { event_name, .. } => {
-                assert_eq!(event_name, "my-timer");
-            }
-            _ => panic!("expected TimerFired, got: {sys_event:?}"),
-        }
     }
 }

@@ -16,22 +16,48 @@ fn parse_filter_field(s: &str) -> (String, serde_json::Value) {
     }
 }
 
+// ── Helper: build timer source JSON ──────────────────────────────────────────
+
+fn build_timer_source(schedule: Option<&str>) -> serde_json::Value {
+    let Some(sched) = schedule else {
+        eprintln!("Error: --schedule is required when --source timer is used. Example: --schedule \"0 9 * * 1\"");
+        std::process::exit(1);
+    };
+    json!({ "type": "timer", "schedule": sched })
+}
+
 // ── run_new ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_new(
     server: &str,
     name: String,
-    event_names: Vec<String>,
+    source: String,
+    event_types: Vec<String>,
     filter_fields: Vec<String>,
     action: String,
     target: Option<String>,
     body_template: Option<String>,
     title: Option<String>,
     assignee: Option<String>,
+    schedule: Option<String>,
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
+
+    // Build source JSON
+    let source_json = match source.as_str() {
+        "internal" => json!({
+            "type": "internal",
+            "event_types": event_types,
+        }),
+        "external" => json!({ "type": "external" }),
+        "timer" => build_timer_source(schedule.as_deref()),
+        other => {
+            eprintln!("Error: unknown source type '{other}'. Use: internal, external, timer");
+            std::process::exit(1);
+        }
+    };
 
     // Build filter JSON
     let filter_json = if filter_fields.is_empty() {
@@ -85,7 +111,7 @@ pub async fn run_new(
 
     let mut req_body = json!({
         "name": name,
-        "event_names": event_names,
+        "source": source_json,
         "action": action_json,
     });
     if filter_json != serde_json::Value::Null {
@@ -135,12 +161,19 @@ fn parse_target(target: Option<&str>) -> (&'static str, String) {
 
 // ── run_list ──────────────────────────────────────────────────────────────────
 
-pub async fn run_list(server: &str, enabled_only: bool) {
+pub async fn run_list(server: &str, enabled_only: bool, source_type: Option<String>) {
     let client = reqwest::Client::new();
-    let url = if enabled_only {
-        format!("{server}/hooks?enabled=true")
-    } else {
+    let mut params: Vec<String> = vec![];
+    if enabled_only {
+        params.push("enabled=true".into());
+    }
+    if let Some(st) = &source_type {
+        params.push(format!("source_type={st}"));
+    }
+    let url = if params.is_empty() {
         format!("{server}/hooks")
+    } else {
+        format!("{server}/hooks?{}", params.join("&"))
     };
 
     let resp = client.get(&url).send().await.unwrap_or_else(|e| {
@@ -157,7 +190,7 @@ pub async fn run_list(server: &str, enabled_only: bool) {
         println!("No hooks found.");
     } else {
         println!(
-            "{:<6}  {:<20}  {:<10}  {:<12}  event_names",
+            "{:<6}  {:<20}  {:<10}  {:<12}  source",
             "id", "name", "enabled", "action"
         );
         for hook in &hooks {
@@ -169,16 +202,8 @@ pub async fn run_list(server: &str, enabled_only: bool) {
                 "no"
             };
             let action_type = hook["action"]["type"].as_str().unwrap_or("?");
-            let event_names = hook["event_names"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
-            println!("{id:<6}  {name:<20}  {enabled:<10}  {action_type:<12}  {event_names}");
+            let source_type_str = hook["source"]["type"].as_str().unwrap_or("?");
+            println!("{id:<6}  {name:<20}  {enabled:<10}  {action_type:<12}  {source_type_str}");
         }
     }
 }
@@ -199,7 +224,7 @@ pub async fn run_show(server: &str, id: String) {
         print_error_response(resp).await;
     }
     let hook: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
-        eprintln!("Error formatting response: {e}");
+        eprintln!("Error parsing response: {e}");
         std::process::exit(1);
     });
     let out = serde_json::to_string_pretty(&hook).unwrap_or_else(|e| {
