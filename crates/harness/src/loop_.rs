@@ -333,11 +333,11 @@ pub async fn run(
             }
         };
 
-        // Determine the final session status from the stop signal (or default to Waiting).
-        let final_status = match &final_stop_signal {
-            Some(sig) if sig.status == StopStatus::Complete => SessionStatus::Completed,
-            _ => SessionStatus::Waiting,
-        };
+        // Always transition to Waiting regardless of stop signal status.
+        // The stop signal's status (complete/waiting) is forwarded via the Stopped event
+        // for issue watchers to act on (e.g. marking the linked issue Completed),
+        // but the session itself always becomes Waiting so it can be resumed later.
+        let final_status = SessionStatus::Waiting;
 
         // Emit Stopped event before Done so issue watchers can act on it.
         if let Some(sig) = &final_stop_signal {

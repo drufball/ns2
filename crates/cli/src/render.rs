@@ -350,7 +350,6 @@ pub fn session_status_symbol(status: &SessionStatus, tick: usize) -> (String, &'
     match status {
         SessionStatus::Running => (spinner_char(tick).to_string(), "running"),
         SessionStatus::Created => (spinner_char(tick).to_string(), "created"),
-        SessionStatus::Completed => ("✔".to_string(), "completed"),
         SessionStatus::Failed => ("✗".to_string(), "failed"),
         SessionStatus::Cancelled => ("●".to_string(), "cancelled"),
         SessionStatus::Waiting => ("⏸".to_string(), "waiting"),

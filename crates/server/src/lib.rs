@@ -534,7 +534,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/sessions?status=completed")
+                    .uri("/sessions?status=waiting")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -847,7 +847,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -923,7 +923,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1014,7 +1014,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1102,7 +1102,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1210,7 +1210,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1383,7 +1383,7 @@ mod tests {
         let session = Session {
             id: Uuid::new_v4(),
             name: "completed-no-harness".into(),
-            status: SessionStatus::Completed,
+            status: SessionStatus::Waiting,
             agent: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1391,7 +1391,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -2179,15 +2179,15 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let id = created["id"].as_str().unwrap().to_owned();
 
-        let resp = patch_session_status(app, &id, serde_json::json!({"status": "completed"})).await;
+        let resp = patch_session_status(app, &id, serde_json::json!({"status": "waiting"})).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["id"], id, "response must contain the session id");
         assert_eq!(
-            v["status"], "completed",
-            "status must be updated to completed"
+            v["status"], "waiting",
+            "status must be updated to waiting"
         );
     }
 
@@ -2234,7 +2234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_patch_session_status_all_valid_statuses() {
-        for status in ["created", "running", "completed", "failed", "cancelled"] {
+        for status in ["created", "running", "waiting", "failed", "cancelled"] {
             let app = test_app().await;
 
             let create_resp = app
@@ -2392,7 +2392,7 @@ mod tests {
         let state = test_state().await;
 
         let statuses = [
-            SessionStatus::Completed,
+            SessionStatus::Waiting,
             SessionStatus::Cancelled,
             SessionStatus::Created,
             SessionStatus::Failed,

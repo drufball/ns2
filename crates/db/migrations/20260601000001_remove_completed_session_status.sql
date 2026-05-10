@@ -1,0 +1,12 @@
+-- Migration: Remove 'completed' as a valid sessions.status value.
+--
+-- SQLite uses TEXT for sessions.status (no CHECK constraint enforced here),
+-- so no DDL change is required. This migration serves as a marker that
+-- 'completed' is no longer a valid status for new sessions.
+--
+-- Existing rows with status='completed' in the DB are treated as 'waiting'
+-- by the application layer (SessionStatus::Completed was removed from the
+-- Rust enum; the FromStr impl no longer recognises "completed").
+--
+-- Any existing 'completed' sessions should be backfilled to 'waiting':
+UPDATE sessions SET status = 'waiting' WHERE status = 'completed';
