@@ -36,6 +36,7 @@ pub async fn run_new(
     status: Option<String>,
     wait: bool,
     watch: bool,
+    subscribe: Option<String>,
 ) {
     // Validate: --wait requires --status in_progress
     if wait && status.as_deref() != Some("in_progress") {
@@ -83,6 +84,11 @@ pub async fn run_new(
     // If --status was provided, set it now.
     if let Some(ref s) = status {
         run_set_status(server, issue_id.clone(), s.clone()).await;
+    }
+
+    // If --subscribe was provided, create a hook subscription now.
+    if let Some(deliver_to) = subscribe {
+        run_subscribe(server, issue_id.clone(), deliver_to).await;
     }
 
     // If --watch, start streaming SSE events to stderr in the background

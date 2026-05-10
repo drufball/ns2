@@ -859,3 +859,86 @@ fn issue_new_watch_prints_id_to_stdout() {
     let json = h.http_get(&format!("/issues/{id}"));
     assert!(json.contains("\"Watch Issue\""), "issue should be created");
 }
+
+// ─── GH#133: --subscribe flag on `issue new` ─────────────────────────────────
+
+// Scenario D: --subscribe causes a POST to /hooks after POST to /issues
+#[test]
+fn issue_new_subscribe_creates_hook() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    // Capture both stdout lines: issue id on line 1, hook id on line 2
+    let out = h
+        .ns2()
+        .args([
+            "issue", "new", "--title", "Subscribed", "--body", "b", "--subscribe", "issue:ab12",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "issue new --subscribe should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+
+    assert_eq!(lines.len(), 2, "stdout should have 2 lines: hook id and issue id, got: {stdout:?}");
+
+    let hook_id = lines[0].trim();
+    let issue_id = lines[1].trim();
+
+    // Verify the issue was created
+    let issue_json = h.http_get(&format!("/issues/{issue_id}"));
+    assert!(issue_json.contains("\"Subscribed\""), "issue should be created");
+
+    // Verify the hook was created
+    let hooks_json = h.http_get("/hooks");
+    assert!(hooks_json.contains(hook_id), "hook id should appear in hooks list");
+    assert!(
+        hooks_json.contains(&format!("subscribe-{issue_id}")),
+        "hook name should reference the issue id"
+    );
+}
+
+// Scenario E: without --subscribe, only one POST to /issues (no hook created)
+#[test]
+fn issue_new_without_subscribe_creates_no_hook() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    let id = h.ns2_stdout(&["issue", "new", "--title", "No Sub", "--body", "b"]);
+
+    // Verify the issue was created
+    let issue_json = h.http_get(&format!("/issues/{id}"));
+    assert!(issue_json.contains("\"No Sub\""), "issue should be created");
+
+    // stdout should be exactly the issue id (one line), not two lines
+    // We already captured only the id above, verifying no hook id was printed
+
+    // Verify no hooks were created
+    let hooks_json = h.http_get("/hooks");
+    // The hooks list should be empty (no subscribe hook for this issue)
+    assert!(
+        !hooks_json.contains(&format!("subscribe-{id}")),
+        "no hook should be created when --subscribe is absent"
+    );
+}
+
+// Scenario F: --subscribe with invalid target format errors
+#[test]
+fn issue_new_subscribe_invalid_target_format_fails() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    h.ns2()
+        .args([
+            "issue", "new", "--title", "T", "--body", "B", "--subscribe", "bad-format",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'issue:<id>' or 'session:<id>'"));
+}
