@@ -1,8 +1,55 @@
-use events::{SessionEvent, StopEventStatus, SystemEvent};
+use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
 use std::sync::Arc;
 use types::SessionStatus;
 
 use crate::state::AppState;
+
+/// Spawn the global issue-lifecycle subscriber.
+///
+/// This task watches for `IssueEvent::StatusChanged { to: Cancelled }` on the
+/// event bus.  When such an event is received for an issue that has a linked
+/// session, the subscriber:
+///
+/// 1. Removes the session's `msg_sender` from the senders map (terminating
+///    any live harness).
+/// 2. Updates the session's status to `Cancelled` in the DB.
+///
+/// This is called once at server startup, before any connections are accepted.
+pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
+    let mut rx = state.event_bus.subscribe();
+    let msg_senders = Arc::clone(&state.msg_senders);
+    let db = Arc::clone(&state.db);
+
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match rx.recv().await {
+                Ok(SystemEvent::Issue(IssueEvent::StatusChanged {
+                    issue,
+                    to: types::IssueStatus::Cancelled,
+                    ..
+                })) => {
+                    if let Some(session_id) = issue.session_id {
+                        // Remove the sender so the harness exits cleanly.
+                        {
+                            let mut senders = msg_senders.lock().await;
+                            senders.remove(&session_id);
+                        }
+                        // Mark the session cancelled in the DB.
+                        let _ = db
+                            .update_session_status(session_id, SessionStatus::Cancelled)
+                            .await;
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("Issue lifecycle subscriber lagged {n} messages");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
 
 /// Spawn a harness task for the given session and return the mpsc sender that
 /// can be used to deliver messages to it.
@@ -210,6 +257,77 @@ mod tests {
                 fetched.status
             );
         }
+    }
+
+    /// Scenario for Cancelled arm: emitting `IssueEvent::StatusChanged { to: Cancelled }`
+    /// must remove the session's `msg_sender` and mark the session Cancelled in DB.
+    #[tokio::test]
+    async fn test_lifecycle_subscriber_cancel_kills_harness() {
+        let state = crate::tests::test_state().await;
+
+        // Create a session and an issue linked to it.
+        let session = make_session(&state).await;
+        make_running_issue(&state, "lc-c1", "Cancel test").await;
+
+        // Spawn the lifecycle subscriber.
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // Spawn a harness so there's a msg_sender in the map.
+        let _tx = spawn_harness_sync(&state, session.clone(), Some("lc-c1".into()));
+
+        // Give the harness time to register its sender.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Confirm the sender is present before cancellation.
+        {
+            let senders = state.msg_senders.lock().await;
+            let has_key = senders.contains_key(&session.id);
+            drop(senders);
+            assert!(
+                has_key,
+                "msg_sender must be present before cancel"
+            );
+        }
+
+        // Build an issue with the session_id so the event carries it.
+        let issue = {
+            let mut i = state.db.get_issue("lc-c1".to_string()).await.unwrap();
+            i.session_id = Some(session.id);
+            i.status = types::IssueStatus::Cancelled;
+            i
+        };
+
+        // Emit StatusChanged { to: Cancelled }.
+        state.event_bus.send(SystemEvent::Issue(
+            events::IssueEvent::StatusChanged {
+                from: types::IssueStatus::Running,
+                to: types::IssueStatus::Cancelled,
+                issue,
+            },
+        ));
+
+        // Wait for the lifecycle subscriber to process the event.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if !senders.contains_key(&session.id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "msg_sender was not removed within 3s after Cancelled event"
+            );
+        }
+
+        // Verify the session is marked Cancelled in the DB.
+        let db_session = state.db.get_session(session.id).await.unwrap();
+        assert_eq!(
+            db_session.status,
+            SessionStatus::Cancelled,
+            "session must be marked Cancelled in DB after IssueEvent::StatusChanged{{Cancelled}}"
+        );
     }
 
     /// Scenario 7a: Stopped{Complete, comment} then Done → issue Completed with comment.

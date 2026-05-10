@@ -66,6 +66,8 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+use harness_spawn::spawn_issue_lifecycle_subscriber;
+
 /// Spawn the hook evaluator background task for the given state.
 fn spawn_hook_evaluator(state: &AppState) {
     let mut rx = state.event_bus.subscribe();
@@ -184,6 +186,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     // Spawn the hook evaluator background task.
     spawn_hook_evaluator(&state);
+
+    // Spawn the global issue lifecycle subscriber.
+    spawn_issue_lifecycle_subscriber(&state);
 
     // Spawn the timer scheduler background task.
     hooks::timer::spawn_timer_scheduler(&state.hook_store, &state.event_bus, &state.issue_service);
@@ -1613,11 +1618,12 @@ mod tests {
     }
 
     /// Resuming a Waiting session via POST /sessions/:id/messages must spawn
-    /// a harness with the linked issue's ID so the issue watcher is active.
+    /// a harness with the linked issue's ID so the global issue lifecycle
+    /// subscriber can observe session events for that issue.
     ///
     /// When the harness runs and emits Done (without a Stopped event), the
     /// linked issue should transition from Running → Waiting, proving the
-    /// issue watcher was correctly re-spawned.
+    /// issue lifecycle subscriber was correctly reacting to session events.
     #[tokio::test]
     async fn test_waiting_session_resume_via_message_spawns_issue_watcher() {
         let (app, state) = test_app_with_state().await;
@@ -3236,14 +3242,31 @@ mod tests {
         );
     }
 
+    /// Verify that the global issue watcher (spawned via `spawn_harness_sync`) parks
+    /// the issue as Waiting when the session emits Done without a prior Stopped event.
+    ///
+    /// This replaces the old per-session watcher test that directly constructed a
+    /// broadcast channel and an inline watcher loop.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn test_issue_watcher_only_posts_last_turn_text() {
-        use chrono::Utc;
+        // In the new global subscriber pattern:
+        // - Done without Stopped → issue transitions to Waiting, no comment added.
+        // - Stopped{Complete, comment} followed by Done → issue transitions to Completed with comment.
+        // This test verifies the Stopped{Complete, "second turn text"} + Done path
+        // using the real spawn_harness_sync watcher.
 
-        let state = test_state().await;
+        let state = crate::tests::test_state().await;
 
-        let now = chrono::Utc::now();
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "multi-turn-test".into(),
+            status: types::SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
         let issue = types::Issue {
             id: "tt01".to_string(),
             title: "Multi-turn test".to_string(),
@@ -3255,81 +3278,27 @@ mod tests {
             parent_id: None,
             blocked_on: vec![],
             comments: vec![],
-            created_at: now,
-            updated_at: now,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
         state.db.create_issue(&issue).await.unwrap();
 
-        let (tx, _rx) = tokio::sync::broadcast::channel::<SessionEvent>(256);
-        let mut rx = tx.subscribe();
-        let db_watch = Arc::clone(&state.db);
-        let issue_id = "tt01".to_string();
+        let _tx = crate::harness_spawn::spawn_harness_sync(&state, session.clone(), Some("tt01".into()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
-        tokio::spawn(async move {
-            let mut current_turn_text = String::new();
-            let mut last_turn_text = String::new();
-            while let Ok(event) = rx.recv().await {
-                match event {
-                    SessionEvent::ContentBlockDelta {
-                        delta: types::ContentBlockDelta::TextDelta { text },
-                        ..
-                    } => {
-                        current_turn_text.push_str(&text);
-                    }
-                    SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
-                        last_turn_text = std::mem::take(&mut current_turn_text);
-                    }
-                    SessionEvent::Done => {
-                        if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
-                            if !last_turn_text.is_empty() {
-                                let author = issue
-                                    .assignee
-                                    .clone()
-                                    .unwrap_or_else(|| "agent".to_string());
-                                issue.comments.push(IssueComment {
-                                    author,
-                                    created_at: Utc::now(),
-                                    body: last_turn_text.clone(),
-                                });
-                            }
-                            issue.status = IssueStatus::Completed;
-                            issue.updated_at = Utc::now();
-                            let _ = db_watch.update_issue(&issue).await;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
+        // Emit Stopped{Complete, "second turn text"} to simulate the agent calling
+        // stop with a summary comment, then Done.
+        state.event_bus.send(events::SystemEvent::Session {
+            session_id: session.id,
+            event: events::SessionEvent::Stopped {
+                status: events::StopEventStatus::Complete,
+                comment: Some("second turn text".into()),
+            },
         });
-
-        let _session_id = Uuid::new_v4();
-        let turn_id1 = Uuid::new_v4();
-        let turn_id2 = Uuid::new_v4();
-
-        tx.send(SessionEvent::ContentBlockDelta {
-            turn_id: turn_id1,
-            index: 0,
-            delta: types::ContentBlockDelta::TextDelta {
-                text: "first turn text".into(),
-            },
-        })
-        .unwrap();
-        tx.send(SessionEvent::TurnDone { turn_id: turn_id1 })
-            .unwrap();
-
-        tx.send(SessionEvent::ContentBlockDelta {
-            turn_id: turn_id2,
-            index: 0,
-            delta: types::ContentBlockDelta::TextDelta {
-                text: "second turn text".into(),
-            },
-        })
-        .unwrap();
-        tx.send(SessionEvent::TurnDone { turn_id: turn_id2 })
-            .unwrap();
-
-        tx.send(SessionEvent::Done).unwrap();
+        state.event_bus.send(events::SystemEvent::Session {
+            session_id: session.id,
+            event: events::SessionEvent::Done,
+        });
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
         loop {
@@ -3340,23 +3309,91 @@ mod tests {
             }
             assert!(
                 tokio::time::Instant::now() <= deadline,
-                "issue did not complete within 3s"
+                "issue did not complete within 3s (current: {})",
+                fetched.status
             );
         }
 
         let fetched = state.db.get_issue("tt01".to_string()).await.unwrap();
-
+        assert_eq!(fetched.status, IssueStatus::Completed);
         assert_eq!(fetched.comments.len(), 1, "expected exactly 1 comment");
         let comment = &fetched.comments[0];
         assert_eq!(comment.author, "bot");
         assert_eq!(
             comment.body, "second turn text",
-            "comment must contain only the last turn text; got: '{}'",
+            "comment must contain the Stopped comment text; got: '{}'",
             comment.body
         );
+    }
+
+    /// Verify that the global issue watcher (spawned via `spawn_harness_sync`) parks
+    /// the issue as Waiting with no comment when Done is received without a Stopped event.
+    ///
+    /// This replaces the old per-session watcher test that directly constructed
+    /// a broadcast channel and an inline watcher loop.
+    #[tokio::test]
+    async fn test_issue_watcher_no_comment_when_no_text_content() {
+        let state = crate::tests::test_state().await;
+
+        let session = types::Session {
+            id: Uuid::new_v4(),
+            name: "no-comment-test".into(),
+            status: types::SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "nt01".to_string(),
+            title: "No text test".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let _tx = crate::harness_spawn::spawn_harness_sync(
+            &state,
+            session.clone(),
+            Some("nt01".into()),
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Emit Done without a preceding Stopped event.
+        state.event_bus.send(events::SystemEvent::Session {
+            session_id: session.id,
+            event: events::SessionEvent::Done,
+        });
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue did not become Waiting within 3s (current: {})",
+                fetched.status
+            );
+        }
+
+        let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
+        assert_eq!(fetched.status, IssueStatus::Waiting);
         assert!(
-            !comment.body.contains("first turn text"),
-            "comment must NOT contain first turn text"
+            fetched.comments.is_empty(),
+            "expected no comments when Done is emitted without Stopped, got: {:?}",
+            fetched.comments
         );
     }
 
@@ -3762,100 +3799,6 @@ mod tests {
             "GET /issues/:id response must include 'branch' field"
         );
         assert_eq!(v["branch"], "feature/xyz");
-    }
-
-    #[tokio::test]
-    async fn test_issue_watcher_no_comment_when_no_text_content() {
-        use chrono::Utc;
-
-        let state = test_state().await;
-
-        let now = chrono::Utc::now();
-        let issue = types::Issue {
-            id: "nt01".to_string(),
-            title: "No text test".to_string(),
-            body: "body".to_string(),
-            status: IssueStatus::Running,
-            branch: String::new(),
-            assignee: Some("bot".to_string()),
-            session_id: None,
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: now,
-            updated_at: now,
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        let (tx, _rx) = tokio::sync::broadcast::channel::<SessionEvent>(256);
-        let mut rx = tx.subscribe();
-        let db_watch = Arc::clone(&state.db);
-        let issue_id = "nt01".to_string();
-
-        tokio::spawn(async move {
-            let mut current_turn_text = String::new();
-            let mut last_turn_text = String::new();
-            while let Ok(event) = rx.recv().await {
-                match event {
-                    SessionEvent::ContentBlockDelta {
-                        delta: types::ContentBlockDelta::TextDelta { text },
-                        ..
-                    } => {
-                        current_turn_text.push_str(&text);
-                    }
-                    SessionEvent::TurnDone { .. } if !current_turn_text.is_empty() => {
-                        last_turn_text = std::mem::take(&mut current_turn_text);
-                    }
-                    SessionEvent::Done => {
-                        if let Ok(mut issue) = db_watch.get_issue(issue_id.clone()).await {
-                            if !last_turn_text.is_empty() {
-                                let author = issue
-                                    .assignee
-                                    .clone()
-                                    .unwrap_or_else(|| "agent".to_string());
-                                issue.comments.push(IssueComment {
-                                    author,
-                                    created_at: Utc::now(),
-                                    body: last_turn_text.clone(),
-                                });
-                            }
-                            issue.status = IssueStatus::Completed;
-                            issue.updated_at = Utc::now();
-                            let _ = db_watch.update_issue(&issue).await;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        let _session_id = Uuid::new_v4();
-        let turn_id = Uuid::new_v4();
-
-        tx.send(SessionEvent::TurnDone { turn_id }).unwrap();
-        tx.send(SessionEvent::Done).unwrap();
-
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
-            if fetched.status == IssueStatus::Completed {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not complete within 3s"
-            );
-        }
-
-        let fetched = state.db.get_issue("nt01".to_string()).await.unwrap();
-        assert_eq!(fetched.status, IssueStatus::Completed);
-        assert!(
-            fetched.comments.is_empty(),
-            "expected no comments when session has no text content, got: {:?}",
-            fetched.comments
-        );
     }
 
     // ─── /hooks CRUD integration tests ───────────────────────────────────────

@@ -5,6 +5,44 @@ use std::sync::Arc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
 
+/// Build the initial message sent to the agent when a session starts for an issue.
+///
+/// Format:
+/// ```text
+/// <title>
+///
+/// <body>
+/// ```
+/// When the issue has comments, a `# Issue History` section is appended:
+/// ```text
+/// <title>
+///
+/// <body>
+///
+/// ---
+/// # Issue History
+///
+/// **<author>** (<timestamp>): <body>
+/// ...
+/// ```
+#[must_use]
+pub fn build_initial_message(issue: &types::Issue) -> String {
+    let mut msg = format!("{}\n\n{}", issue.title, issue.body);
+    if !issue.comments.is_empty() {
+        msg.push_str("\n\n---\n# Issue History\n");
+        for comment in &issue.comments {
+            let _ = writeln!(
+                msg,
+                "\n**{}** ({}): {}",
+                comment.author,
+                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
+                comment.body
+            );
+        }
+    }
+    msg
+}
+
 #[must_use]
 pub fn slugify(title: &str) -> String {
     let lower = title.to_lowercase();
@@ -351,19 +389,7 @@ impl IssueService {
                 to: IssueStatus::Running,
             }));
 
-        let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
-        if !issue.comments.is_empty() {
-            initial_message.push_str("\n\n---\n# Issue History\n");
-            for comment in &issue.comments {
-                let _ = writeln!(
-                    initial_message,
-                    "\n**{}** ({}): {}",
-                    comment.author,
-                    comment.created_at.format("%Y-%m-%d %H:%M UTC"),
-                    comment.body
-                );
-            }
-        }
+        let initial_message = build_initial_message(&issue);
 
         Ok(StartIssueOutcome {
             issue,
@@ -1477,6 +1503,92 @@ mod tests {
 
         assert_eq!(result.status, IssueStatus::Open);
         assert!(result.session_id.is_none());
+    }
+
+    // --- build_initial_message ---
+
+    fn make_issue_for_message(title: &str, body: &str, comments: Vec<IssueComment>) -> Issue {
+        let now = Utc::now();
+        Issue {
+            id: "ab12".into(),
+            title: title.into(),
+            body: body.into(),
+            status: IssueStatus::Open,
+            branch: String::new(),
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn build_initial_message_no_comments_is_title_newline_body() {
+        let issue = make_issue_for_message("My Title", "My Body", vec![]);
+        let msg = build_initial_message(&issue);
+        assert_eq!(
+            msg, "My Title\n\nMy Body",
+            "with no comments, message must be exactly 'title\\n\\nbody'"
+        );
+        assert!(
+            !msg.contains("Issue History"),
+            "no comments → no '# Issue History' section"
+        );
+    }
+
+    #[test]
+    fn build_initial_message_with_comments_includes_history_section() {
+        let comment = IssueComment {
+            author: "comment author".into(),
+            created_at: Utc::now(),
+            body: "comment body text".into(),
+        };
+        let issue = make_issue_for_message("PM Task", "Do the thing", vec![comment]);
+        let msg = build_initial_message(&issue);
+
+        assert!(
+            msg.starts_with("PM Task\n\nDo the thing"),
+            "message must start with title\\n\\nbody, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("# Issue History"),
+            "message must contain '# Issue History', got: {msg:?}"
+        );
+        assert!(
+            msg.contains("comment body text"),
+            "message must contain comment body, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("comment author"),
+            "message must contain comment author, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn build_initial_message_with_multiple_comments_includes_all() {
+        let comments = vec![
+            IssueComment {
+                author: "alice".into(),
+                created_at: Utc::now(),
+                body: "first comment".into(),
+            },
+            IssueComment {
+                author: "system".into(),
+                created_at: Utc::now(),
+                body: "session lost on server restart".into(),
+            },
+        ];
+        let issue = make_issue_for_message("Multi-comment", "body", comments);
+        let msg = build_initial_message(&issue);
+
+        assert!(msg.contains("# Issue History"));
+        assert!(msg.contains("alice"));
+        assert!(msg.contains("first comment"));
+        assert!(msg.contains("system"));
+        assert!(msg.contains("session lost on server restart"));
     }
 
     // --- slugify ---
