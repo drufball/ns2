@@ -5033,5 +5033,251 @@ mod tests {
             "session must be marked Cancelled in DB"
         );
     }
+
+    // ─── /named-events route integration tests ────────────────────────────────
+
+    fn named_event_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_returns_201() {
+        let (app, _state) = test_app_with_state().await;
+        let resp = app
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "ci-complete",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["name"], "ci-complete");
+        // id should be 4 characters
+        let id = v["id"].as_str().unwrap();
+        assert_eq!(id.len(), 4, "event id should be 4 chars, got: {id}");
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_timer_invalid_schedule_returns_400() {
+        let (app, _state) = test_app_with_state().await;
+        let resp = app
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "bad-timer",
+                    "kind": { "type": "timer", "schedule": "not-valid" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid cron schedule should return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("invalid cron schedule"),
+            "error message should mention invalid cron schedule, got: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_named_events_returns_created_event() {
+        let (app, _state) = test_app_with_state().await;
+
+        // Create an event
+        app.clone()
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "deploy-done",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+
+        // List events
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/named-events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let events: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = events.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "should have exactly 1 event");
+        assert_eq!(arr[0]["name"], "deploy-done");
+    }
+
+    #[tokio::test]
+    async fn test_get_named_event_by_id() {
+        let (app, _state) = test_app_with_state().await;
+
+        // Create an event
+        let create_resp = app
+            .clone()
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "push-event",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let create_body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+        let event_id = created["id"].as_str().unwrap().to_string();
+
+        // GET /named-events/:id
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/named-events/{event_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "GET by id should return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"], event_id.as_str());
+        assert_eq!(v["name"], "push-event");
+    }
+
+    #[tokio::test]
+    async fn test_get_named_event_not_found() {
+        let (app, _state) = test_app_with_state().await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/named-events/no-such-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "GET on nonexistent id should return 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_named_event() {
+        let (app, _state) = test_app_with_state().await;
+
+        // Create an event
+        let create_resp = app
+            .clone()
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "to-be-deleted",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+        let create_body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+        let event_id = created["id"].as_str().unwrap().to_string();
+
+        // DELETE /named-events/:id
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/named-events/{event_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            del_resp.status(),
+            StatusCode::NO_CONTENT,
+            "DELETE should return 204"
+        );
+
+        // GET /named-events should return empty list
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/named-events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = response_body_bytes(list_resp).await;
+        let events: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+        let arr = events.as_array().unwrap();
+        assert!(arr.is_empty(), "list should be empty after delete");
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_duplicate_name_returns_error() {
+        let (app, _state) = test_app_with_state().await;
+
+        let payload = serde_json::json!({
+            "name": "duplicate-name",
+            "kind": { "type": "webhook" }
+        });
+
+        // First creation should succeed
+        let first_resp = app
+            .clone()
+            .oneshot(named_event_req("POST", "/named-events", &payload))
+            .await
+            .unwrap();
+        assert_eq!(first_resp.status(), StatusCode::CREATED);
+
+        // Second creation with the same name should fail
+        let second_resp = app
+            .oneshot(named_event_req("POST", "/named-events", &payload))
+            .await
+            .unwrap();
+        assert!(
+            second_resp.status().is_server_error() || second_resp.status().is_client_error(),
+            "duplicate name should return an error status, got: {}",
+            second_resp.status()
+        );
+    }
 }
 

@@ -3139,4 +3139,140 @@ mod tests {
             _ => panic!("expected issue new command"),
         }
     }
+
+    // ─── `ns2 event` CLI parse tests ─────────────────────────────────────────
+
+    #[test]
+    fn event_new_webhook_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "event",
+            "new",
+            "ci-complete",
+            "--type",
+            "webhook",
+            "--secret",
+            "abc123",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Event {
+                action:
+                    EventSubcommand::New {
+                        name,
+                        event_type,
+                        secret,
+                        schedule,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "ci-complete");
+                assert_eq!(event_type, "webhook");
+                assert_eq!(secret.as_deref(), Some("abc123"));
+                assert!(schedule.is_none());
+            }
+            _ => panic!("expected event new command"),
+        }
+    }
+
+    #[test]
+    fn event_new_timer_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "event",
+            "new",
+            "heartbeat",
+            "--type",
+            "timer",
+            "--schedule",
+            "* * * * *",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Event {
+                action:
+                    EventSubcommand::New {
+                        name,
+                        event_type,
+                        schedule,
+                        secret,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "heartbeat");
+                assert_eq!(event_type, "timer");
+                assert_eq!(schedule.as_deref(), Some("* * * * *"));
+                assert!(secret.is_none());
+            }
+            _ => panic!("expected event new command"),
+        }
+    }
+
+    #[test]
+    fn event_new_webhook_no_secret() {
+        let cli =
+            Cli::try_parse_from(["ns2", "event", "new", "mywebhook", "--type", "webhook"])
+                .unwrap();
+        match cli.command {
+            Command::Event {
+                action:
+                    EventSubcommand::New {
+                        name,
+                        event_type,
+                        secret,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "mywebhook");
+                assert_eq!(event_type, "webhook");
+                assert!(secret.is_none(), "secret should be None when not provided");
+            }
+            _ => panic!("expected event new command"),
+        }
+    }
+
+    #[test]
+    fn event_list_parses() {
+        let cli = Cli::try_parse_from(["ns2", "event", "list"]).unwrap();
+        assert!(
+            matches!(
+                cli.command,
+                Command::Event {
+                    action: EventSubcommand::List
+                }
+            ),
+            "expected event list command"
+        );
+    }
+
+    #[test]
+    fn event_delete_parses() {
+        let cli = Cli::try_parse_from(["ns2", "event", "delete", "--id", "e001"]).unwrap();
+        match cli.command {
+            Command::Event {
+                action: EventSubcommand::Delete { id },
+            } => {
+                assert_eq!(id, "e001");
+            }
+            _ => panic!("expected event delete command"),
+        }
+    }
+
+    #[test]
+    fn event_delete_missing_id_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "event", "delete"]);
+        assert!(
+            result.is_err(),
+            "event delete without --id should fail to parse"
+        );
+    }
+
+    #[test]
+    fn event_new_missing_type_fails_to_parse() {
+        let result = Cli::try_parse_from(["ns2", "event", "new", "mywebhook"]);
+        assert!(
+            result.is_err(),
+            "event new without --type should fail to parse"
+        );
+    }
 }

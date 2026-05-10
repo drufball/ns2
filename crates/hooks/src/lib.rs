@@ -915,6 +915,43 @@ mod tests {
         );
     }
 
+    // ─── generate_event_id tests ──────────────────────────────────────────────
+
+    #[test]
+    fn generate_event_id_is_4_chars() {
+        let id = generate_event_id();
+        assert_eq!(id.len(), 4, "event id should be exactly 4 chars, got: {id}");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "event id should be lowercase alphanumeric, got: {id}"
+        );
+    }
+
+    #[test]
+    fn generate_event_id_is_lowercase_alphanumeric() {
+        for _ in 0..100 {
+            let id = generate_event_id();
+            for ch in id.chars() {
+                assert!(
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit(),
+                    "char '{ch}' in event id '{id}' is not lowercase alphanumeric"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generate_event_id_is_unique() {
+        let ids: std::collections::HashSet<String> =
+            (0..100).map(|_| generate_event_id()).collect();
+        assert!(
+            ids.len() > 90,
+            "expected > 90 unique event ids out of 100 generated, got: {}",
+            ids.len()
+        );
+    }
+
     // ── execute module tests ──────────────────────────────────────────────────
 
     mod execute_tests {

@@ -2188,6 +2188,62 @@ mod tests {
         assert!(!fetched.enabled, "disabled event should round-trip as false");
     }
 
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_kind_type_str_webhook_stored_correctly(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool.clone());
+        let event = types::Event {
+            id: "w-ktype-1".into(),
+            name: "webhook-event".into(),
+            kind: types::EventKind::Webhook { secret: None },
+            description: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.create_event(&event).await.unwrap();
+
+        // Read the raw kind_type column directly from SQLite
+        let row: (String,) = sqlx::query_as("SELECT kind_type FROM events WHERE id = ?")
+            .bind("w-ktype-1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.0, "webhook",
+            "webhook kind_type should be stored as 'webhook', got: {}",
+            row.0
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_event_kind_type_str_timer_stored_correctly(pool: SqlitePool) {
+        let store = SqliteEventStore::new(pool.clone());
+        let event = types::Event {
+            id: "t-ktype-1".into(),
+            name: "timer-event".into(),
+            kind: types::EventKind::Timer {
+                schedule: "* * * * *".into(),
+            },
+            description: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.create_event(&event).await.unwrap();
+
+        // Read the raw kind_type column directly from SQLite
+        let row: (String,) = sqlx::query_as("SELECT kind_type FROM events WHERE id = ?")
+            .bind("t-ktype-1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.0, "timer",
+            "timer kind_type should be stored as 'timer', got: {}",
+            row.0
+        );
+    }
+
     #[tokio::test]
     async fn test_connect_returns_triple_with_usable_event_store() {
         let (_db, _hook_store, event_store) = connect("sqlite::memory:").await.unwrap();
