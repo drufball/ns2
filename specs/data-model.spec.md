@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-05-09T06:29:20Z
+verified: 2026-05-10T11:07:44Z
 ---
 
 # Data Model Spec
@@ -21,7 +21,7 @@ SQLite via sqlx. The `db` crate owns all schema and migrations — nothing outsi
 | `id` | TEXT PK | UUID |
 | `name` | TEXT | human-readable label |
 | `agent` | TEXT | optional; maps to `.ns2/agents/<name>.md` |
-| `status` | TEXT | `created`, `running`, `completed`, `failed`, `cancelled`, `waiting` |
+| `status` | TEXT | `created`, `running`, `waiting`, `failed`, `cancelled` |
 | `created_at` | INTEGER | unix timestamp |
 | `updated_at` | INTEGER | unix timestamp |
 

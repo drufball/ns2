@@ -5,7 +5,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
 severity: warning
-verified: 2026-05-09T06:32:48Z
+verified: 2026-05-10T11:07:49Z
 ---
 
 # Agent Sessions Spec
@@ -26,20 +26,20 @@ Sessions are managed primarily through the CLI (`ns2 issue start`, `ns2 issue wa
 ## Lifecycle
 
 ```
-created → running → [waiting → running → ... →] completed | failed | cancelled
+created → running → [waiting → running → ... →] waiting | failed | cancelled
 ```
 
 - **created**: session record written, agent task not yet spawned
 - **running**: agent turn loop active in background
-- **waiting**: agent has flagged it needs input; loop is paused
-- **completed/failed/cancelled**: terminal states; history retained
+- **waiting**: agent finished its turn (whether it called `stop(complete)`, `stop(waiting)`, or neither); loop is paused, resumable via new message
+- **failed/cancelled**: terminal states; history retained
 - **retry:** failed sessions resume from the last completed turn, not from the beginning
 
 ## State & Persistence
 
 - **SQLite:** source of truth. Session metadata, status, full turn + message history, tool call results. A fresh harness can reconstruct the complete conversation from the DB with no in-memory dependency.
 - **In-memory:** active tokio task handle per running session, SSE broadcast channel per session. These are ephemeral — dropped on harness exit or server restart.
-- Server is stateless except for SSE channels — on restart, orphaned `running` sessions are swept to `failed` and can be reopened; `completed` sessions remain intact and accept new messages by spawning a fresh harness that loads history from SQLite.
+- Server is stateless except for SSE channels — on restart, orphaned `running` sessions are swept to `failed` and can be reopened; `waiting` sessions remain intact and accept new messages by spawning a fresh harness that loads history from SQLite.
 
 ## Concurrency
 

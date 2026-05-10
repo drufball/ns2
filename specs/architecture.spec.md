@@ -2,7 +2,7 @@
 targets:
   - Cargo.toml
   - crates/*/Cargo.toml
-verified: 2026-05-09T06:29:22Z
+verified: 2026-05-10T11:07:49Z
 ---
 
 # Architecture Spec
@@ -71,7 +71,7 @@ _Doesn't own: session or turn state._
 **`harness`** — agent turn loop. Context window construction, system prompt loading, tool dispatch, worktree resolution. Publishes `SystemEvent::Session` events to the `EventBus`; one instance per active session.
 _Doesn't own: issue lifecycle or state transitions — that's `issues`. No HTTP._
 
-**`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/cancelled), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`.
+**`issues`** — pure issue domain service. Owns the state machine (open → running → completed/failed/waiting), `start_issue`, `complete_issue`, `reopen_issue`, `orphan_sweep`. Publishes `SystemEvent::Issue` events to the `EventBus`. Exposes `IssueService` and `StartIssueOutcome`.
 _Doesn't own: HTTP routing, harness spawning, or session maps — those belong in `server`._
 
 **`hooks`** — hook types, filter evaluation, action dispatch, and timer scheduling. Defines `Hook`, `HookSource` (internal/external/timer), `HookAction` (SendMessage/CreateIssue/RunShell), and `HookFilter` (field conditions). Modules: `evaluate` (event matching), `execute` (action dispatch), `template` (minijinja rendering), `cron` (5-field cron → next fire time via the `cron` crate), and `timer` (`process_timer_hooks` + `spawn_timer_scheduler` background loop). A hook evaluator in `server` subscribes to the `EventBus` and dispatches actions when filters match; a separate timer scheduler polls on a 30-second interval.

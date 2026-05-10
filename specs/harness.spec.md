@@ -2,7 +2,7 @@
 targets:
   - crates/harness/src/**/*.rs
   - crates/tools/src/**/*.rs
-verified: 2026-05-09T06:32:51Z
+verified: 2026-05-10T11:07:49Z
 ---
 
 # harness crate
@@ -35,10 +35,9 @@ The harness runs `run_tool_dispatch_loop` in a loop until `end_turn` is received
 1. Checks the stop channel for a `StopSignal` sent by the `StopTool` during the preceding tool calls.
 2. Runs Stop hooks; if any exit non-zero, injects their stdout as a new user message and re-enters the loop.
 3. Determines the final `SessionStatus`:
-   - `stop(complete)` was called → `SessionStatus::Completed`
-   - `stop(waiting)` was called, or no `stop` call at all → `SessionStatus::Waiting`
-4. If a stop signal was received, emits `SessionEvent::Stopped { status, comment }` on the broadcast channel.
-5. Writes the final `SessionStatus` to the DB and emits `SessionEvent::Done`.
+   - Always `SessionStatus::Waiting`, regardless of whether `stop(complete)`, `stop(waiting)`, or no `stop` was called.
+4. If a stop signal was received, emits `SessionEvent::Stopped { status, comment }` on the broadcast channel. The `status` field preserves the agent's intent (`Complete` or `Waiting`) so the issue watcher can act on it (e.g. mark the linked issue `Completed`). The session itself always ends as `Waiting`.
+5. Writes `SessionStatus::Waiting` to the DB and emits `SessionEvent::Done`.
 
 ## StopTool
 
@@ -51,8 +50,8 @@ The `stop` tool is auto-injected by the harness at startup (not configurable via
 }
 ```
 
-- **`complete`** — task is done; session becomes `Completed`, linked issue becomes `Completed`.
-- **`waiting`** — agent needs human input; session becomes `Waiting`, linked issue becomes `Waiting`.
+- **`complete`** — task is done; the session ends as `Waiting` and the linked issue becomes `Completed` (driven by the `SessionEvent::Stopped` the issue watcher receives).
+- **`waiting`** — agent needs human input; the session ends as `Waiting` and the linked issue becomes `Waiting`.
 
 When the agent calls `stop`, the tool sends a `StopSignal` over an internal `mpsc` channel. The harness reads it after `end_turn` via `try_recv`. If the agent calls `stop` multiple times in a turn, only the last signal is used.
 
