@@ -769,7 +769,8 @@ async fn main() {
                 commands::issue::run_watch(&cli.server, id).await;
             }
             IssueAction::Subscribe { id, deliver_to } => {
-                commands::issue::run_subscribe(&cli.server, id, deliver_to).await;
+                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true)
+                    .await;
             }
         },
         Command::Hook { action } => match action {
