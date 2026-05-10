@@ -72,7 +72,6 @@ pub struct Issue {
 pub enum SessionStatus {
     Created,
     Running,
-    Completed,
     Failed,
     Cancelled,
     Waiting,
@@ -83,7 +82,6 @@ impl std::fmt::Display for SessionStatus {
         match self {
             Self::Created => write!(f, "created"),
             Self::Running => write!(f, "running"),
-            Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Waiting => write!(f, "waiting"),
@@ -97,7 +95,6 @@ impl std::str::FromStr for SessionStatus {
         match s {
             "created" => Ok(Self::Created),
             "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             "waiting" => Ok(Self::Waiting),
@@ -299,11 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn session_status_display_completed() {
-        assert_eq!(SessionStatus::Completed.to_string(), "completed");
-    }
-
-    #[test]
     fn session_status_display_failed() {
         assert_eq!(SessionStatus::Failed.to_string(), "failed");
     }
@@ -320,7 +312,6 @@ mod tests {
         for status in [
             SessionStatus::Created,
             SessionStatus::Running,
-            SessionStatus::Completed,
             SessionStatus::Failed,
             SessionStatus::Cancelled,
             SessionStatus::Waiting,

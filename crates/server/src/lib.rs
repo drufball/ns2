@@ -534,7 +534,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/sessions?status=completed")
+                    .uri("/sessions?status=waiting")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -833,9 +833,11 @@ mod tests {
     // --- terminal session history includes SessionDone ---
 
     #[tokio::test]
-    async fn test_completed_session_events_includes_session_done() {
+    async fn test_waiting_session_events_includes_session_done() {
         let (app, state) = test_app_with_state().await;
 
+        // A session in Waiting status (previously ended a turn) should have a
+        // SessionDone event in its history so clients can observe the turn boundary.
         let session = Session {
             id: Uuid::new_v4(),
             name: "done-test".into(),
@@ -847,7 +849,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -879,7 +881,7 @@ mod tests {
         });
         assert!(
             has_session_done,
-            "completed session events must include SessionDone"
+            "waiting session events must include SessionDone"
         );
     }
 
@@ -923,7 +925,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1014,7 +1016,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1102,7 +1104,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1210,7 +1212,7 @@ mod tests {
 
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1325,14 +1327,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_completed_session_sender_still_alive() {
+    async fn test_waiting_session_sender_still_alive() {
         let (app, state) = test_app_with_state().await;
 
         let create_resp = app
             .clone()
             .oneshot(create_session_req(&serde_json::json!({
-                "name": "completed-test",
-                "initial_message": "run and complete"
+                "name": "waiting-test",
+                "initial_message": "run and wait"
             })))
             .await
             .unwrap();
@@ -1372,18 +1374,20 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "completed session must accept follow-up messages and return 200"
+            "waiting session must accept follow-up messages and return 200"
         );
     }
 
     #[tokio::test]
-    async fn test_send_message_to_completed_session_returns_200() {
+    async fn test_send_message_to_waiting_session_returns_200() {
         let (app, state) = test_app_with_state().await;
 
+        // A Waiting session has no active harness but can accept new messages —
+        // the server should spawn a fresh harness and return 200.
         let session = Session {
             id: Uuid::new_v4(),
-            name: "completed-no-harness".into(),
-            status: SessionStatus::Completed,
+            name: "waiting-no-harness".into(),
+            status: SessionStatus::Waiting,
             agent: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1391,7 +1395,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
         state
             .db
-            .update_session_status(session.id, SessionStatus::Completed)
+            .update_session_status(session.id, SessionStatus::Waiting)
             .await
             .unwrap();
 
@@ -1418,7 +1422,7 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "completed session with no active sender must return 200 OK (fresh harness spawned)"
+            "waiting session with no active sender must return 200 OK (fresh harness spawned)"
         );
     }
 
@@ -1508,6 +1512,98 @@ mod tests {
             "cancelled session must not accept messages; expected non-2xx, got {status}"
         );
 
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "response body must contain an 'error' field, got: {v}"
+        );
+    }
+
+    // --- cancel_session on already-terminal sessions returns 400 ---
+
+    #[tokio::test]
+    async fn test_cancel_already_failed_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a session and set it to Failed — a terminal state.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "failed-cancel-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Failed)
+            .await
+            .unwrap();
+
+        // POST /sessions/:id/cancel on an already-Failed session must return 400.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/cancel", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "cancelling an already-failed session must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["error"].is_string(),
+            "response body must contain an 'error' field, got: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_already_cancelled_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create a session and set it to Cancelled — a terminal state.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "cancelled-cancel-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+        state
+            .db
+            .update_session_status(session.id, SessionStatus::Cancelled)
+            .await
+            .unwrap();
+
+        // POST /sessions/:id/cancel on an already-Cancelled session must return 400.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/cancel", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "cancelling an already-cancelled session must return 400"
+        );
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
@@ -2179,15 +2275,15 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let id = created["id"].as_str().unwrap().to_owned();
 
-        let resp = patch_session_status(app, &id, serde_json::json!({"status": "completed"})).await;
+        let resp = patch_session_status(app, &id, serde_json::json!({"status": "waiting"})).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["id"], id, "response must contain the session id");
         assert_eq!(
-            v["status"], "completed",
-            "status must be updated to completed"
+            v["status"], "waiting",
+            "status must be updated to waiting"
         );
     }
 
@@ -2234,7 +2330,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_patch_session_status_all_valid_statuses() {
-        for status in ["created", "running", "completed", "failed", "cancelled"] {
+        for status in ["created", "running", "waiting", "failed", "cancelled"] {
             let app = test_app().await;
 
             let create_resp = app
@@ -2392,7 +2488,7 @@ mod tests {
         let state = test_state().await;
 
         let statuses = [
-            SessionStatus::Completed,
+            SessionStatus::Waiting,
             SessionStatus::Cancelled,
             SessionStatus::Created,
             SessionStatus::Failed,

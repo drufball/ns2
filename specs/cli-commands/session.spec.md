@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/commands/session.rs
-verified: 2026-05-09T06:32:58Z
+verified: 2026-05-10T11:07:49Z
 ---
 
 # ns2 session
@@ -14,7 +14,7 @@ A session moves through these states in order:
 
 - **created** — session exists but no message sent yet; agent not started
 - **running** — agent is active and processing messages
-- **completed** / **failed** / **cancelled** — terminal states
+- **waiting** / **failed** / **cancelled** — terminal states
 
 ## When to use session commands directly
 

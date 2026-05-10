@@ -130,14 +130,13 @@ pub async fn send_message(
         other => Error::Db(other),
     })?;
 
-    // For `created`, `running`, and `completed` sessions, spawn a harness (if not already
-    // running) and deliver the message. `completed` sessions resume from full DB history
-    // so no in-memory state is required.
+    // For `created` and `running` sessions, spawn a harness (if not already
+    // running) and deliver the message.
     //
     // Guard against two concurrent requests both reaching the spawn path simultaneously
     // using the `spawning` set as an atomic "already in flight" guard.
     match session.status {
-        SessionStatus::Created | SessionStatus::Running | SessionStatus::Completed => {
+        SessionStatus::Created | SessionStatus::Running => {
             // Acquire both locks together to make the check-then-act atomic.
             let mut spawning = state.spawning.lock().await;
             let senders = state.msg_senders.lock().await;
@@ -266,7 +265,7 @@ pub async fn cancel_session(
     })?;
 
     match session.status {
-        SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled => {
+        SessionStatus::Failed | SessionStatus::Cancelled => {
             return Err(Error::BadRequest(format!(
                 "session is already in terminal state: {}",
                 session.status

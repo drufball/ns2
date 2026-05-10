@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const fn session_is_terminal(status: &SessionStatus) -> bool {
     matches!(
         status,
-        SessionStatus::Completed | SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Waiting
+        SessionStatus::Failed | SessionStatus::Cancelled | SessionStatus::Waiting
     )
 }
 
@@ -319,11 +319,6 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 mod tests {
     use super::*;
     use types::SessionStatus;
-
-    #[test]
-    fn session_is_terminal_completed() {
-        assert!(session_is_terminal(&SessionStatus::Completed));
-    }
 
     #[test]
     fn session_is_terminal_failed() {

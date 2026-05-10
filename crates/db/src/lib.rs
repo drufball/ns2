@@ -1105,7 +1105,7 @@ mod tests {
     async fn test_update_session_status_not_found(pool: SqlitePool) {
         let db = SqliteDb::from_pool(pool);
         let result = db
-            .update_session_status(Uuid::new_v4(), types::SessionStatus::Completed)
+            .update_session_status(Uuid::new_v4(), types::SessionStatus::Waiting)
             .await;
         assert!(matches!(result, Err(Error::NotFound)));
     }

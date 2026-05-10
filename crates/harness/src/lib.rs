@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_updates_session_status_to_completed() {
+    async fn test_run_updates_session_status_to_waiting() {
         let session = make_session();
         let session_id = session.id;
 
@@ -2824,10 +2824,10 @@ mod tests {
         }
     }
 
-    /// Scenario 1: Agent calls stop with status=complete → session becomes Completed,
+    /// Scenario 1: Agent calls stop with status=complete → session becomes Waiting (not Completed),
     /// Stopped event emitted with Complete + comment, Done emitted.
     #[tokio::test]
-    async fn test_stop_complete_sets_session_completed_and_emits_stopped_event() {
+    async fn test_stop_complete_emits_stopped_event_session_becomes_waiting() {
         let session = make_session();
         let session_id = session.id;
 
@@ -2851,10 +2851,11 @@ mod tests {
             .times(1)
             .in_sequence(&mut seq)
             .returning(|_, _| Ok(()));
+        // Even with stop(complete), session becomes Waiting (not Completed)
         mock_db
             .expect_update_session_status()
             .withf(move |id, status| {
-                *id == session_id && *status == types::SessionStatus::Completed
+                *id == session_id && *status == types::SessionStatus::Waiting
             })
             .times(1)
             .in_sequence(&mut seq)
