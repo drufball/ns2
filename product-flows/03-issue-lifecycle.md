@@ -9,15 +9,14 @@ Create an issue, assign it to an agent, set status to in_progress to automatical
 
 ## Setup
 
-Run each command via `docker exec ns2-flow-03 bash -c '...'`. Source `/tmp/ns2-host.env` before starting the server so it picks up `ANTHROPIC_API_KEY`. Note: the `ns2 agent new` command's `--body` value contains single-quotes (`status='complete'`); when wrapping in `docker exec ... bash -c '...'`, use the `'"'"'` escape sequence for each embedded single-quote, or write the body to a file and reference it:
+Run each command via `docker exec ns2-flow-03 bash -c '...'`:
 
 ```bash
-mkdir -p /tmp/ns2-smoke
-git -C /tmp/ns2-smoke init
-git -C /tmp/ns2-smoke commit --allow-empty -m "init"
-set -a; . /tmp/ns2-host.env; set +a; cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
+/fixtures/init-git-repo.sh
+/fixtures/copy-env.sh
+cd /tmp/ns2-smoke && nohup ns2 server start > /tmp/ns2-server.log 2>&1 &
 sleep 3
-cd /tmp/ns2-smoke && ns2 agent new --name "swe" --description "Software engineer agent" --body "You are a software engineer. When asked to do something, do it concisely and confirm completion. When you are done, call the stop tool with status='complete' and a brief comment summarizing what you did."
+/fixtures/create-swe-agent.sh
 ```
 
 ## Steps
