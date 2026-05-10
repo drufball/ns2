@@ -138,25 +138,6 @@ fn spawn_hook_evaluator(state: &AppState) {
     });
 }
 
-/// Build the initial message for a fresh issue start (title + body + optional comment history).
-fn build_initial_message(issue: &types::Issue) -> String {
-    let mut msg = format!("{}\n\n{}", issue.title, issue.body);
-    if !issue.comments.is_empty() {
-        use std::fmt::Write as _;
-        msg.push_str("\n\n---\n# Issue History\n");
-        for comment in &issue.comments {
-            let _ = writeln!(
-                msg,
-                "\n**{}** ({}): {}",
-                comment.author,
-                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
-                comment.body
-            );
-        }
-    }
-    msg
-}
-
 /// Handle `IssueEvent::StatusChanged { to: InProgress }` — resume or start a harness.
 async fn handle_in_progress(state: &AppState, issue: types::Issue) {
     if issue.assignee.is_none() {
@@ -170,7 +151,7 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
                 return;
             }
             if session.status == types::SessionStatus::Created {
-                let initial_message = build_initial_message(&issue);
+                let initial_message = issues::build_initial_message(&issue);
                 let msg_tx = crate::harness_spawn::spawn_harness_sync(state, session);
                 msg_tx.send(initial_message).await.ok();
                 return;
@@ -1803,7 +1784,7 @@ mod tests {
     ///
     /// When the harness runs and emits Done (without a Stopped event), the
     /// linked issue should transition from Running → Waiting, proving the
-    /// issue watcher was correctly re-spawned.
+    /// global issue lifecycle subscriber correctly reacts to session events.
     #[tokio::test]
     async fn test_waiting_session_resume_via_message_spawns_issue_watcher() {
         let (app, state) = test_app_with_state().await;
@@ -5602,6 +5583,102 @@ mod tests {
             persisted.status,
             types::IssueStatus::Waiting,
             "DB must persist the new status"
+        );
+    }
+
+    // ── lifecycle subscriber Cancelled arm test ───────────────────────────────
+
+    /// When `IssueEvent::StatusChanged { to: Cancelled }` is received, the lifecycle
+    /// subscriber must drop the session's `msg_sender` and mark the session Cancelled.
+    #[tokio::test]
+    async fn test_lifecycle_subscriber_cancel_kills_harness() {
+        let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // Create a session and a running issue linked to it.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "cancel-test".into(),
+            status: types::SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "lc-c1".to_string(),
+            title: "Cancel test".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Manually insert a msg_sender for the session so we can detect removal.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(1);
+        {
+            let mut senders = state.msg_senders.lock().await;
+            senders.insert(session.id, tx);
+        }
+
+        // Confirm the sender is present.
+        {
+            let senders = state.msg_senders.lock().await;
+            let has_key = senders.contains_key(&session.id);
+            drop(senders);
+            assert!(has_key, "msg_sender must be present before cancel");
+        }
+
+        // Build the Cancelled issue (with session_id) and emit the event.
+        let mut cancelled_issue = issue.clone();
+        cancelled_issue.status = types::IssueStatus::Cancelled;
+
+        state.event_bus.send(events::SystemEvent::Issue(
+            events::IssueEvent::StatusChanged {
+                from: types::IssueStatus::InProgress,
+                to: types::IssueStatus::Cancelled,
+                issue: cancelled_issue,
+            },
+        ));
+
+        // Wait for the subscriber to process the event.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            let still_present = senders.contains_key(&session.id);
+            drop(senders);
+            if !still_present {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "msg_sender was not removed within 3s after Cancelled event"
+            );
+        }
+
+        // Verify the sender was removed.
+        let senders = state.msg_senders.lock().await;
+        assert!(
+            !senders.contains_key(&session.id),
+            "msg_sender must be removed after Cancelled event"
+        );
+        drop(senders);
+
+        // Verify the session is now Cancelled in DB.
+        let db_session = state.db.get_session(session.id).await.unwrap();
+        assert_eq!(
+            db_session.status,
+            types::SessionStatus::Cancelled,
+            "session must be marked Cancelled in DB"
         );
     }
 }
