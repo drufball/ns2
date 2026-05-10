@@ -277,6 +277,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
@@ -887,6 +888,87 @@ mod tests {
         assert!(evaluate::glob_match("*a*b*", "XaYbZ"));
     }
 
+    // ── ancestor_ids contains filter tests ───────────────────────────────────
+
+    #[test]
+    fn recursive_hook_matches_descendant_issue_by_ancestor_ids() {
+        // A hook with filter: ancestor_ids contains "root-id"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.issue.ancestor_ids".into(),
+                op: Op::Contains,
+                value: serde_json::json!("root-id"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+
+        // A child issue whose ancestor_ids includes "root-id"
+        let mut issue = make_issue();
+        issue.ancestor_ids = vec!["root-id".into(), "parent-id".into()];
+        let event = SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            from: IssueStatus::Open,
+            to: IssueStatus::InProgress,
+        });
+        assert!(
+            evaluate::matches_event(&hook, &event),
+            "recursive hook should match descendant issue whose ancestor_ids contains the root id"
+        );
+    }
+
+    #[test]
+    fn recursive_hook_does_not_match_unrelated_issue() {
+        // A hook with filter: ancestor_ids contains "root-id"
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.issue.ancestor_ids".into(),
+                op: Op::Contains,
+                value: serde_json::json!("root-id"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+
+        // An unrelated issue with empty ancestor_ids
+        let mut issue = make_issue();
+        issue.ancestor_ids = vec![];
+        let event = SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            from: IssueStatus::Open,
+            to: IssueStatus::InProgress,
+        });
+        assert!(
+            !evaluate::matches_event(&hook, &event),
+            "recursive hook should not match issue with empty ancestor_ids"
+        );
+    }
+
+    #[test]
+    fn recursive_hook_does_not_match_issue_with_different_ancestor() {
+        let filter = HookFilter {
+            conditions: vec![FieldCondition {
+                field: "data.issue.ancestor_ids".into(),
+                op: Op::Contains,
+                value: serde_json::json!("root-id"),
+            }],
+            expression: None,
+        };
+        let hook = make_internal_hook(vec!["issue.status_changed"], Some(filter));
+
+        let mut issue = make_issue();
+        issue.ancestor_ids = vec!["other-root".into()];
+        let event = SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            from: IssueStatus::Open,
+            to: IssueStatus::InProgress,
+        });
+        assert!(
+            !evaluate::matches_event(&hook, &event),
+            "recursive hook should not match issue with different ancestor_ids"
+        );
+    }
+
     // ── Hook ID generation ────────────────────────────────────────────────────
 
     #[test]
@@ -1071,6 +1153,7 @@ mod tests {
                 assignee: None,
                 session_id: None,
                 parent_id: None,
+                ancestor_ids: vec![],
                 blocked_on: vec![],
                 comments: vec![],
                 created_at: Utc::now(),

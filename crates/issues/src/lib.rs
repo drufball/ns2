@@ -92,6 +92,20 @@ pub struct StartIssueOutcome {
     pub session: Session,
 }
 
+/// Walk the parent chain to build the list of all ancestor IDs for an issue,
+/// from immediate parent up to the root.
+///
+/// This is NOT persisted to the database — it is computed at event-emission time.
+async fn compute_ancestor_ids(db: &Arc<dyn db::Db>, issue: &Issue) -> Vec<String> {
+    let mut ids = vec![];
+    let mut current_parent = issue.parent_id.clone();
+    while let Some(pid) = current_parent {
+        ids.push(pid.clone());
+        current_parent = db.get_issue(pid).await.ok().and_then(|p| p.parent_id);
+    }
+    ids
+}
+
 #[derive(Clone)]
 pub struct IssueService {
     db: Arc<dyn db::Db>,
@@ -148,14 +162,18 @@ impl IssueService {
             assignee: input.assignee,
             session_id: None,
             parent_id: input.parent_id,
+            ancestor_ids: vec![], // not stored in DB; populated before event emission
             blocked_on: input.blocked_on,
             comments: vec![],
             created_at: now,
             updated_at: now,
         };
         self.db.create_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids =
+            compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
-            .send(SystemEvent::Issue(IssueEvent::Created(issue.clone())));
+            .send(SystemEvent::Issue(IssueEvent::Created(issue_with_ancestors)));
         Ok(issue)
     }
 
@@ -200,9 +218,11 @@ impl IssueService {
         issue.comments.push(comment.clone());
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 comment,
             }));
         Ok(issue)
@@ -226,9 +246,12 @@ impl IssueService {
                     body: text,
                 };
                 issue.comments.push(comment.clone());
+                let mut issue_with_ancestors = issue.clone();
+                issue_with_ancestors.ancestor_ids =
+                    compute_ancestor_ids(&self.db, &issue).await;
                 self.event_bus
                     .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                        issue: issue.clone(),
+                        issue: issue_with_ancestors,
                         comment,
                     }));
             }
@@ -236,9 +259,11 @@ impl IssueService {
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::Completed,
             }));
@@ -285,9 +310,12 @@ impl IssueService {
                     body: text,
                 };
                 issue.comments.push(comment_obj.clone());
+                let mut issue_with_ancestors = issue.clone();
+                issue_with_ancestors.ancestor_ids =
+                    compute_ancestor_ids(&self.db, &issue).await;
                 self.event_bus
                     .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                        issue: issue.clone(),
+                        issue: issue_with_ancestors,
                         comment: comment_obj,
                     }));
             }
@@ -296,9 +324,11 @@ impl IssueService {
         issue.status = status.clone();
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: status,
             }));
@@ -320,14 +350,16 @@ impl IssueService {
         issue.status = IssueStatus::Failed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                issue: issue.clone(),
+                issue: issue_with_ancestors.clone(),
                 comment,
             }));
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::Failed,
             }));
@@ -370,9 +402,11 @@ impl IssueService {
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
 
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::InProgress,
             }));
@@ -402,14 +436,16 @@ impl IssueService {
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                issue: issue.clone(),
+                issue: issue_with_ancestors.clone(),
                 comment: new_comment,
             }));
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::Completed,
             }));
@@ -443,14 +479,16 @@ impl IssueService {
         issue.status = IssueStatus::Cancelled;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                issue: issue.clone(),
+                issue: issue_with_ancestors.clone(),
                 comment,
             }));
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::Cancelled,
             }));
@@ -487,9 +525,12 @@ impl IssueService {
                     body: comment_text,
                 };
                 issue.comments.push(new_comment.clone());
+                let mut issue_with_ancestors = issue.clone();
+                issue_with_ancestors.ancestor_ids =
+                    compute_ancestor_ids(&self.db, &issue).await;
                 self.event_bus
                     .send(SystemEvent::Issue(IssueEvent::CommentAdded {
-                        issue: issue.clone(),
+                        issue: issue_with_ancestors,
                         comment: new_comment,
                     }));
             }
@@ -501,9 +542,11 @@ impl IssueService {
         }
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::Open,
             }));
@@ -541,9 +584,11 @@ impl IssueService {
         issue.status = IssueStatus::InProgress;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
+        let mut issue_with_ancestors = issue.clone();
+        issue_with_ancestors.ancestor_ids = compute_ancestor_ids(&self.db, &issue).await;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
-                issue: issue.clone(),
+                issue: issue_with_ancestors,
                 from,
                 to: IssueStatus::InProgress,
             }));
@@ -780,6 +825,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: now,
@@ -1842,6 +1888,157 @@ mod tests {
         );
     }
 
+    // ── ancestor_ids populated in events ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_issue_event_has_empty_ancestor_ids_for_root_issue() {
+        let db = Arc::new(MemoryDb::new());
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let mut rx = bus.subscribe();
+
+        svc.create_issue(CreateIssueInput {
+            title: "Root issue".into(),
+            body: "body".into(),
+            assignee: None,
+            parent_id: None,
+            blocked_on: vec![],
+            branch: None,
+        })
+        .await
+        .unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        match ev {
+            events::SystemEvent::Issue(events::IssueEvent::Created(issue)) => {
+                assert_eq!(
+                    issue.ancestor_ids,
+                    Vec::<String>::new(),
+                    "root issue should have empty ancestor_ids"
+                );
+            }
+            _ => panic!("expected IssueEvent::Created, got: {ev:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_issue_event_has_parent_id_in_ancestor_ids_for_child_issue() {
+        let db = Arc::new(MemoryDb::new());
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+
+        // Create parent first
+        let parent = svc
+            .create_issue(CreateIssueInput {
+                title: "Parent".into(),
+                body: "body".into(),
+                assignee: None,
+                parent_id: None,
+                blocked_on: vec![],
+                branch: None,
+            })
+            .await
+            .unwrap();
+
+        let mut rx = bus.subscribe();
+
+        // Create child with parent_id
+        svc.create_issue(CreateIssueInput {
+            title: "Child".into(),
+            body: "body".into(),
+            assignee: None,
+            parent_id: Some(parent.id.clone()),
+            blocked_on: vec![],
+            branch: None,
+        })
+        .await
+        .unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        match ev {
+            events::SystemEvent::Issue(events::IssueEvent::Created(issue)) => {
+                assert_eq!(
+                    issue.ancestor_ids,
+                    vec![parent.id.clone()],
+                    "child issue should have parent_id in ancestor_ids"
+                );
+            }
+            _ => panic!("expected IssueEvent::Created, got: {ev:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_changed_event_has_ancestor_ids_populated() {
+        let db = Arc::new(MemoryDb::new());
+
+        // Create grandparent → parent → child hierarchy
+        let grandparent = open_issue("grand1");
+        db.create_issue(&grandparent).await.unwrap();
+
+        let mut parent = open_issue("par1");
+        parent.parent_id = Some("grand1".into());
+        db.create_issue(&parent).await.unwrap();
+
+        let mut child = open_issue("chi1");
+        child.parent_id = Some("par1".into());
+        db.create_issue(&child).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let mut rx = bus.subscribe();
+
+        // Trigger a status change on the child
+        svc.start_issue("chi1".into()).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        match ev {
+            events::SystemEvent::Issue(events::IssueEvent::StatusChanged { issue, .. }) => {
+                assert_eq!(issue.id, "chi1", "event should be for the child issue");
+                assert!(
+                    issue.ancestor_ids.contains(&"par1".to_string()),
+                    "ancestor_ids should contain parent id, got: {:?}",
+                    issue.ancestor_ids
+                );
+                assert!(
+                    issue.ancestor_ids.contains(&"grand1".to_string()),
+                    "ancestor_ids should contain grandparent id, got: {:?}",
+                    issue.ancestor_ids
+                );
+            }
+            _ => panic!("expected IssueEvent::StatusChanged, got: {ev:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_added_event_has_ancestor_ids_populated() {
+        let db = Arc::new(MemoryDb::new());
+
+        let parent = open_issue("par2");
+        db.create_issue(&parent).await.unwrap();
+
+        let mut child = open_issue("chi2");
+        child.parent_id = Some("par2".into());
+        db.create_issue(&child).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let mut rx = bus.subscribe();
+
+        svc.add_comment("chi2".into(), "user".into(), "A comment".into())
+            .await
+            .unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        match ev {
+            events::SystemEvent::Issue(events::IssueEvent::CommentAdded { issue, .. }) => {
+                assert_eq!(issue.id, "chi2");
+                assert_eq!(
+                    issue.ancestor_ids,
+                    vec!["par2".to_string()],
+                    "CommentAdded event should have ancestor_ids, got: {:?}",
+                    issue.ancestor_ids
+                );
+            }
+            _ => panic!("expected IssueEvent::CommentAdded, got: {ev:?}"),
+        }
+    }
+
     // ── build_initial_message tests ───────────────────────────────────────────
 
     fn make_issue_for_message(
@@ -1859,6 +2056,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments,
             created_at: now,

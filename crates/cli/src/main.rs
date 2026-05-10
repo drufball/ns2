@@ -440,6 +440,8 @@ enum IssueAction {
         watch: bool,
         #[arg(long, help = "Subscribe to status/comment events on this issue. Value: 'issue:<id>' or 'session:<id>'.")]
         subscribe: Option<String>,
+        #[arg(long, help = "When used with --subscribe, subscribe recursively to the entire issue tree.")]
+        recursive: bool,
     },
     #[command(
         about = "Edit an existing issue.",
@@ -571,6 +573,8 @@ enum IssueAction {
             help = "Notification target in the form 'issue:<id>' or 'session:<id>'. Required."
         )]
         deliver_to: String,
+        #[arg(long, help = "Subscribe to descendant issues as well as the root.")]
+        recursive: bool,
     },
 }
 
@@ -720,6 +724,7 @@ async fn main() {
                 wait,
                 watch,
                 subscribe,
+                recursive,
             } => {
                 commands::issue::run_new(
                     &cli.server,
@@ -733,6 +738,7 @@ async fn main() {
                     wait,
                     watch,
                     subscribe,
+                    recursive,
                 )
                 .await;
             }
@@ -788,8 +794,8 @@ async fn main() {
             IssueAction::Watch { id } => {
                 commands::issue::run_watch(&cli.server, id).await;
             }
-            IssueAction::Subscribe { id, deliver_to } => {
-                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true)
+            IssueAction::Subscribe { id, deliver_to, recursive } => {
+                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true, recursive)
                     .await;
             }
         },
@@ -1505,6 +1511,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1535,6 +1542,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1751,6 +1759,7 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1958,6 +1967,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::Utc::now(),
@@ -2897,7 +2907,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::Subscribe { id, deliver_to },
+                action: IssueAction::Subscribe { id, deliver_to, .. },
             } => {
                 assert_eq!(id, "ab12");
                 assert_eq!(deliver_to, "issue:watcher1");
@@ -3067,6 +3077,130 @@ mod tests {
                 assert_eq!(status.as_deref(), Some("in_progress"));
                 assert!(wait);
                 assert!(watch);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    // ─── `ns2 issue subscribe` --recursive CLI parse tests ───────────────────
+
+    #[test]
+    fn issue_subscribe_recursive_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "subscribe",
+            "--id",
+            "ab12",
+            "--deliver-to",
+            "issue:cd34",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Subscribe { id, deliver_to, recursive },
+            } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(deliver_to, "issue:cd34");
+                assert!(recursive, "recursive should be true when --recursive is passed");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_subscribe_no_recursive_flag_is_false() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "subscribe",
+            "--id",
+            "ab12",
+            "--deliver-to",
+            "issue:cd34",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Subscribe { recursive, .. },
+            } => {
+                assert!(!recursive, "recursive should be false when --recursive is not passed");
+            }
+            _ => panic!("expected issue subscribe command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_recursive_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "issue:ab12",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, recursive, .. },
+            } => {
+                assert_eq!(subscribe.as_deref(), Some("issue:ab12"));
+                assert!(recursive, "recursive should be true when --recursive is passed");
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_no_recursive_flag_is_false() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "issue:ab12",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { recursive, .. },
+            } => {
+                assert!(!recursive, "recursive should be false when --recursive is not passed");
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    #[test]
+    fn issue_new_recursive_without_subscribe_parses_ok() {
+        // --recursive without --subscribe should still parse successfully
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--recursive",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, recursive, .. },
+            } => {
+                assert!(subscribe.is_none(), "subscribe should be None");
+                assert!(recursive, "recursive should be true");
             }
             _ => panic!("expected issue new command"),
         }

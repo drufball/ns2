@@ -94,6 +94,7 @@ pub enum IssueEvent {
 /// do not cause a "duplicate field `type`" serde error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum SystemEvent {
     Session {
         session_id: Uuid,
@@ -239,6 +240,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
@@ -293,6 +295,7 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
+            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),
