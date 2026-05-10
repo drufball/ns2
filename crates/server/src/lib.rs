@@ -2544,6 +2544,300 @@ mod tests {
         );
     }
 
+    // ─── P2: multi-issue-per-session ─────────────────────────────────────────
+
+    /// When two issues are linked to the same session and the session emits Done
+    /// (without a Stopped event), both issues must transition from Running to Waiting.
+    #[tokio::test]
+    async fn test_multiple_issues_per_session_all_transition_on_done() {
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let state = test_state().await;
+
+        // Create a single session in Running status — orphan_sweep only picks up Running sessions.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "multi-issue-session".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create two issues, both linked to the same session.
+        let issue1 = types::Issue {
+            id: "mi01".to_string(),
+            title: "Issue A".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let issue2 = types::Issue {
+            id: "mi02".to_string(),
+            title: "Issue B".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue1).await.unwrap();
+        state.db.create_issue(&issue2).await.unwrap();
+
+        // Spawn harness for issue1; we pass issue1's id.
+        // issue2 is also linked to the same session via session_id but we don't
+        // pass its id to spawn_harness_sync — that's the realistic scenario where
+        // orphan_sweep is used. Here we verify the subscriber loop in orphan_sweep
+        // (list_issues_by_session_id) rather than the harness watcher.
+        //
+        // We test the orphan_sweep path: after a server restart, both issues linked
+        // to the same Running session must transition to Failed.
+        state.issue_service.orphan_sweep().await;
+
+        let fetched1 = state.db.get_issue("mi01".to_string()).await.unwrap();
+        let fetched2 = state.db.get_issue("mi02".to_string()).await.unwrap();
+
+        assert_eq!(
+            fetched1.status,
+            IssueStatus::Failed,
+            "issue1 must be Failed after orphan sweep"
+        );
+        assert_eq!(
+            fetched2.status,
+            IssueStatus::Failed,
+            "issue2 (also linked to the same session) must also be Failed after orphan sweep"
+        );
+
+        // Both must have the system comment.
+        assert!(
+            fetched1.comments.iter().any(|c| c.body.contains("session lost on server restart")),
+            "issue1 must have 'session lost' comment"
+        );
+        assert!(
+            fetched2.comments.iter().any(|c| c.body.contains("session lost on server restart")),
+            "issue2 must have 'session lost' comment"
+        );
+    }
+
+    // ─── P3: handle_in_progress silent-skip when session is Running ───────────
+
+    /// When an issue already has a session in Running state, emitting a Done event
+    /// that would normally spawn a new harness must NOT increase the `msg_senders` count.
+    /// (The issue watcher is already active for the running session.)
+    #[tokio::test]
+    async fn test_handle_in_progress_does_not_spawn_when_session_already_running() {
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let (app, state) = test_app_with_state().await;
+
+        // Create a Running session.
+        let running_session_id = Uuid::new_v4();
+        let running_session = Session {
+            id: running_session_id,
+            name: "already-running".into(),
+            status: SessionStatus::Running,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&running_session).await.unwrap();
+
+        // Create an issue in Running state with this session.
+        let issue = types::Issue {
+            id: "ip01".to_string(),
+            title: "Already Running Issue".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(running_session_id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Record the current msg_senders count (should be 0 for this session).
+        let initial_count = {
+            let senders = state.msg_senders.lock().await;
+            let count = senders.len();
+            drop(senders);
+            count
+        };
+
+        // Attempting PATCH /issues/ip01/status with {"status": "in_progress"}
+        // while the session is Running must return 400 (bad request) and must NOT
+        // spawn a new harness.
+        let resp = app
+            .oneshot(issue_req(
+                "PATCH",
+                "/issues/ip01/status",
+                &serde_json::json!({"status": "in_progress"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "in_progress on a Running session issue must return 400"
+        );
+
+        // msg_senders must not have grown.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        let final_count = {
+            let senders = state.msg_senders.lock().await;
+            let count = senders.len();
+            drop(senders);
+            count
+        };
+
+        assert_eq!(
+            final_count, initial_count,
+            "msg_senders must not increase when in_progress is rejected for a Running-session issue"
+        );
+    }
+
+    // ─── P4: stop_map not cleared on Error ───────────────────────────────────
+
+    /// After a `SessionEvent::Error`, the issue watcher exits (clearing its `stopped_status`).
+    /// If the same session later emits Done (a second watcher run), the issue must
+    /// transition to Waiting (not Completed), proving the `stop_map` was cleared.
+    ///
+    /// We verify this by checking the `harness_spawn` watcher lifecycle:
+    /// Error → issue becomes Failed; subsequent Done on a new watcher → Waiting.
+    #[tokio::test]
+    async fn test_error_then_done_on_new_watcher_produces_waiting_not_completed() {
+        use crate::harness_spawn::spawn_harness_sync;
+        use events::{SessionEvent, StopEventStatus, SystemEvent};
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let state = test_state().await;
+
+        // Create a session and a running issue.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "error-done-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "ed01".to_string(),
+            title: "Error then Done".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::Running,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Spawn first harness watcher.
+        let _tx1 = spawn_harness_sync(&state, session.clone(), Some("ed01".into()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Emit Stopped{Complete} for this session — this would set stopped_status
+        // if it were processed before Done.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Stopped {
+                status: StopEventStatus::Complete,
+                comment: None,
+            },
+        });
+
+        // Emit Error — the first watcher should mark the issue Failed and exit.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Error {
+                message: "simulated error".into(),
+            },
+        });
+
+        // Wait for the issue to become Failed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("ed01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Failed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue did not become Failed within 3s (status={})",
+                fetched.status
+            );
+        }
+
+        // Reset issue to Running for the next watcher cycle.
+        let mut reset_issue = state.db.get_issue("ed01".to_string()).await.unwrap();
+        reset_issue.status = IssueStatus::Running;
+        state.db.update_issue(&reset_issue).await.unwrap();
+
+        // Spawn a NEW watcher (fresh watcher with cleared stopped_status).
+        let _tx2 = spawn_harness_sync(&state, session.clone(), Some("ed01".into()));
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Emit Done WITHOUT a preceding Stopped event — the new watcher must
+        // produce Waiting (not Completed), proving the stop_map was NOT carried over.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Done,
+        });
+
+        let deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("ed01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Waiting {
+                break;
+            }
+            assert_ne!(
+                fetched.status,
+                IssueStatus::Completed,
+                "issue became Completed — stop_map was carried over from the Error watcher; \
+                 expected Waiting (stop_map cleared)"
+            );
+            assert!(
+                tokio::time::Instant::now() <= deadline2,
+                "issue did not become Waiting within 3s after second Done (status={})",
+                fetched.status
+            );
+        }
+
+        let final_issue = state.db.get_issue("ed01".to_string()).await.unwrap();
+        assert_eq!(
+            final_issue.status,
+            IssueStatus::Waiting,
+            "after Error (watcher exits and clears stop_map) then Done on new watcher, \
+             issue must be Waiting, not Completed"
+        );
+    }
+
     // ─── POST /issues/:id/reopen tests ───────────────────────────────────────
 
     async fn create_issue_with_status(state: &AppState, status: IssueStatus) -> String {

@@ -375,6 +375,40 @@ pub async fn run_cancel(server: &str, id: String) {
     eprintln!("Issue {id} cancelled.");
 }
 
+// ─── Helpers for run_wait (lifted to module level so tests can reach them) ───
+
+/// Recursively attach snippets to nodes that are currently Running.
+/// A Waiting or Completed node does NOT receive a snippet even if its session
+/// has one — only actively Running nodes need the live snippet text.
+pub(super) fn attach_snippets(
+    node: &mut IssueTreeNode,
+    snippets: &HashMap<uuid::Uuid, Option<String>>,
+) {
+    if node.issue.status == IssueStatus::Running {
+        if let Some(session_id) = node.issue.session_id {
+            if let Some(snippet_opt) = snippets.get(&session_id) {
+                node.snippet.clone_from(snippet_opt);
+            }
+        }
+    }
+    for child in &mut node.children {
+        attach_snippets(child, snippets);
+    }
+}
+
+/// Collect all Running session IDs from an issue tree node and its descendants.
+/// Nodes that are not in Running status (e.g. Waiting, Completed) are skipped.
+pub(super) fn collect_running_sessions(node: &IssueTreeNode, out: &mut Vec<uuid::Uuid>) {
+    if node.issue.status == IssueStatus::Running {
+        if let Some(sid) = node.issue.session_id {
+            out.push(sid);
+        }
+    }
+    for child in &node.children {
+        collect_running_sessions(child, out);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::future_not_send)]
 pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
@@ -431,32 +465,6 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
         }
         let v: serde_json::Value = resp.json().await.ok()?;
         v["text"].as_str().map(std::string::ToString::to_string)
-    }
-
-    // Recursively attach snippets to running nodes.
-    fn attach_snippets(node: &mut IssueTreeNode, snippets: &HashMap<uuid::Uuid, Option<String>>) {
-        if node.issue.status == IssueStatus::Running {
-            if let Some(session_id) = node.issue.session_id {
-                if let Some(snippet_opt) = snippets.get(&session_id) {
-                    node.snippet.clone_from(snippet_opt);
-                }
-            }
-        }
-        for child in &mut node.children {
-            attach_snippets(child, snippets);
-        }
-    }
-
-    // Collect all running session IDs from a tree.
-    fn collect_running_sessions(node: &IssueTreeNode, out: &mut Vec<uuid::Uuid>) {
-        if node.issue.status == IssueStatus::Running {
-            if let Some(sid) = node.issue.session_id {
-                out.push(sid);
-            }
-        }
-        for child in &node.children {
-            collect_running_sessions(child, out);
-        }
     }
 
     if ids.is_empty() {
@@ -835,5 +843,162 @@ mod tests {
             make_node(types::IssueStatus::Running, vec![]),
         ];
         assert!(!all_nodes_terminal(&roots));
+    }
+
+    // ─── attach_snippets tests ────────────────────────────────────────────────
+
+    fn make_node_with_session(
+        status: types::IssueStatus,
+        session_id: Option<uuid::Uuid>,
+        children: Vec<IssueTreeNode>,
+    ) -> IssueTreeNode {
+        let mut issue = make_issue(status);
+        issue.session_id = session_id;
+        IssueTreeNode {
+            issue,
+            snippet: None,
+            children,
+        }
+    }
+
+    /// An `InProgress` (`Running`) node with a matching `session_id` gets its snippet attached.
+    #[test]
+    fn attach_snippets_running_node_gets_snippet() {
+        let sid = uuid::Uuid::new_v4();
+        let mut node = make_node_with_session(types::IssueStatus::Running, Some(sid), vec![]);
+        assert!(node.snippet.is_none(), "precondition: no snippet yet");
+
+        let mut snippets = HashMap::new();
+        snippets.insert(sid, Some("agent is thinking…".to_string()));
+
+        super::attach_snippets(&mut node, &snippets);
+
+        assert_eq!(
+            node.snippet,
+            Some("agent is thinking…".to_string()),
+            "running node must receive the snippet for its session"
+        );
+    }
+
+    /// A Waiting node must NOT have a snippet attached even if its session has one.
+    #[test]
+    fn attach_snippets_waiting_node_does_not_get_snippet() {
+        let sid = uuid::Uuid::new_v4();
+        let mut node = make_node_with_session(types::IssueStatus::Waiting, Some(sid), vec![]);
+
+        let mut snippets = HashMap::new();
+        snippets.insert(sid, Some("should not appear".to_string()));
+
+        super::attach_snippets(&mut node, &snippets);
+
+        assert!(
+            node.snippet.is_none(),
+            "waiting node must not receive a snippet"
+        );
+    }
+
+    /// A `Running` node with no matching `session_id` in the map keeps `snippet=None`.
+    #[test]
+    fn attach_snippets_running_node_without_matching_session_keeps_none() {
+        let sid = uuid::Uuid::new_v4();
+        let other_sid = uuid::Uuid::new_v4();
+        let mut node = make_node_with_session(types::IssueStatus::Running, Some(sid), vec![]);
+
+        let mut snippets = HashMap::new();
+        snippets.insert(other_sid, Some("irrelevant".to_string()));
+
+        super::attach_snippets(&mut node, &snippets);
+
+        assert!(
+            node.snippet.is_none(),
+            "no snippet should be attached when the session_id is not in the map"
+        );
+    }
+
+    /// `attach_snippets` recurses into children.
+    #[test]
+    fn attach_snippets_recurses_into_children() {
+        let child_sid = uuid::Uuid::new_v4();
+        let child =
+            make_node_with_session(types::IssueStatus::Running, Some(child_sid), vec![]);
+        let mut root =
+            make_node_with_session(types::IssueStatus::Completed, None, vec![child]);
+
+        let mut snippets = HashMap::new();
+        snippets.insert(child_sid, Some("child snippet".to_string()));
+
+        super::attach_snippets(&mut root, &snippets);
+
+        assert_eq!(
+            root.children[0].snippet,
+            Some("child snippet".to_string()),
+            "snippet must be attached to the running child"
+        );
+        assert!(
+            root.snippet.is_none(),
+            "completed root must not receive a snippet"
+        );
+    }
+
+    // ─── collect_running_sessions tests ──────────────────────────────────────
+
+    /// Running node with a `session_id` is collected.
+    #[test]
+    fn collect_running_sessions_includes_running_nodes() {
+        let sid = uuid::Uuid::new_v4();
+        let node = make_node_with_session(types::IssueStatus::Running, Some(sid), vec![]);
+
+        let mut out = Vec::new();
+        super::collect_running_sessions(&node, &mut out);
+
+        assert_eq!(out, vec![sid]);
+    }
+
+    /// Non-Running nodes (e.g. Waiting, Completed) are skipped.
+    #[test]
+    fn collect_running_sessions_skips_non_running_nodes() {
+        let sid = uuid::Uuid::new_v4();
+        let waiting =
+            make_node_with_session(types::IssueStatus::Waiting, Some(sid), vec![]);
+
+        let mut out = Vec::new();
+        super::collect_running_sessions(&waiting, &mut out);
+
+        assert!(out.is_empty(), "Waiting node must not be collected");
+    }
+
+    /// Running node with no `session_id` is skipped.
+    #[test]
+    fn collect_running_sessions_skips_running_node_without_session_id() {
+        let node = make_node_with_session(types::IssueStatus::Running, None, vec![]);
+
+        let mut out = Vec::new();
+        super::collect_running_sessions(&node, &mut out);
+
+        assert!(
+            out.is_empty(),
+            "Running node with no session_id must not be collected"
+        );
+    }
+
+    /// `collect_running_sessions` recurses into children.
+    #[test]
+    fn collect_running_sessions_recurses_into_children() {
+        let parent_sid = uuid::Uuid::new_v4();
+        let child_sid = uuid::Uuid::new_v4();
+        let child =
+            make_node_with_session(types::IssueStatus::Running, Some(child_sid), vec![]);
+        let root = make_node_with_session(
+            types::IssueStatus::Running,
+            Some(parent_sid),
+            vec![child],
+        );
+
+        let mut out = Vec::new();
+        super::collect_running_sessions(&root, &mut out);
+
+        assert!(out.contains(&parent_sid), "root session must be collected");
+        assert!(out.contains(&child_sid), "child session must be collected");
+        assert_eq!(out.len(), 2, "should collect exactly 2 sessions");
     }
 }

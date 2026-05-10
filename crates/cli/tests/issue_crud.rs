@@ -430,6 +430,25 @@ fn issue_edit_clear_blocked_on() {
         .stdout(predicate::str::contains("No issues found."));
 }
 
+// ─── P1: run_edit NOT_FOUND check ────────────────────────────────────────────
+
+/// PATCH /issues/<nonexistent-id> must exit non-zero and print an error that
+/// includes "not found" and the issue ID.
+#[test]
+fn issue_edit_nonexistent_id_exits_nonzero_with_not_found_message() {
+    let mut h = TestHarness::new();
+    h.start_server();
+
+    h.ns2()
+        .args(["issue", "edit", "--id", "zzzz", "--title", "foo"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not found")
+                .and(predicate::str::contains("zzzz")),
+        );
+}
+
 // Flow 16 — Issue error cases
 
 #[test]
