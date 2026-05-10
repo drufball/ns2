@@ -1252,11 +1252,6 @@ mod tests {
     // --- session_is_terminal tests ---
 
     #[test]
-    fn session_is_terminal_completed_is_true() {
-        assert!(session_is_terminal(&types::SessionStatus::Completed));
-    }
-
-    #[test]
     fn session_is_terminal_failed_is_true() {
         assert!(session_is_terminal(&types::SessionStatus::Failed));
     }
@@ -2137,13 +2132,6 @@ mod tests {
     }
 
     #[test]
-    fn session_status_symbol_completed() {
-        let (sym, label) = session_status_symbol(&types::SessionStatus::Completed, 0);
-        assert_eq!(sym, "✔");
-        assert_eq!(label, "completed");
-    }
-
-    #[test]
     fn session_status_symbol_failed() {
         let (sym, label) = session_status_symbol(&types::SessionStatus::Failed, 0);
         assert_eq!(sym, "✗");
@@ -2182,21 +2170,9 @@ mod tests {
     }
 
     #[test]
-    fn render_session_line_completed() {
-        let id = "550e8400-e29b-41d4-a716-446655440000";
-        let line = render_session_line(id, "done-task", None, &types::SessionStatus::Completed, 5);
-        assert!(line.contains("[550e8400]"));
-        assert!(line.contains("done-task"));
-        assert!(line.contains("✔"));
-        assert!(line.contains("completed"));
-        // No snippet section when None
-        assert!(!line.contains("None"));
-    }
-
-    #[test]
     fn render_session_line_empty_name_shows_dash() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let line = render_session_line(id, "", None, &types::SessionStatus::Completed, 0);
+        let line = render_session_line(id, "", None, &types::SessionStatus::Waiting, 0);
         assert!(
             line.contains("[550e8400] -:"),
             "empty name should render as dash"

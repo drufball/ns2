@@ -145,8 +145,7 @@ pub async fn events(
             }
 
             match sess.status {
-                types::SessionStatus::Completed
-                | types::SessionStatus::Failed
+                types::SessionStatus::Failed
                 | types::SessionStatus::Cancelled
                 | types::SessionStatus::Waiting => {
                     history.push(SystemEvent::Session {
@@ -512,7 +511,7 @@ mod tests {
         let session = types::Session {
             id: Uuid::new_v4(),
             name: "done-route-test".into(),
-            status: types::SessionStatus::Completed,
+            status: types::SessionStatus::Waiting,
             agent: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -520,7 +519,7 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
         state
             .db
-            .update_session_status(session.id, types::SessionStatus::Completed)
+            .update_session_status(session.id, types::SessionStatus::Waiting)
             .await
             .unwrap();
 
