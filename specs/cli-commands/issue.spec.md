@@ -35,6 +35,8 @@ id=$(ns2 issue new --title "Add retry logic" --body "..." --assignee swe \
 
 `--status in_progress` sets the status (starting the agent) immediately after creation. `--wait` blocks until the issue reaches a terminal state and always prints the issue ID to stdout last. `--watch` streams live SSE events to stderr while `--wait` runs, keeping stdout capturable.
 
+`--subscribe issue:<id>` (or `--subscribe session:<id>`) creates a hook immediately after the issue is created that delivers notifications on `issue.status_changed` and `issue.comment_added` events. The hook ID goes to stderr; stdout still only contains the issue ID. This calls the same logic as `ns2 issue subscribe`, ensuring no drift between the two paths.
+
 ## Setting status and starting
 
 `ns2 issue set-status --id <id> --status <status>` updates the issue status via `PATCH /issues/:id/status`. When `--status in_progress` is passed, the server auto-starts the issue: it validates that an assignee is set, and then either creates a fresh session (for open/failed issues) or resumes the existing session (for waiting issues). The issue moves to `running` — `in_progress` is only an input signal, never a stored state.

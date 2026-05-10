@@ -36,6 +36,7 @@ pub async fn run_new(
     status: Option<String>,
     wait: bool,
     watch: bool,
+    subscribe: Option<String>,
 ) {
     // Validate: --wait requires --status in_progress
     if wait && status.as_deref() != Some("in_progress") {
@@ -83,6 +84,13 @@ pub async fn run_new(
     // If --status was provided, set it now.
     if let Some(ref s) = status {
         run_set_status(server, issue_id.clone(), s.clone()).await;
+    }
+
+    // If --subscribe was provided, create a hook subscription now.
+    // Pass `print_id_to_stdout: false` so the hook ID stays on stderr only —
+    // stdout must remain a single line (the issue ID) for `id=$(ns2 issue new …)`.
+    if let Some(deliver_to) = subscribe {
+        run_subscribe(server, issue_id.clone(), deliver_to, "--subscribe", false).await;
     }
 
     // If --watch, start streaming SSE events to stderr in the background
@@ -637,7 +645,21 @@ async fn run_watch_to(server: &str, id: String, to_stderr: bool) {
 ///
 /// Sugar for creating an internal hook that delivers a notification comment
 /// whenever issue X has a status change or a comment added.
-pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
+///
+/// `flag_name` is the CLI flag name used at the call site (e.g. `--deliver-to` or
+/// `--subscribe`) — it appears in the error message so users see the flag they typed.
+///
+/// `print_id_to_stdout` controls whether the created hook ID is printed to stdout.
+/// Pass `true` when invoked as the top-level `issue subscribe` subcommand (callers
+/// capture the hook ID via `id=$(ns2 issue subscribe …)`).  Pass `false` when called
+/// from `run_new` so that stdout remains a single line — the issue ID.
+pub async fn run_subscribe(
+    server: &str,
+    id: String,
+    deliver_to: String,
+    flag_name: &str,
+    print_id_to_stdout: bool,
+) {
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
@@ -648,7 +670,7 @@ pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
     } else if let Some(rest) = deliver_to.strip_prefix("session:") {
         ("session", rest.to_string())
     } else {
-        eprintln!("Error: --deliver-to must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
+        eprintln!("Error: {flag_name} must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
         std::process::exit(1);
     };
 
@@ -694,7 +716,9 @@ pub async fn run_subscribe(server: &str, id: String, deliver_to: String) {
         hook["name"].as_str().unwrap_or(""),
         hook_id
     );
-    println!("{hook_id}");
+    if print_id_to_stdout {
+        println!("{hook_id}");
+    }
 }
 
 #[cfg(test)]

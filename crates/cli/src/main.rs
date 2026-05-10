@@ -409,6 +409,8 @@ enum IssueAction {
         wait: bool,
         #[arg(long, help = "Stream live events for this issue. Works with any status.")]
         watch: bool,
+        #[arg(long, help = "Subscribe to status/comment events on this issue. Value: 'issue:<id>' or 'session:<id>'.")]
+        subscribe: Option<String>,
     },
     #[command(
         about = "Edit an existing issue.",
@@ -696,6 +698,7 @@ async fn main() {
                 status,
                 wait,
                 watch,
+                subscribe,
             } => {
                 commands::issue::run_new(
                     &cli.server,
@@ -708,6 +711,7 @@ async fn main() {
                     status,
                     wait,
                     watch,
+                    subscribe,
                 )
                 .await;
             }
@@ -765,7 +769,8 @@ async fn main() {
                 commands::issue::run_watch(&cli.server, id).await;
             }
             IssueAction::Subscribe { id, deliver_to } => {
-                commands::issue::run_subscribe(&cli.server, id, deliver_to).await;
+                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true)
+                    .await;
             }
         },
         Command::Hook { action } => match action {
@@ -3073,6 +3078,74 @@ mod tests {
                 assert_eq!(status.as_deref(), Some("in_progress"));
                 assert!(wait);
                 assert!(watch);
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    // ─── Scenario A: --subscribe parses correctly in CLI ─────────────────────
+
+    #[test]
+    fn issue_new_subscribe_with_issue_target_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "issue:ab12",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, .. },
+            } => {
+                assert_eq!(subscribe.as_deref(), Some("issue:ab12"));
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    // ─── Scenario B: --subscribe is optional (None when not provided) ─────────
+
+    #[test]
+    fn issue_new_no_subscribe_flag_is_none() {
+        let cli =
+            Cli::try_parse_from(["ns2", "issue", "new", "--title", "T", "--body", "B"]).unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, .. },
+            } => {
+                assert!(subscribe.is_none());
+            }
+            _ => panic!("expected issue new command"),
+        }
+    }
+
+    // ─── Scenario C: --subscribe with session target parses ──────────────────
+
+    #[test]
+    fn issue_new_subscribe_with_session_target_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "new",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--subscribe",
+            "session:some-uuid",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::New { subscribe, .. },
+            } => {
+                assert_eq!(subscribe.as_deref(), Some("session:some-uuid"));
             }
             _ => panic!("expected issue new command"),
         }
