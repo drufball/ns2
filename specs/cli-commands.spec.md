@@ -1,7 +1,7 @@
 ---
 targets:
   - crates/cli/src/main.rs
-verified: 2026-05-09T06:29:22Z
+verified: 2026-05-10T11:09:26Z
 ---
 
 # CLI Commands

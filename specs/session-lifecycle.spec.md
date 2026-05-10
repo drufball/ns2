@@ -4,7 +4,7 @@ targets:
   - crates/harness/src/**/*.rs
   - crates/db/src/**/*.rs
   - crates/types/src/**/*.rs
-verified: 2026-05-09T06:32:51Z
+verified: 2026-05-10T11:07:44Z
 ---
 
 # Session Lifecycle Spec
@@ -18,22 +18,19 @@ SSE broadcast channels and the in-progress harness tasks that feed them.
 ## States and Transitions
 
 ```
-created → running → completed
+created → running → waiting
                  ↘ failed
                  ↘ cancelled
-                 ↘ waiting
 ```
 
 - **`created`** — session record exists; no harness is running. Occurs when a session
   is created with no initial message, or when the server restarts and the in-memory
   harness map is empty.
 - **`running`** — a harness task is active and processing turns.
-- **`completed`** — the agent called `stop(complete)` and the harness then finished with
-  `end_turn`. Terminal; the session's turn history is fully persisted.
-- **`waiting`** — the harness finished but the agent did not call `stop(complete)`:
-  either it called `stop(waiting)` (explicitly requesting human input) or it hit
-  `end_turn` without calling `stop` at all. **Not terminal for sessions** — the linked
-  issue stays open and the session can receive new messages to continue work.
+- **`waiting`** — the harness finished. Always the terminal state after a normal run,
+  regardless of whether the agent called `stop(complete)`, `stop(waiting)`, or did not
+  call `stop` at all. Not permanently terminal — the session can receive new messages
+  and a fresh harness will resume it.
 - **`failed`** — the harness encountered an unrecoverable error, the API key was missing,
   or the server restarted while the session was `running` (orphan recovery, see below).
   Terminal unless explicitly reopened.
@@ -66,9 +63,9 @@ Two maps live in the server's `AppState`:
 
 These maps are intentionally ephemeral. Nothing in the DB depends on them.
 
-## Resume After Restart (`Completed` and `Waiting` Sessions Accept New Messages)
+## Resume After Restart (`Waiting` Sessions Accept New Messages)
 
-A session in `completed` or `waiting` state has no live harness. When `POST /sessions/:id/messages` is called, a new harness spawns, loads the full turn history from SQLite, and presents it to the API as the prior `messages` array — giving the model complete context. The session transitions back to `running` and new SSE subscribers can connect immediately. The `created` and `running` states handle the same path; `completed` and `waiting` add the same spawn-on-demand behaviour so multi-turn sessions work seamlessly across restarts.
+A session in `waiting` state has no live harness. When `POST /sessions/:id/messages` is called, a new harness spawns, loads the full turn history from SQLite, and presents it to the API as the prior `messages` array — giving the model complete context. The session transitions back to `running` and new SSE subscribers can connect immediately. The `created` and `running` states handle the same path; `waiting` adds spawn-on-demand behaviour so multi-turn sessions work seamlessly across restarts.
 
 ## Server-Restart Orphan Recovery
 
@@ -95,7 +92,7 @@ connections, so clients never observe a half-recovered state.
 1. Load all turns + blocks from SQLite in order.
 2. Emit `TurnStarted`, `ContentBlockStarted`, `ContentBlockDelta` (one per stored text
    delta), `ContentBlockDone`, `TurnDone` events for each persisted turn.
-3. If the session is terminal (`completed`, `failed`, `cancelled`, or `waiting`), emit `SessionDone` and close the stream.
+3. If the session is terminal (`waiting`, `failed`, or `cancelled`), emit `SessionDone` and close the stream.
 4. If the session is live, subscribe to the broadcast channel and forward events as they
    arrive.
 
