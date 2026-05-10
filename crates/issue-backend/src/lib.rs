@@ -104,8 +104,10 @@ pub fn from_config(
 ///
 /// # Errors
 ///
-/// Returns an error if `BackendKind::GitHub` is selected but no `mapping` is provided,
-/// or if a required configuration value is missing.
+/// Returns `Error::Other` if:
+/// - `backend = shell` but `[issues.shell]` config is absent
+/// - `backend = github` but `[issues.github]` config, `GITHUB_TOKEN` env var,
+///   or `mapping` is missing
 pub fn from_config_with_mapping(
     config: &IssueBackendConfig,
     db: Arc<dyn db::Db>,
@@ -460,7 +462,8 @@ impl GitHubIssueBackend {
     ///
     /// # Panics
     ///
-    /// Panics if the `reqwest` client cannot be built (which should never happen in practice).
+    /// Panics if the underlying `reqwest` client cannot be built (this should
+    /// not happen under normal conditions).
     #[must_use]
     pub fn with_base_url(
         owner: String,

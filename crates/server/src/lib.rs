@@ -21,12 +21,48 @@ use state::AppState;
 
 use events::EventBus;
 
+// ── Issue backend config types ────────────────────────────────────────────────
+// These live in `server` (not `issue-backend`) so that `cli` only needs to
+// depend on `server` for config wiring, keeping the dep graph clean.
+
+/// Which storage back-end the server should use for issues.
+#[derive(Debug, Clone, serde::Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    #[default]
+    Sqlite,
+    Shell,
+    GitHub,
+}
+
+/// Configuration for the shell back-end.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ShellConfig {
+    pub command: String,
+}
+
+/// Configuration for the GitHub back-end.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GithubConfig {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Top-level `[issues]` configuration block from `ns2.toml`.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct IssueBackendConfig {
+    #[serde(default)]
+    pub backend: BackendKind,
+    pub shell: Option<ShellConfig>,
+    pub github: Option<GithubConfig>,
+}
+
 pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub pid_file: PathBuf,
     pub model: String,
-    pub issue_backend: issue_backend::IssueBackendConfig,
+    pub issue_backend: IssueBackendConfig,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -123,8 +159,9 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
 
     // Check if an agent definition exists for this assignee.
     // If no agent file exists, this is a human assignee — skip harness spawn.
-    let has_agent_def = agents::agents_dir()
-        .is_some_and(|agents_dir| agents::load_agent(&agents_dir, assignee).is_some());
+    let has_agent_def = agents::agents_dir().is_some_and(|agents_dir| {
+        agents::load_agent(&agents_dir, assignee).is_some()
+    });
 
     if !has_agent_def {
         tracing::debug!(
@@ -293,6 +330,22 @@ pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
     });
 }
 
+/// Convert `server::IssueBackendConfig` into `issue_backend::IssueBackendConfig`.
+/// This bridges the two types so that `cli` doesn't need to depend on `issue-backend`.
+fn to_issue_backend_config(c: IssueBackendConfig) -> issue_backend::IssueBackendConfig {
+    let backend = match c.backend {
+        BackendKind::Sqlite => issue_backend::BackendKind::Sqlite,
+        BackendKind::Shell => issue_backend::BackendKind::Shell,
+        BackendKind::GitHub => issue_backend::BackendKind::GitHub,
+    };
+    let shell = c.shell.map(|s| issue_backend::ShellConfig { command: s.command });
+    let github = c.github.map(|g| issue_backend::GithubConfig {
+        owner: g.owner,
+        repo: g.repo,
+    });
+    issue_backend::IssueBackendConfig { backend, shell, github }
+}
+
 /// # Errors
 ///
 /// Returns an error if the data directory cannot be created, the PID file cannot
@@ -322,7 +375,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let (db, hook_store, event_store, _github_mapping) = db::connect(&db_url).await?;
-    let backend = issue_backend::from_config(&config.issue_backend, Arc::clone(&db))
+    // Convert server::IssueBackendConfig → issue_backend::IssueBackendConfig
+    let ib_config = to_issue_backend_config(config.issue_backend);
+    let backend = issue_backend::from_config(&ib_config, Arc::clone(&db))
         .map_err(|e| Error::Other(e.to_string()))?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();

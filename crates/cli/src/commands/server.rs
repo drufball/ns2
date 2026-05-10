@@ -15,7 +15,7 @@ pub fn data_dir_and_pid(port: u16) -> (PathBuf, PathBuf) {
 ///
 /// Returns `IssueBackendConfig::default()` (sqlite) if the file is absent or the
 /// `[issues]` key is missing.
-fn read_issue_backend_config() -> issue_backend::IssueBackendConfig {
+fn read_issue_backend_config() -> server::IssueBackendConfig {
     // Try the git root first, then the current directory.
     let candidates: Vec<PathBuf> = workspace::git_root_sync()
         .into_iter()
@@ -31,13 +31,13 @@ fn read_issue_backend_config() -> issue_backend::IssueBackendConfig {
         }
     }
 
-    issue_backend::IssueBackendConfig::default()
+    server::IssueBackendConfig::default()
 }
 
 /// Minimal representation of `ns2.toml` for parsing the `[issues]` block.
 #[derive(serde::Deserialize, Default)]
 struct Ns2Toml {
-    issues: Option<issue_backend::IssueBackendConfig>,
+    issues: Option<server::IssueBackendConfig>,
 }
 
 pub async fn run_start(port: u16) {

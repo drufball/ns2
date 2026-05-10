@@ -20,7 +20,6 @@ workspace = { path = "../workspace" }
 agents = { path = "../agents" }
 specs = { path = "../specs" }
 server = { path = "../server" }
-issue-backend = { path = "../issue-backend" }
 toml = "0.8"
 futures = "0.3"
 uuid = { workspace = true }

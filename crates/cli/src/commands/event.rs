@@ -123,15 +123,12 @@ pub async fn run_delete(server: &str, id: String) {
 /// - `payload_json`: optional JSON string; defaults to `null` if omitted.
 ///   Exits non-zero with an error message if provided but not valid JSON.
 pub async fn run_emit(server: &str, event_type: String, payload_json: Option<String>) {
-    let payload: serde_json::Value = payload_json.as_ref().map_or(
-        serde_json::Value::Null,
-        |s| {
-            serde_json::from_str(s).unwrap_or_else(|_| {
-                eprintln!("Error: invalid JSON payload — {s:?}");
-                std::process::exit(1);
-            })
-        },
-    );
+    let payload: serde_json::Value = payload_json.map_or(serde_json::Value::Null, |s| {
+        serde_json::from_str(&s).unwrap_or_else(|_| {
+            eprintln!("Error: invalid JSON payload — {s:?}");
+            std::process::exit(1);
+        })
+    });
 
     let url = format!("{server}/events/emit");
     let http = reqwest::Client::new();
