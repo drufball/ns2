@@ -5,23 +5,23 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use hooks::HookSource;
 
 use crate::state::AppState;
 
-/// `POST /webhooks/:hook_id`
+/// `POST /webhooks/:event_id`
 ///
-/// Receives an external webhook event, validates the HMAC signature (if the
-/// hook has a secret configured), parses the payload and publishes a
+/// Receives an external webhook event, looks up the named Event from the
+/// `EventStore`, validates the HMAC signature (if the event has a secret
+/// configured), parses the payload and publishes a
 /// [`events::SystemEvent::External`] to the event bus.
 pub async fn receive_webhook(
     State(state): State<AppState>,
-    Path(hook_id): Path<String>,
+    Path(event_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Look up the hook.
-    let Ok(hook) = state.hook_store.get_hook(&hook_id).await else {
+    // 1. Look up the Event in the EventStore.
+    let Ok(event) = state.event_store.get_event(&event_id).await else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -29,8 +29,8 @@ pub async fn receive_webhook(
             .into_response();
     };
 
-    // 2. Must be an External hook that is enabled.
-    let HookSource::External { secret } = &hook.source else {
+    // 2. Must be a Webhook event that is enabled.
+    let types::EventKind::Webhook { ref secret } = event.kind else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -38,7 +38,7 @@ pub async fn receive_webhook(
             .into_response();
     };
 
-    if !hook.enabled {
+    if !event.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "not found" })),
@@ -106,9 +106,11 @@ pub async fn receive_webhook(
     };
 
     // 5. Emit event.
-    state
-        .event_bus
-        .send(events::SystemEvent::External { hook_id, payload });
+    state.event_bus.send(events::SystemEvent::External {
+        event_id: event.id.clone(),
+        event_name: event.name.clone(),
+        payload,
+    });
 
     // 6. Return 200 OK.
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()

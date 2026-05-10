@@ -171,6 +171,7 @@ pub struct Event {
     pub name: String,
     pub kind: EventKind,
     pub description: Option<String>,
+    pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -181,21 +182,15 @@ pub struct Event {
 pub struct Hook {
     pub id: String,
     pub name: String,
-    pub source: HookSource,
+    /// Names of events this hook listens for (e.g. "issue.created",
+    /// "external.ci-complete", "timer.heartbeat"). Use `"*"` to match all.
+    pub event_names: Vec<String>,
     pub filter: Option<HookFilter>,
     pub action: HookAction,
     pub enabled: bool,
     pub created_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookSource {
-    Internal { event_types: Vec<String> },
-    External { secret: Option<String> },
-    Timer { schedule: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -589,6 +584,7 @@ mod tests {
                 secret: Some("s3cr3t".into()),
             },
             description: None,
+            enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -597,9 +593,29 @@ mod tests {
         assert_eq!(back.id, "abcd");
         assert_eq!(back.name, "ci-complete");
         assert!(back.description.is_none());
+        assert!(back.enabled);
         assert!(
             matches!(back.kind, EventKind::Webhook { secret: Some(ref s) } if s == "s3cr3t")
         );
+    }
+
+    #[test]
+    fn event_enabled_field_defaults_serde() {
+        // enabled=false should survive round-trip
+        let ev = Event {
+            id: "xyz1".into(),
+            name: "timer-daily".into(),
+            kind: EventKind::Timer {
+                schedule: "0 9 * * *".into(),
+            },
+            description: Some("daily timer".into()),
+            enabled: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
     }
 
     #[test]

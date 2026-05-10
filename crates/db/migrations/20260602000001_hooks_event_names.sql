@@ -1,0 +1,1 @@
+ALTER TABLE hooks ADD COLUMN event_names TEXT NOT NULL DEFAULT '[]';

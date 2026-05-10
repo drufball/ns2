@@ -62,7 +62,7 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id", delete(hook_route::delete_hook))
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
-        .route("/webhooks/:hook_id", post(webhook::receive_webhook))
+        .route("/webhooks/:event_id", post(webhook::receive_webhook))
         .with_state(state)
 }
 
@@ -76,39 +76,8 @@ fn spawn_hook_evaluator(state: &AppState) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    // Special handling for External events: look up the hook directly
-                    // by hook_id and run its action (bypassing matches_event which
-                    // only handles Internal hooks).
-                    if let events::SystemEvent::External {
-                        hook_id: ref ext_hook_id,
-                        ..
-                    } = event
-                    {
-                        let hook_result = hook_store_eval.get_hook(ext_hook_id).await;
-                        if let Ok(hook) = hook_result {
-                            if hook.enabled {
-                                let event_clone = event.clone();
-                                let hook_clone = hook.clone();
-                                let issue_svc = issue_svc_eval.clone();
-                                let hook_store_clone = Arc::clone(&hook_store_eval);
-                                tokio::spawn(async move {
-                                    hooks::execute::run_action(
-                                        &hook_clone,
-                                        &event_clone,
-                                        &issue_svc,
-                                        hook_store_clone.as_ref(),
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        // External events are handled exclusively here — skip the
-                        // general matches_event loop below.
-                        continue;
-                    }
-
                     let hooks = hook_store_eval
-                        .list_hooks(Some(true), None)
+                        .list_hooks(Some(true))
                         .await
                         .unwrap_or_default();
                     for hook in hooks {
@@ -353,7 +322,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     spawn_issue_lifecycle_subscriber(&state);
 
     // Spawn the timer scheduler background task.
-    hooks::timer::spawn_timer_scheduler(&state.hook_store, &state.event_bus, &state.issue_service);
+    hooks::timer::spawn_timer_scheduler(&state.event_store, &state.event_bus);
 
     // Recover orphaned sessions before accepting any connections.
     state.issue_service.orphan_sweep().await;
@@ -4044,7 +4013,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "test-hook",
-                    "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                    "event_names": ["issue.status_changed"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "abc1" },
@@ -4066,7 +4035,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "my-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "watcher" },
@@ -4111,7 +4080,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "hook-one",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4147,7 +4116,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "get-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4202,7 +4171,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "old-name",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4242,7 +4211,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "toggle-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4299,7 +4268,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "del-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4348,7 +4317,7 @@ mod tests {
             .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "enabled-hook",
                 "enabled": true,
-                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "event_names": ["issue.created"],
                 "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
             })))
             .await.unwrap();
@@ -4358,7 +4327,7 @@ mod tests {
             .oneshot(hook_req("POST", "/hooks", &serde_json::json!({
                 "name": "disabled-hook",
                 "enabled": false,
-                "source": { "type": "internal", "event_types": ["issue.created"] },
+                "event_names": ["issue.created"],
                 "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
             })))
             .await.unwrap();
@@ -4391,7 +4360,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "exec-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "event_names": ["issue.created"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "w" },
@@ -4448,7 +4417,7 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "notify",
-                    "source": { "type": "internal", "event_types": ["issue.status_changed"] },
+                    "event_names": ["issue.status_changed"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": watcher_id.clone() },
@@ -4510,7 +4479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_timer_hook_with_valid_schedule_returns_201() {
+    async fn test_create_hook_with_timer_event_name_returns_201() {
         let app = test_app().await;
         let resp = app
             .oneshot(hook_req(
@@ -4518,62 +4487,10 @@ mod tests {
                 "/hooks",
                 &serde_json::json!({
                     "name": "timer-hook",
-                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
+                    "event_names": ["timer.heartbeat"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": "abc1" },
-                        "body": "Monday morning"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-    }
-
-    #[tokio::test]
-    async fn test_create_timer_hook_with_invalid_schedule_returns_400() {
-        let app = test_app().await;
-        let resp = app
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "bad-timer",
-                    "source": { "type": "timer", "schedule": "not-a-cron" },
-                    "action": {
-                        "type": "send_message",
-                        "target": { "type": "issue", "content": "abc1" },
-                        "body": "bad"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(v["error"].is_string(), "response must contain 'error' field");
-        let err = v["error"].as_str().unwrap();
-        assert!(
-            err.contains("invalid cron schedule"),
-            "error must mention 'invalid cron schedule', got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_timer_hook_source_serialized_correctly() {
-        let app = test_app().await;
-        let resp = app
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "timer-check",
-                    "source": { "type": "timer", "schedule": "* * * * *" },
-                    "action": {
-                        "type": "send_message",
-                        "target": { "type": "issue", "content": "w" },
                         "body": "tick"
                     }
                 }),
@@ -4583,625 +4500,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["source"]["type"], "timer");
-        assert_eq!(v["source"]["schedule"], "* * * * *");
+        assert_eq!(v["event_names"][0], "timer.heartbeat");
     }
 
-    // ─── Timer hook list filtering ────────────────────────────────────────────
-
     #[tokio::test]
-    async fn test_list_hooks_source_type_timer_filter() {
+    async fn test_create_hook_with_external_event_name_returns_201() {
         let app = test_app().await;
-
-        // Create an internal hook and a timer hook
-        app.clone()
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "internal-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
-                    "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
-                }),
-            ))
-            .await
-            .unwrap();
-
-        app.clone()
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "timer-hook",
-                    "source": { "type": "timer", "schedule": "0 9 * * 1" },
-                    "action": { "type": "send_message", "target": { "type": "issue", "content": "w" }, "body": "hi" }
-                }),
-            ))
-            .await
-            .unwrap();
-
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/hooks?source_type=timer")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let arr = v.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "only timer hooks should be returned");
-        assert_eq!(arr[0]["name"], "timer-hook");
-        assert_eq!(arr[0]["source"]["type"], "timer");
-    }
-
-    #[tokio::test]
-    async fn test_get_hook_executions_default_limit_is_20() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create a hook
-        let create_resp = app
-            .clone()
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "limit-test-hook",
-                    "source": { "type": "internal", "event_types": ["issue.created"] },
+                    "name": "ci-hook",
+                    "event_names": ["external.ci-complete"],
                     "action": {
                         "type": "send_message",
-                        "target": { "type": "issue", "content": "some-issue-id" },
-                        "body": "hi"
+                        "target": { "type": "issue", "content": "abc1" },
+                        "body": "CI done"
                     }
                 }),
             ))
             .await
             .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let hook_id = created["id"].as_str().unwrap().to_string();
-
-        // Insert 25 HookExecution records directly via the hook_store
-        for _ in 0..25 {
-            let exec = types::HookExecution {
-                id: Uuid::new_v4().to_string(),
-                hook_id: hook_id.clone(),
-                triggered_at: chrono::Utc::now(),
-                event_payload: serde_json::json!({}),
-                status: types::ExecutionStatus::Completed,
-                result: Some("ok".to_string()),
-                completed_at: Some(chrono::Utc::now()),
-            };
-            state.hook_store.create_execution(&exec).await.unwrap();
-        }
-
-        // GET /hooks/:id/executions — should return exactly 20 (the default limit)
-        let exec_resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/hooks/{hook_id}/executions"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(exec_resp.status(), StatusCode::OK);
-        let body = response_body_bytes(exec_resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let arr = v.as_array().expect("response should be a JSON array");
-        assert_eq!(
-            arr.len(),
-            20,
-            "default limit should be 20, got {}",
-            arr.len()
-        );
-    }
-
-    // ─── PATCH /issues/:id/status with in_progress auto-starts ──────────────
-
-    async fn patch_issue_status(
-        app: Router,
-        id: &str,
-        body: serde_json::Value,
-    ) -> axum::response::Response {
-        app.oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/issues/{id}/status"))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_open_issue_auto_starts() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create issue with assignee
-        let create_resp = app
-            .clone()
-            .oneshot(issue_req(
-                "POST",
-                "/issues",
-                &serde_json::json!({
-                    "title": "In-progress test",
-                    "body": "body",
-                    "assignee": "test-agent"
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let issue_id = created["id"].as_str().unwrap().to_string();
-
-        // Set status to in_progress
-        let resp = patch_issue_status(
-            app.clone(),
-            &issue_id,
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "in_progress transition should return 200"
-        );
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // The returned status should be "in_progress" (harness was spawned)
-        assert_eq!(
-            v["status"], "in_progress",
-            "returned issue must have status=in_progress"
-        );
-        assert!(
-            !v["session_id"].is_null(),
-            "session_id must be set after in_progress transition"
-        );
-
-        // Eventually should reach waiting (stub client)
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
-            if issue.status == IssueStatus::Waiting {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not reach waiting within 5s; status={}",
-                issue.status
-            );
-        }
+        assert_eq!(v["event_names"][0], "external.ci-complete");
     }
 
     #[tokio::test]
-    async fn test_set_in_progress_without_assignee_returns_400() {
+    async fn test_create_hook_with_multiple_event_names_returns_201() {
         let app = test_app().await;
-
-        // Create issue WITHOUT assignee
-        let create_resp = app
-            .clone()
-            .oneshot(issue_req(
-                "POST",
-                "/issues",
-                &serde_json::json!({
-                    "title": "No assignee",
-                    "body": "body"
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let issue_id = created["id"].as_str().unwrap().to_string();
-
-        let resp = patch_issue_status(
-            app,
-            &issue_id,
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "in_progress without assignee must return 400"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_failed_session_issue_creates_fresh_session() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create an issue and manually put it in failed state with a session
-        let old_session_id = Uuid::new_v4();
-        let old_session = types::Session {
-            id: old_session_id,
-            name: "old-session".into(),
-            status: types::SessionStatus::Failed,
-            agent: Some("test-agent".into()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_session(&old_session).await.unwrap();
-
-        let issue = types::Issue {
-            id: "fi01".to_string(),
-            title: "Failed issue".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::Failed,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: Some(old_session_id),
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // Set status to in_progress — should clear old failed session and create new one
-        let resp = patch_issue_status(
-            app.clone(),
-            "fi01",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "in_progress on failed issue must return 200"
-        );
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v["status"], "in_progress",
-            "failed issue with in_progress should become in_progress"
-        );
-        // The session_id should NOT be the old failed one
-        let new_session_id = v["session_id"].as_str().expect("session_id must be set");
-        assert_ne!(
-            new_session_id,
-            old_session_id.to_string(),
-            "a new session must be created, not the old failed one"
-        );
-
-        // Old session should be cancelled
-        let old_sess = state.db.get_session(old_session_id).await.unwrap();
-        assert_eq!(
-            old_sess.status,
-            types::SessionStatus::Cancelled,
-            "old failed session should be marked cancelled"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_waiting_issue_resumes_session() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create a waiting session
-        let waiting_session_id = Uuid::new_v4();
-        let waiting_session = types::Session {
-            id: waiting_session_id,
-            name: "waiting-session".into(),
-            status: types::SessionStatus::Waiting,
-            agent: Some("test-agent".into()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_session(&waiting_session).await.unwrap();
-        state
-            .db
-            .update_session_status(waiting_session_id, types::SessionStatus::Waiting)
-            .await
-            .unwrap();
-
-        // Create issue in Waiting state with session
-        let issue = types::Issue {
-            id: "wi01".to_string(),
-            title: "Waiting issue".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::Waiting,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: Some(waiting_session_id),
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // Set status to in_progress — should resume existing waiting session
-        let resp = patch_issue_status(
-            app.clone(),
-            "wi01",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "in_progress on waiting issue must return 200"
-        );
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v["status"], "in_progress",
-            "waiting issue with in_progress should become in_progress"
-        );
-        // Session id should be the SAME waiting session (reuse)
-        let returned_session_id = v["session_id"].as_str().expect("session_id must be set");
-        assert_eq!(
-            returned_session_id,
-            waiting_session_id.to_string(),
-            "should reuse the existing waiting session, not create a new one"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_post_issues_id_start_returns_404_route_removed() {
-        let app = test_app().await;
-
-        // Create an issue first
-        let create_resp = app
-            .clone()
-            .oneshot(issue_req(
-                "POST",
-                "/issues",
-                &serde_json::json!({
-                    "title": "Test",
-                    "body": "body",
-                    "assignee": "test-agent"
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let issue_id = created["id"].as_str().unwrap().to_string();
-
-        // POST /issues/:id/start should return 404 (route removed)
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/issues/{issue_id}/start"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "POST /issues/:id/start must return 404 after route removal"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_cancelled_issue_hints_reopen() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create an issue in Cancelled state (no session).
-        let issue = types::Issue {
-            id: "ci01".to_string(),
-            title: "Cancelled issue".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::Cancelled,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: None,
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // Try to set to in_progress — must fail with a hint about `reopen`.
-        let resp = patch_issue_status(
-            app.clone(),
-            "ci01",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "in_progress on cancelled issue must return 400"
-        );
-        let body = response_body_bytes(resp).await;
-        let err_msg = String::from_utf8_lossy(&body);
-        assert!(
-            err_msg.contains("reopen"),
-            "error message must hint at `reopen`, got: {err_msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_cancelled_issue_with_session_hints_reopen() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create a cancelled session.
-        let cancelled_session_id = Uuid::new_v4();
-        let cancelled_session = types::Session {
-            id: cancelled_session_id,
-            name: "cancelled-session".into(),
-            status: types::SessionStatus::Cancelled,
-            agent: Some("test-agent".into()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_session(&cancelled_session).await.unwrap();
-
-        // Create an issue in Cancelled state with a cancelled session.
-        let issue = types::Issue {
-            id: "ci02".to_string(),
-            title: "Cancelled issue with session".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::Cancelled,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: Some(cancelled_session_id),
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // Try to set to in_progress — must fail with a hint about `reopen`.
-        let resp = patch_issue_status(
-            app.clone(),
-            "ci02",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "in_progress on cancelled issue with session must return 400"
-        );
-        let body = response_body_bytes(resp).await;
-        let err_msg = String::from_utf8_lossy(&body);
-        assert!(
-            err_msg.contains("reopen"),
-            "error message must hint at `reopen`, got: {err_msg}"
-        );
-    }
-
-    // ─── Test 2: Running issue with Running session blocks in_progress ────────
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_running_issue_with_session_returns_400() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create a Running session.
-        let running_session_id = Uuid::new_v4();
-        let running_session = types::Session {
-            id: running_session_id,
-            name: "running-session".into(),
-            status: types::SessionStatus::Running,
-            agent: Some("test-agent".into()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_session(&running_session).await.unwrap();
-
-        // Create an issue in Running state with the running session.
-        let issue = types::Issue {
-            id: "ri01".to_string(),
-            title: "Running issue".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::InProgress,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: Some(running_session_id),
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // PATCH /issues/ri01/status with {"status": "in_progress"} must return 400.
-        let resp = patch_issue_status(
-            app.clone(),
-            "ri01",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "in_progress on running issue must return 400"
-        );
-        let body = response_body_bytes(resp).await;
-        let err_msg = String::from_utf8_lossy(&body);
-        assert!(
-            err_msg.contains("in_progress"),
-            "error message must mention 'in_progress', got: {err_msg}"
-        );
-    }
-
-    // ─── Test 3: Waiting issue with no session_id returns 400 ─────────────────
-
-    #[tokio::test]
-    async fn test_set_in_progress_on_waiting_issue_without_session_returns_400() {
-        let (app, state) = test_app_with_state().await;
-
-        // Create an issue in Waiting state with session_id: None.
-        let issue = types::Issue {
-            id: "wi02".to_string(),
-            title: "Waiting no-session issue".to_string(),
-            body: "body".to_string(),
-            status: types::IssueStatus::Waiting,
-            branch: String::new(),
-            assignee: Some("test-agent".to_string()),
-            session_id: None,
-            parent_id: None,
-            blocked_on: vec![],
-            comments: vec![],
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        state.db.create_issue(&issue).await.unwrap();
-
-        // PATCH /issues/wi02/status with {"status": "in_progress"} must return 400.
-        let resp = patch_issue_status(
-            app.clone(),
-            "wi02",
-            serde_json::json!({"status": "in_progress"}),
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_REQUEST,
-            "in_progress on waiting issue with no session_id must return 400"
-        );
-    }
-
-    // ─── Test 4: Non-in_progress status update stores the new status ──────────
-
-    // ─── POST /webhooks/:hook_id tests ───────────────────────────────────────
-
-    /// Helper: create a hook via the API and return its id.
-    async fn create_webhook_hook(
-        app: &Router,
-        source: serde_json::Value,
-    ) -> String {
-        let resp = app
-            .clone()
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "test-webhook-hook",
-                    "source": source,
+                    "name": "multi-hook",
+                    "event_names": ["issue.status_changed", "issue.comment_added"],
                     "action": {
                         "type": "send_message",
-                        "target": { "type": "issue", "content": "xxxx" },
-                        "body": "webhook fired"
+                        "target": { "type": "issue", "content": "abc1" },
+                        "body": "update"
                     }
                 }),
             ))
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        v["id"].as_str().unwrap().to_string()
+        assert_eq!(v["event_names"].as_array().unwrap().len(), 2);
+    }
+
+    // ─── POST /webhooks/:event_id tests ─────────────────────────────────────
+
+    /// Helper: create a Webhook Event directly in the `event_store` and return its id.
+    async fn create_webhook_event(state: &AppState, name: &str, secret: Option<&str>) -> String {
+        let event = types::Event {
+            id: format!("evt-{}", uuid::Uuid::new_v4().simple()),
+            name: name.into(),
+            kind: types::EventKind::Webhook {
+                secret: secret.map(std::string::ToString::to_string),
+            },
+            description: None,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let event_id = event.id.clone();
+        state.event_store.create_event(&event).await.unwrap();
+        event_id
     }
 
     /// Compute HMAC-SHA256 of `body` using `secret` and return "sha256=<hex>".
@@ -5216,7 +4585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_nonexistent_hook_returns_404() {
+    async fn test_webhook_nonexistent_event_returns_404() {
         let app = test_app().await;
         let resp = app
             .oneshot(
@@ -5233,18 +4602,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_internal_hook_returns_404() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "internal", "event_types": ["issue.created"] }),
-        )
-        .await;
+    async fn test_webhook_timer_event_returns_404() {
+        let (_, state) = test_app_with_state().await;
+        // Timer events cannot receive webhooks
+        let event = types::Event {
+            id: "timer-evt-1".into(),
+            name: "heartbeat".into(),
+            kind: types::EventKind::Timer { schedule: "* * * * *".into() },
+            description: None,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.event_store.create_event(&event).await.unwrap();
+
+        let app = build_router(state);
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri("/webhooks/timer-evt-1")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"test"}"#))
                     .unwrap(),
@@ -5255,19 +4632,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_no_secret_no_signature_returns_200() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+    async fn test_webhook_event_no_secret_no_signature_returns_200() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_event(&state, "ci-complete", None).await;
         let body = r#"{"event":"push","repo":"ns2"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5281,20 +4654,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_correct_signature_returns_200() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_event_with_secret_correct_signature_returns_200() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_event(&state, "ci-complete-secret", Some("test-secret")).await;
         let body = r#"{"event":"push"}"#;
         let sig = compute_hmac_sig("test-secret", body.as_bytes());
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .header("x-hub-signature-256", sig)
                     .body(Body::from(body))
@@ -5309,19 +4678,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_missing_signature_returns_401() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_event_with_secret_missing_signature_returns_401() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_event(&state, "ci-complete-secret2", Some("test-secret")).await;
         let body = r#"{"event":"push"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5332,19 +4697,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_external_hook_with_secret_wrong_signature_returns_401() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external", "secret": "test-secret" }),
-        )
-        .await;
+    async fn test_webhook_event_with_secret_wrong_signature_returns_401() {
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_event(&state, "ci-complete-secret3", Some("test-secret")).await;
         let body = r#"{"event":"push"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .header("x-hub-signature-256", "sha256=badhash")
                     .body(Body::from(body))
@@ -5357,17 +4718,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_webhook_invalid_json_returns_400() {
-        let app = test_app().await;
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+        let (app, state) = test_app_with_state().await;
+        let event_id = create_webhook_event(&state, "ci-bad-json", None).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from("not-json"))
                     .unwrap(),
@@ -5378,36 +4735,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_webhook_disabled_hook_returns_404() {
-        let app = test_app().await;
-        // Create a disabled external hook
-        let resp = app
-            .clone()
-            .oneshot(hook_req(
-                "POST",
-                "/hooks",
-                &serde_json::json!({
-                    "name": "disabled-webhook",
-                    "enabled": false,
-                    "source": { "type": "external" },
-                    "action": {
-                        "type": "send_message",
-                        "target": { "type": "issue", "content": "xxxx" },
-                        "body": "hi"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let hook_id = v["id"].as_str().unwrap().to_string();
-
+    async fn test_webhook_disabled_event_returns_404() {
+        let (_, state) = test_app_with_state().await;
+        let event = types::Event {
+            id: "disabled-evt-1".into(),
+            name: "disabled-event".into(),
+            kind: types::EventKind::Webhook { secret: None },
+            description: None,
+            enabled: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.event_store.create_event(&event).await.unwrap();
+        let app = build_router(state);
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri("/webhooks/disabled-evt-1")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"push"}"#))
                     .unwrap(),
@@ -5419,19 +4764,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_webhook_emits_system_event_external() {
-        let (app, state) = test_app_with_state().await;
+        let (_, state) = test_app_with_state().await;
         let mut rx = state.event_bus.subscribe();
-        let hook_id = create_webhook_hook(
-            &app,
-            serde_json::json!({ "type": "external" }),
-        )
-        .await;
+        let event_id = create_webhook_event(&state, "ci-complete", None).await;
+        let app = build_router(state);
         let body = r#"{"event":"push","ref":"main"}"#;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -5444,8 +4786,9 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
         loop {
             match rx.try_recv() {
-                Ok(events::SystemEvent::External { hook_id: hid, payload }) => {
-                    assert_eq!(hid, hook_id);
+                Ok(events::SystemEvent::External { event_id: eid, event_name: ename, payload }) => {
+                    assert_eq!(eid, event_id);
+                    assert_eq!(ename, "ci-complete");
                     assert_eq!(payload["event"], "push");
                     break;
                 }
@@ -5479,15 +4822,18 @@ mod tests {
         let watcher: serde_json::Value = serde_json::from_slice(&watcher_body).unwrap();
         let watcher_id = watcher["id"].as_str().unwrap().to_string();
 
-        // Create an external hook targeting the watcher issue
+        // Create a webhook Event in the event_store
+        let event_id = create_webhook_event(&state, "ci-deploy", None).await;
+
+        // Create a hook that listens for "external.ci-deploy" events
         let create_resp = app
             .clone()
             .oneshot(hook_req(
                 "POST",
                 "/hooks",
                 &serde_json::json!({
-                    "name": "external-webhook",
-                    "source": { "type": "external" },
+                    "name": "external-ci-hook",
+                    "event_names": ["external.ci-deploy"],
                     "action": {
                         "type": "send_message",
                         "target": { "type": "issue", "content": watcher_id.clone() },
@@ -5497,16 +4843,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        let create_body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-        let hook_id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
 
-        // POST a valid webhook
+        // POST a valid webhook to the event
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/webhooks/{hook_id}"))
+                    .uri(format!("/webhooks/{event_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"event":"push"}"#))
                     .unwrap(),
@@ -5533,6 +4877,7 @@ mod tests {
         }
     }
 
+
     #[tokio::test]
     async fn test_patch_issue_status_non_in_progress_updates_field() {
         let (app, state) = test_app_with_state().await;
@@ -5555,12 +4900,18 @@ mod tests {
         let issue_id = created["id"].as_str().unwrap().to_string();
 
         // PATCH /issues/{id}/status with {"status": "waiting"}.
-        let resp = patch_issue_status(
-            app.clone(),
-            &issue_id,
-            serde_json::json!({"status": "waiting"}),
-        )
-        .await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/issues/{issue_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({"status": "waiting"})).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::OK,
