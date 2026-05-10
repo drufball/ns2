@@ -2,7 +2,7 @@
 targets:
   - crates/harness/src/**/*.rs
   - crates/tools/src/**/*.rs
-verified: 2026-05-10T11:07:49Z
+verified: 2026-06-02T00:00:00Z
 ---
 
 # harness crate
