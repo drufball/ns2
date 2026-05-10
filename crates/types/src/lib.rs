@@ -156,6 +156,26 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+// ── Named Event domain types ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKind {
+    Webhook { secret: Option<String> },
+    Timer { schedule: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub id: String,
+    pub name: String,
+    pub kind: EventKind,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ── Hook domain types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

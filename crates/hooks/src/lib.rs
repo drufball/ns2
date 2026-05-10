@@ -241,6 +241,18 @@ pub fn generate_hook_id() -> String {
         .collect()
 }
 
+// ── Event ID generation ───────────────────────────────────────────────────────
+
+#[must_use]
+pub fn generate_event_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let id = uuid::Uuid::new_v4();
+    let bytes = id.as_bytes();
+    (0..4)
+        .map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -816,7 +828,7 @@ mod tests {
         // ── Helper: build an IssueService backed by an in-memory SQLite db ────────
 
         async fn make_issue_service() -> issues::IssueService {
-            let (db, _hook_store) = db::connect("sqlite::memory:").await.unwrap();
+            let (db, _hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
             issues::IssueService::new(db)
         }
 

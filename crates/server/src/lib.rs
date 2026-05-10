@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{events_route, hook as hook_route, issue, session, webhook};
+use routes::{events_route, hook as hook_route, issue, named_event as named_event_route, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -63,6 +63,11 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
         .route("/webhooks/:hook_id", post(webhook::receive_webhook))
+        // Named event CRUD
+        .route("/named-events", post(named_event_route::create_event))
+        .route("/named-events", get(named_event_route::list_events))
+        .route("/named-events/:id", get(named_event_route::get_event))
+        .route("/named-events/:id", delete(named_event_route::delete_event))
         .with_state(state)
 }
 
@@ -329,7 +334,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store) = db::connect(&db_url).await?;
+    let (db, hook_store, event_store) = db::connect(&db_url).await?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 
@@ -343,6 +348,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         model: config.model,
         event_bus,
         hook_store,
+        event_store,
     };
 
     // Spawn the hook evaluator background task.
@@ -425,12 +431,12 @@ mod tests {
 
     /// Helper to build an in-memory hook store suitable for tests.
     async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
-        let (_db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (_db, hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
         hook_store
     }
 
     pub async fn test_state() -> AppState {
-        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
@@ -445,6 +451,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         }
     }
 
@@ -2995,7 +3002,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3013,6 +3020,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3109,7 +3117,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3127,6 +3135,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3322,7 +3331,7 @@ mod tests {
             }
         }
 
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
@@ -3338,6 +3347,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -5681,5 +5691,225 @@ mod tests {
             "session must be marked Cancelled in DB"
         );
     }
-}
 
+    // ─── POST /named-events + GET /named-events + DELETE ─────────────────────
+
+    fn named_event_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_webhook_returns_200() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "ci-complete",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["id"].is_string());
+        assert_eq!(v["id"].as_str().unwrap().len(), 4);
+        assert_eq!(v["name"], "ci-complete");
+        assert_eq!(v["kind"]["type"], "webhook");
+        assert_eq!(v["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_timer_with_valid_schedule_returns_200() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "heartbeat",
+                    "kind": { "type": "timer", "schedule": "* * * * *" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["name"], "heartbeat");
+        assert_eq!(v["kind"]["type"], "timer");
+        assert_eq!(v["kind"]["schedule"], "* * * * *");
+    }
+
+    #[tokio::test]
+    async fn test_create_named_event_timer_invalid_schedule_returns_400() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "bad-timer",
+                    "kind": { "type": "timer", "schedule": "not-valid" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string());
+        let err = v["error"].as_str().unwrap();
+        assert!(
+            err.contains("invalid cron schedule"),
+            "error must mention 'invalid cron schedule', got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_list_delete_named_event() {
+        let app = test_app().await;
+
+        // Create
+        let create_resp = app
+            .clone()
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "ci-complete",
+                    "kind": { "type": "webhook" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let event_id = created["id"].as_str().unwrap().to_string();
+
+        // List → 1
+        let list_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/named-events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(list_resp).await;
+        let events: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["id"], event_id);
+
+        // Delete
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/named-events/{event_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+        // List → 0
+        let list_resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri("/named-events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response_body_bytes(list_resp2).await;
+        let events2: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(events2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_named_event_not_found_returns_404() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/named-events/no-such-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_named_event_by_id_returns_event() {
+        let app = test_app().await;
+
+        let create_resp = app
+            .clone()
+            .oneshot(named_event_req(
+                "POST",
+                "/named-events",
+                &serde_json::json!({
+                    "name": "deploy-done",
+                    "kind": { "type": "webhook", "secret": "mysecret" },
+                    "description": "Fired when deploy completes"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let event_id = created["id"].as_str().unwrap().to_string();
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/named-events/{event_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = response_body_bytes(get_resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"], event_id);
+        assert_eq!(v["name"], "deploy-done");
+        assert_eq!(v["kind"]["type"], "webhook");
+        assert_eq!(v["description"], "Fired when deploy completes");
+    }
+
+    #[tokio::test]
+    async fn test_delete_named_event_not_found_returns_404() {
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/named-events/no-such-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
