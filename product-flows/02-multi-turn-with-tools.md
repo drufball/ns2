@@ -106,11 +106,11 @@ Expected: only the last assistant turn is shown — no tool calls, no first-run 
 - [ ] `session tail` shows `[tool: ...]` and `[result: ...]` lines for both tool calls
 
 **Multi-turn:**
-- [ ] `session send` on a `completed` session returns 200
+- [ ] `session send` on a `waiting` session returns 200
 - [ ] The second run has full conversation history (Claude knows `7742` without re-reading)
 - [ ] Claude's second response contains `15484` (7742 × 2)
 - [ ] `session tail --turns 1` replays only the final turn
-- [ ] The session returns to `completed` after the second run
+- [ ] The session returns to `waiting` after the second run
 
 **General:**
 - [ ] No panics or unhandled errors in server output

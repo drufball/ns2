@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-06-02T00:00:00Z
+verified: 2026-05-10T18:53:22Z
 ---
 
 # server crate
@@ -37,6 +37,19 @@ Three background tasks are spawned at server startup:
 - `msg_senders` — maps `session_id → mpsc::Sender<String>`, used to deliver messages to a running harness.
 
 No module other than `state.rs` may insert into or remove from these maps. All harness spawning goes through `spawn_harness_sync`, which creates both channels, registers them atomically, and cleans them up when the harness exits.
+
+## SSE event stream
+
+`GET /events` is the Server-Sent Events endpoint. Query parameters:
+
+- `session_id` — filter to events from a specific session
+- `issue_id` — filter to events related to a specific issue
+- `types` — comma-separated broad event type names (`session`, `issue`, `external`, `timer`, `mcp`). If absent, all event types are emitted.
+- `last_turns` — when `session_id` is set, limit historical replay to the last N turns. `0` skips all history.
+- `event_type` — fine-grained event type filter (e.g. `"mcp.channel_notification"`). When set, only events matching this exact type are passed.
+- `channel_id` — when set, only `McpChannelNotification` events with a matching `channel_id` are passed. Used by `ns2 mcp` to subscribe to a personal channel.
+
+The `event_type` and `channel_id` filters are used together by `ns2 mcp` to efficiently receive only the notifications intended for a specific developer channel.
 
 ## POST /webhooks/:event_id
 

@@ -1,7 +1,8 @@
 ---
 targets:
   - crates/cli/src/commands/issue.rs
-verified: 2026-06-02T00:00:00Z
+  - crates/cli/src/main.rs
+verified: 2026-05-10T18:53:25Z
 ---
 
 # ns2 issue
@@ -35,7 +36,9 @@ id=$(ns2 issue new --title "Add retry logic" --body "..." --assignee swe \
 
 `--status in_progress` sets the status (starting the agent) immediately after creation. `--wait` blocks until the issue reaches a terminal state and always prints the issue ID to stdout last. `--watch` streams live SSE events to stderr while `--wait` runs, keeping stdout capturable.
 
-`--subscribe issue:<id>` (or `--subscribe session:<id>`) creates a hook immediately after the issue is created that delivers notifications on `issue.status_changed` and `issue.comment_added` events. The hook ID goes to stderr; stdout still only contains the issue ID. This calls the same logic as `ns2 issue subscribe`, ensuring no drift between the two paths.
+`--subscribe issue:<id>` (or `--subscribe session:<id>` or `--subscribe mcp:<channel_id>`) creates a hook immediately after the issue is created that delivers notifications on `issue.status_changed` and `issue.comment_added` events. The hook ID goes to stderr; stdout still only contains the issue ID. This calls the same logic as `ns2 issue subscribe`, ensuring no drift between the two paths.
+
+Add `--recursive` alongside `--subscribe` to subscribe to the entire issue tree rather than just the one issue. A recursive subscription fires for any descendant issue (child, grandchild, etc.) in addition to the root. Under the hood this creates a hook named `subscribe-{id}-recursive` whose filter matches `data.issue.ancestor_ids contains <id>` instead of `data.issue.id eq <id>`.
 
 ## Setting status and starting
 
@@ -52,3 +55,16 @@ id=$(ns2 issue new --title "Add retry logic" --body "..." --assignee swe \
 ## Orchestration
 
 Issues support parent/child and blocking relationships for multi-agent workflows. Set `--parent` to nest an issue under another, and `--blocked-on` (repeatable) to declare that an issue can't start until its dependencies are complete. Filter `issue list` by these fields to navigate complex trees.
+
+## Subscribing to events
+
+`ns2 issue subscribe --id <id> --deliver-to <target>` creates a hook that fires on `issue.status_changed` and `issue.comment_added` events for that issue. The new hook ID is printed to stdout.
+
+`--deliver-to` accepts three target formats:
+- `issue:<id>` — sends a message to the specified issue
+- `session:<id>` — sends a message to the specified session
+- `mcp:<channel_id>` — creates an `mcp_notify` hook that emits a `McpChannelNotification` on the event bus with the given `channel_id`. Used with `ns2 mcp` for push-based notifications in Claude Code.
+
+Add `--recursive` to subscribe to the entire subtree: the hook fires for any descendant issue (child, grandchild, etc.) as well as the root. Without `--recursive` the hook name is `subscribe-{id}` and the filter is `data.issue.id eq <id>`; with `--recursive` the name is `subscribe-{id}-recursive` and the filter is `data.issue.ancestor_ids contains <id>`.
+
+`ns2 issue new --subscribe <target> [--recursive]` does the same thing immediately after creating the issue.
