@@ -5,8 +5,6 @@ Create an issue, assign it to an agent, set status to in_progress to automatical
 
 ## Setup
 
-Run each command via `docker exec ns2-flow-03 bash -c '...'`:
-
 ```bash
 /fixtures/init-git-repo.sh
 /fixtures/copy-env.sh

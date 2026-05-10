@@ -4,8 +4,6 @@ Create internal hooks that react to issue state changes and deliver notification
 
 ## Setup
 
-Run each command via `docker exec ns2-flow-04 bash -c '...'`:
-
 ```bash
 /fixtures/init-git-repo.sh
 /fixtures/copy-env.sh

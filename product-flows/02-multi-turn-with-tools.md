@@ -5,8 +5,6 @@ Claude writes and reads files using tools across multiple turns within a session
 
 ## Setup
 
-Run each command via `docker exec ns2-flow-02 bash -c '...'`:
-
 ```bash
 /fixtures/init-git-repo.sh
 /fixtures/seed-multi-turn.sh

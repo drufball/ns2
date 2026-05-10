@@ -3,13 +3,7 @@
 
 Full session lifecycle using the real Anthropic API. This is the most basic end-to-end smoke test — it verifies the harness connects to Anthropic, processes a real response, and stores it correctly.
 
-## Prerequisites
-
-`ANTHROPIC_API_KEY` must be set in your shell.
-
 ## Setup
-
-Run each command via `docker exec ns2-flow-01 bash -c '...'`:
 
 ```bash
 /fixtures/init-git-repo.sh
