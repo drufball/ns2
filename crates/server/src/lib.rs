@@ -2719,7 +2719,7 @@ mod tests {
             id: "mi01".to_string(),
             title: "Issue A".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
@@ -2733,7 +2733,7 @@ mod tests {
             id: "mi02".to_string(),
             title: "Issue B".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
@@ -2809,7 +2809,7 @@ mod tests {
             id: "ip01".to_string(),
             title: "Already Running Issue".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
@@ -2864,24 +2864,22 @@ mod tests {
 
     // ─── P4: stop_map not cleared on Error ───────────────────────────────────
 
-    /// After a `SessionEvent::Error`, the issue watcher exits (clearing its `stopped_status`).
-    /// If the same session later emits Done (a second watcher run), the issue must
-    /// transition to Waiting (not Completed), proving the `stop_map` was cleared.
-    ///
-    /// We verify this by checking the `harness_spawn` watcher lifecycle:
-    /// Error → issue becomes Failed; subsequent Done on a new watcher → Waiting.
+    /// After `SessionEvent::Error`, the global subscriber removes the session's
+    /// entry from `stop_map`. If Done arrives later for the same session,
+    /// the issue must transition to Waiting (not Completed), proving
+    /// the `stop_map` was cleared by the Error handler.
     #[tokio::test]
-    async fn test_error_then_done_on_new_watcher_produces_waiting_not_completed() {
-        use crate::harness_spawn::spawn_harness_sync;
+    async fn test_error_clears_stop_map_so_done_produces_waiting() {
         use events::{SessionEvent, StopEventStatus, SystemEvent};
         use types::{IssueStatus, Session, SessionStatus};
 
         let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
 
-        // Create a session and a running issue.
+        // Create a session and an issue linked to it.
         let session = Session {
             id: Uuid::new_v4(),
-            name: "error-done-test".into(),
+            name: "error-clears-stop-map".into(),
             status: SessionStatus::Created,
             agent: None,
             created_at: chrono::Utc::now(),
@@ -2890,10 +2888,10 @@ mod tests {
         state.db.create_session(&session).await.unwrap();
 
         let issue = types::Issue {
-            id: "ed01".to_string(),
-            title: "Error then Done".to_string(),
+            id: "ecsm01".to_string(),
+            title: "Error clears stop map".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
@@ -2905,12 +2903,10 @@ mod tests {
         };
         state.db.create_issue(&issue).await.unwrap();
 
-        // Spawn first harness watcher.
-        let _tx1 = spawn_harness_sync(&state, session.clone(), Some("ed01".into()));
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Emit Stopped{Complete} for this session — this would set stopped_status
-        // if it were processed before Done.
+        // Emit Stopped{Complete} — would mark the issue Completed on Done
+        // if the stop_map entry were retained.
         state.event_bus.send(SystemEvent::Session {
             session_id: session.id,
             event: SessionEvent::Stopped {
@@ -2919,7 +2915,8 @@ mod tests {
             },
         });
 
-        // Emit Error — the first watcher should mark the issue Failed and exit.
+        // Emit Error — global subscriber should fail the issue AND clear the
+        // stop_map entry for this session.
         state.event_bus.send(SystemEvent::Session {
             session_id: session.id,
             event: SessionEvent::Error {
@@ -2931,7 +2928,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ed01".to_string()).await.unwrap();
+            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
             if fetched.status == IssueStatus::Failed {
                 break;
             }
@@ -2942,17 +2939,14 @@ mod tests {
             );
         }
 
-        // Reset issue to Running for the next watcher cycle.
-        let mut reset_issue = state.db.get_issue("ed01".to_string()).await.unwrap();
-        reset_issue.status = IssueStatus::Running;
+        // Reset issue back to InProgress so it can transition again.
+        let mut reset_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+        reset_issue.status = IssueStatus::InProgress;
         state.db.update_issue(&reset_issue).await.unwrap();
 
-        // Spawn a NEW watcher (fresh watcher with cleared stopped_status).
-        let _tx2 = spawn_harness_sync(&state, session.clone(), Some("ed01".into()));
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Emit Done WITHOUT a preceding Stopped event — the new watcher must
-        // produce Waiting (not Completed), proving the stop_map was NOT carried over.
+        // Now emit Done WITHOUT a preceding Stopped for this session.
+        // Because Error already cleared the stop_map entry, the subscriber
+        // must park the issue as Waiting (not Completed).
         state.event_bus.send(SystemEvent::Session {
             session_id: session.id,
             event: SessionEvent::Done,
@@ -2961,29 +2955,27 @@ mod tests {
         let deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ed01".to_string()).await.unwrap();
+            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
             if fetched.status == IssueStatus::Waiting {
                 break;
             }
             assert_ne!(
                 fetched.status,
                 IssueStatus::Completed,
-                "issue became Completed — stop_map was carried over from the Error watcher; \
-                 expected Waiting (stop_map cleared)"
+                "issue became Completed — stop_map entry was not cleared by Error"
             );
             assert!(
                 tokio::time::Instant::now() <= deadline2,
-                "issue did not become Waiting within 3s after second Done (status={})",
+                "issue did not become Waiting within 3s after Done (status={})",
                 fetched.status
             );
         }
 
-        let final_issue = state.db.get_issue("ed01".to_string()).await.unwrap();
+        let final_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
         assert_eq!(
             final_issue.status,
             IssueStatus::Waiting,
-            "after Error (watcher exits and clears stop_map) then Done on new watcher, \
-             issue must be Waiting, not Completed"
+            "Done after Error must produce Waiting, not Completed — stop_map must be cleared"
         );
     }
 
