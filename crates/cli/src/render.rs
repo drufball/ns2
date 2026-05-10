@@ -241,7 +241,6 @@ pub struct IssueTreeNode {
 /// Return the symbol and status label for an issue status.
 pub fn issue_status_symbol(status: &IssueStatus, tick: usize) -> (String, &'static str) {
     match status {
-        IssueStatus::Running => (spinner_char(tick).to_string(), "running"),
         IssueStatus::InProgress => (spinner_char(tick).to_string(), "in_progress"),
         IssueStatus::Completed => ("✔".to_string(), "completed"),
         IssueStatus::Failed => ("✗".to_string(), "failed"),
@@ -422,18 +421,18 @@ mod tests {
 
     #[test]
     fn format_issue_event_status_changed_shows_arrow() {
-        let issue = make_issue("ab12", "Test", IssueStatus::Running);
+        let issue = make_issue("ab12", "Test", IssueStatus::InProgress);
         let line = format_issue_event(&IssueEvent::StatusChanged {
             issue,
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         });
         assert!(
             line.contains("[status_changed]"),
             "must contain [status_changed] tag"
         );
         assert!(line.contains("open"), "must contain 'from' status");
-        assert!(line.contains("running"), "must contain 'to' status");
+        assert!(line.contains("in_progress"), "must contain 'to' status");
         assert!(line.contains('→'), "must contain arrow");
     }
 
@@ -442,18 +441,18 @@ mod tests {
         let issue = make_issue("ab12", "Test", IssueStatus::Completed);
         let line = format_issue_event(&IssueEvent::StatusChanged {
             issue,
-            from: IssueStatus::Running,
+            from: IssueStatus::InProgress,
             to: IssueStatus::Completed,
         });
         assert!(
-            line.contains("running → completed"),
-            "should show running → completed"
+            line.contains("in_progress → completed"),
+            "should show in_progress → completed"
         );
     }
 
     #[test]
     fn format_issue_event_comment_added_shows_author_and_body() {
-        let issue = make_issue("ab12", "Test", IssueStatus::Running);
+        let issue = make_issue("ab12", "Test", IssueStatus::InProgress);
         let comment = IssueComment {
             author: "swe".into(),
             body: "Agent completed the task and created hello.txt.".into(),

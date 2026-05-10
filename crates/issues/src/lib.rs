@@ -1,9 +1,36 @@
 use chrono::Utc;
 use events::{EventBus, IssueEvent, SystemEvent};
-use std::fmt::Write as _;
 use std::sync::Arc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
+
+/// Build the initial message sent to the agent when a session starts for an issue.
+///
+/// Format:
+/// ```text
+/// <title>
+///
+/// <body>
+/// ```
+/// When the issue has comments, a `# Issue History` section is appended.
+#[must_use]
+pub fn build_initial_message(issue: &Issue) -> String {
+    let mut msg = format!("{}\n\n{}", issue.title, issue.body);
+    if !issue.comments.is_empty() {
+        use std::fmt::Write as _;
+        msg.push_str("\n\n---\n# Issue History\n");
+        for comment in &issue.comments {
+            let _ = writeln!(
+                msg,
+                "\n**{}** ({}): {}",
+                comment.author,
+                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
+                comment.body
+            );
+        }
+    }
+    msg
+}
 
 #[must_use]
 pub fn slugify(title: &str) -> String {
@@ -63,7 +90,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct StartIssueOutcome {
     pub issue: Issue,
     pub session: Session,
-    pub initial_message: String,
 }
 
 #[derive(Clone)]
@@ -340,7 +366,7 @@ impl IssueService {
         self.db.create_session(&session).await?;
 
         issue.session_id = Some(session.id);
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.updated_at = Utc::now();
         self.db.update_issue(&issue).await?;
 
@@ -348,28 +374,10 @@ impl IssueService {
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
                 from,
-                to: IssueStatus::Running,
+                to: IssueStatus::InProgress,
             }));
 
-        let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
-        if !issue.comments.is_empty() {
-            initial_message.push_str("\n\n---\n# Issue History\n");
-            for comment in &issue.comments {
-                let _ = writeln!(
-                    initial_message,
-                    "\n**{}** ({}): {}",
-                    comment.author,
-                    comment.created_at.format("%Y-%m-%d %H:%M UTC"),
-                    comment.body
-                );
-            }
-        }
-
-        Ok(StartIssueOutcome {
-            issue,
-            session,
-            initial_message,
-        })
+        Ok(StartIssueOutcome { issue, session })
     }
 
     /// # Errors
@@ -416,7 +424,7 @@ impl IssueService {
         let mut issue = self.db.get_issue(id.clone()).await?;
 
         match issue.status {
-            IssueStatus::Open | IssueStatus::Running | IssueStatus::Waiting => {}
+            IssueStatus::Open | IssueStatus::InProgress | IssueStatus::Waiting => {}
             _ => {
                 return Err(Error::BadRequest(format!(
                     "cannot cancel issue {id}: only open, running, or waiting issues can be cancelled (current status: {})",
@@ -498,6 +506,46 @@ impl IssueService {
                 issue: issue.clone(),
                 from,
                 to: IssueStatus::Open,
+            }));
+        Ok(issue)
+    }
+
+    /// Transition a `Waiting` issue back to `InProgress` without creating a new
+    /// session. The issue must be in `Waiting` state and must have an existing
+    /// `session_id` (set when the session was first created).
+    ///
+    /// Publishes `IssueEvent::StatusChanged { from: Waiting, to: InProgress }` so
+    /// the global lifecycle subscriber in `server` can resume the harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadRequest` if the issue is not `Waiting`, or if `session_id` is
+    /// `None` (a Waiting issue with no session cannot be resumed).
+    /// Returns a `Db` error if the database write fails.
+    pub async fn resume_issue(&self, id: String) -> Result<Issue> {
+        let mut issue = self.db.get_issue(id.clone()).await?;
+
+        if issue.status != IssueStatus::Waiting {
+            return Err(Error::BadRequest(format!(
+                "cannot resume issue {id}: only waiting issues can be resumed (current status: {})",
+                issue.status
+            )));
+        }
+        if issue.session_id.is_none() {
+            return Err(Error::BadRequest(format!(
+                "cannot resume issue {id}: no session is linked (create a fresh start instead)"
+            )));
+        }
+
+        let from = issue.status.clone();
+        issue.status = IssueStatus::InProgress;
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::InProgress,
             }));
         Ok(issue)
     }
@@ -750,12 +798,12 @@ mod tests {
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
         let outcome = svc.start_issue("ab12".into()).await.unwrap();
 
-        assert_eq!(outcome.issue.status, IssueStatus::Running);
+        assert_eq!(outcome.issue.status, IssueStatus::InProgress);
         assert!(outcome.issue.session_id.is_some());
 
         // Verify persisted in db
         let persisted = db.get_issue("ab12".into()).await.unwrap();
-        assert_eq!(persisted.status, IssueStatus::Running);
+        assert_eq!(persisted.status, IssueStatus::InProgress);
         assert!(persisted.session_id.is_some());
     }
 
@@ -776,7 +824,7 @@ mod tests {
     async fn start_issue_requires_open_status() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
 
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -789,7 +837,7 @@ mod tests {
     async fn complete_issue_adds_comment_and_marks_completed() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
 
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -886,7 +934,7 @@ mod tests {
     async fn reopen_running_issue_fails() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
 
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -950,7 +998,7 @@ mod tests {
         db.create_session(&session).await.unwrap();
 
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.session_id = Some(session.id);
         db.create_issue(&issue).await.unwrap();
 
@@ -1154,7 +1202,7 @@ mod tests {
     async fn finish_issue_marks_completed_with_summary_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.assignee = Some("swe".into());
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1174,7 +1222,7 @@ mod tests {
     async fn finish_issue_no_summary_adds_no_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1189,7 +1237,7 @@ mod tests {
     async fn finish_issue_empty_summary_adds_no_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1204,7 +1252,7 @@ mod tests {
     async fn finish_issue_uses_agent_author_when_no_assignee() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.assignee = None;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1223,7 +1271,7 @@ mod tests {
     async fn park_issue_complete_with_comment_marks_completed_and_adds_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.assignee = Some("swe".into());
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1243,7 +1291,7 @@ mod tests {
     async fn park_issue_waiting_with_no_comment_marks_waiting_no_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1258,7 +1306,7 @@ mod tests {
     async fn park_issue_complete_no_comment_marks_completed_no_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1273,7 +1321,7 @@ mod tests {
     async fn park_issue_uses_explicit_author_when_provided() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.assignee = Some("bot".into());
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1295,7 +1343,7 @@ mod tests {
     async fn park_issue_falls_back_to_agent_when_no_assignee_and_no_author() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.assignee = None;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1312,11 +1360,11 @@ mod tests {
     async fn park_issue_rejects_invalid_status() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
-        let result = svc.park_issue("ab12", IssueStatus::Running, None, None).await;
+        let result = svc.park_issue("ab12", IssueStatus::InProgress, None, None).await;
         assert!(
             matches!(result, Err(Error::BadRequest(_))),
             "park_issue with Running status should return BadRequest"
@@ -1345,7 +1393,7 @@ mod tests {
     async fn park_issue_empty_string_comment_not_added() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1372,7 +1420,7 @@ mod tests {
     async fn fail_issue_marks_failed_with_system_comment() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
 
@@ -1411,7 +1459,7 @@ mod tests {
     async fn cancel_running_issue_transitions_to_cancelled() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         issue.session_id = Some(Uuid::new_v4());
         db.create_issue(&issue).await.unwrap();
         let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
@@ -1477,6 +1525,97 @@ mod tests {
 
         assert_eq!(result.status, IssueStatus::Open);
         assert!(result.session_id.is_none());
+    }
+
+    // --- resume_issue ---
+
+    #[tokio::test]
+    async fn resume_issue_transitions_waiting_to_in_progress() {
+        let db = Arc::new(MemoryDb::new());
+        let session_id = Uuid::new_v4();
+        let session = Session {
+            id: session_id,
+            name: "issue-ab12".into(),
+            status: SessionStatus::Created,
+            agent: Some("swe".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_session(&session).await.unwrap();
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await.unwrap();
+
+        assert_eq!(result.status, IssueStatus::InProgress);
+        assert_eq!(result.session_id, Some(session_id));
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn resume_issue_rejects_non_waiting() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12"); // Open status
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await;
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn resume_issue_rejects_waiting_without_session_id() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = None;
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await;
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn resume_issue_emits_status_changed_event() {
+        let db = Arc::new(MemoryDb::new());
+        let session_id = Uuid::new_v4();
+        let session = Session {
+            id: session_id,
+            name: "issue-ab12".into(),
+            status: SessionStatus::Created,
+            agent: Some("swe".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_session(&session).await.unwrap();
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let mut rx = bus.subscribe();
+
+        svc.resume_issue("ab12".into()).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    from: IssueStatus::Waiting,
+                    to: IssueStatus::InProgress,
+                    ..
+                })
+            ),
+            "expected StatusChanged Waiting->InProgress, got: {ev:?}"
+        );
     }
 
     // --- slugify ---
@@ -1547,11 +1686,11 @@ mod tests {
                 ev,
                 events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
                     from: IssueStatus::Open,
-                    to: IssueStatus::Running,
+                    to: IssueStatus::InProgress,
                     ..
                 })
             ),
-            "expected StatusChanged Open->Running, got: {ev:?}"
+            "expected StatusChanged Open->InProgress, got: {ev:?}"
         );
     }
 
@@ -1559,7 +1698,7 @@ mod tests {
     async fn complete_issue_emits_status_changed_and_comment_added() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
 
         let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
@@ -1673,7 +1812,7 @@ mod tests {
     async fn fail_issue_emits_comment_added_and_status_changed() {
         let db = Arc::new(MemoryDb::new());
         let mut issue = open_issue("ab12");
-        issue.status = IssueStatus::Running;
+        issue.status = IssueStatus::InProgress;
         db.create_issue(&issue).await.unwrap();
 
         let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
@@ -1701,5 +1840,95 @@ mod tests {
             ),
             "second event should be StatusChanged->Failed, got: {ev2:?}"
         );
+    }
+
+    // ── build_initial_message tests ───────────────────────────────────────────
+
+    fn make_issue_for_message(
+        title: &str,
+        body: &str,
+        comments: Vec<types::IssueComment>,
+    ) -> types::Issue {
+        let now = chrono::Utc::now();
+        types::Issue {
+            id: "test".into(),
+            title: title.into(),
+            body: body.into(),
+            status: IssueStatus::Open,
+            branch: String::new(),
+            assignee: None,
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn build_initial_message_no_comments_is_title_newline_body() {
+        let issue = make_issue_for_message("My Title", "My Body", vec![]);
+        let msg = build_initial_message(&issue);
+        assert_eq!(
+            msg, "My Title\n\nMy Body",
+            "with no comments, message must be exactly 'title\\n\\nbody'"
+        );
+        assert!(
+            !msg.contains("Issue History"),
+            "no comments → no '# Issue History' section"
+        );
+    }
+
+    #[test]
+    fn build_initial_message_with_comments_includes_history_section() {
+        let comment = types::IssueComment {
+            author: "comment author".into(),
+            created_at: chrono::Utc::now(),
+            body: "comment body text".into(),
+        };
+        let issue = make_issue_for_message("PM Task", "Do the thing", vec![comment]);
+        let msg = build_initial_message(&issue);
+
+        assert!(
+            msg.starts_with("PM Task\n\nDo the thing"),
+            "message must start with title\\n\\nbody, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("# Issue History"),
+            "message must contain '# Issue History', got: {msg:?}"
+        );
+        assert!(
+            msg.contains("comment body text"),
+            "message must contain comment body, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("comment author"),
+            "message must contain comment author, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn build_initial_message_with_multiple_comments_includes_all() {
+        let comments = vec![
+            types::IssueComment {
+                author: "alice".into(),
+                created_at: chrono::Utc::now(),
+                body: "first comment".into(),
+            },
+            types::IssueComment {
+                author: "system".into(),
+                created_at: chrono::Utc::now(),
+                body: "session lost on server restart".into(),
+            },
+        ];
+        let issue = make_issue_for_message("Multi-comment", "body", comments);
+        let msg = build_initial_message(&issue);
+
+        assert!(msg.contains("# Issue History"));
+        assert!(msg.contains("alice"));
+        assert!(msg.contains("first comment"));
+        assert!(msg.contains("system"));
+        assert!(msg.contains("session lost on server restart"));
     }
 }

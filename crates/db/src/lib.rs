@@ -1275,7 +1275,7 @@ mod tests {
 
         let mut updated = db.get_issue("ab12".into()).await.unwrap();
         updated.title = "Updated title".into();
-        updated.status = types::IssueStatus::Running;
+        updated.status = types::IssueStatus::InProgress;
         updated.assignee = Some("swe".into());
         updated.blocked_on = vec!["xy34".into()];
         updated.comments = vec![types::IssueComment {
@@ -1288,7 +1288,7 @@ mod tests {
 
         let fetched = db.get_issue("ab12".into()).await.unwrap();
         assert_eq!(fetched.title, "Updated title");
-        assert_eq!(fetched.status, types::IssueStatus::Running);
+        assert_eq!(fetched.status, types::IssueStatus::InProgress);
         assert_eq!(fetched.assignee.as_deref(), Some("swe"));
         assert_eq!(fetched.blocked_on, vec!["xy34"]);
         assert_eq!(fetched.comments.len(), 1);

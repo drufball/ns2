@@ -69,7 +69,7 @@ pub async fn create_session(
     state.db.create_session(&session).await?;
 
     if has_message {
-        let msg_tx = spawn_harness_sync(&state, session.clone(), None);
+        let msg_tx = spawn_harness_sync(&state, session.clone());
         msg_tx.send(initial_message).await.ok();
     }
 
@@ -174,7 +174,7 @@ pub async fn send_message(
             drop(senders);
             drop(spawning);
 
-            let msg_tx = spawn_harness_sync(&state, session, None);
+            let msg_tx = spawn_harness_sync(&state, session);
             msg_tx.send(req.message).await.ok();
             Ok(StatusCode::OK)
         }
@@ -219,17 +219,7 @@ pub async fn send_message(
             drop(senders);
             drop(spawning);
 
-            // Look up a linked issue so its watcher is re-spawned on resume.
-            let linked_issue_id = state
-                .db
-                .list_issues_by_session_id(id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .next()
-                .map(|issue| issue.id);
-
-            let msg_tx = spawn_harness_sync(&state, session, linked_issue_id);
+            let msg_tx = spawn_harness_sync(&state, session);
             msg_tx.send(req.message).await.ok();
             Ok(StatusCode::OK)
         }
@@ -293,7 +283,7 @@ pub async fn cancel_session(
         .unwrap_or_default();
     for mut issue in linked_issues {
         use types::{IssueComment, IssueStatus};
-        if matches!(issue.status, IssueStatus::Running | IssueStatus::Open) {
+        if matches!(issue.status, IssueStatus::InProgress | IssueStatus::Open) {
             issue.comments.push(IssueComment {
                 author: "system".to_string(),
                 created_at: chrono::Utc::now(),
