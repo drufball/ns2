@@ -809,7 +809,7 @@ impl HookStore for SqliteHookStore {
 
 /// Stores the mapping from ns2 issue ID to GitHub issue number.
 ///
-/// The mapping is persisted in the `github_issue_mapping` SQLite table so that
+/// The mapping is persisted in the `github_issue_mapping` `SQLite` table so that
 /// `GitHubIssueBackend` can look up the GitHub issue number for any ns2 issue.
 #[async_trait]
 pub trait GitHubMappingStore: Send + Sync {

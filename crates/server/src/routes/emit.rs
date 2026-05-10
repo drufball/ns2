@@ -126,7 +126,7 @@ mod tests {
             } => {
                 assert_eq!(event_type, "custom.test");
                 assert!(
-                    payload.is_null() || payload.as_object().is_some_and(|o| o.is_empty()),
+                    payload.is_null() || payload.as_object().is_some_and(serde_json::Map::is_empty),
                     "payload should be null or empty object when not specified, got: {payload}"
                 );
             }

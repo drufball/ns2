@@ -5,7 +5,7 @@ use types::{Issue, IssueStatus};
 // ── Config types ──────────────────────────────────────────────────────────────
 
 /// Which storage back-end the server should use for issues.
-#[derive(Debug, Clone, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
     #[default]
@@ -101,6 +101,13 @@ pub fn from_config(
 ///
 /// When `mapping` is `None` and the backend is GitHub, an in-process no-op mapping
 /// store cannot be used — the caller is responsible for providing one.
+///
+/// # Errors
+///
+/// Returns `Error::Other` if:
+/// - `backend = shell` but `[issues.shell]` config is absent
+/// - `backend = github` but `[issues.github]` config, `GITHUB_TOKEN` env var,
+///   or `mapping` is missing
 pub fn from_config_with_mapping(
     config: &IssueBackendConfig,
     db: Arc<dyn db::Db>,
@@ -147,7 +154,7 @@ pub fn from_config_with_mapping(
 
 // ── SqliteIssueBackend ────────────────────────────────────────────────────────
 
-/// An [`IssueBackend`] that delegates to the SQLite [`db::Db`] trait object.
+/// An [`IssueBackend`] that delegates to the `SQLite` [`db::Db`] trait object.
 pub struct SqliteIssueBackend {
     db: Arc<dyn db::Db>,
 }
@@ -212,7 +219,7 @@ pub struct ShellIssueBackend {
 impl ShellIssueBackend {
     /// Create a new backend that will invoke `command` for every operation.
     #[must_use]
-    pub fn new(command: String) -> Self {
+    pub const fn new(command: String) -> Self {
         Self { command }
     }
 
@@ -417,7 +424,7 @@ fn issue_labels(issue: &Issue) -> Vec<String> {
 
 /// An [`IssueBackend`] that stores issues as GitHub Issues via the REST API.
 ///
-/// ns2 IDs remain canonical. A SQLite mapping table (`github_issue_mapping`)
+/// ns2 IDs remain canonical. A `SQLite` mapping table (`github_issue_mapping`)
 /// tracks `github_issue_number → ns2_id`.
 ///
 /// Status and assignee are carried via labels:
@@ -452,6 +459,11 @@ impl GitHubIssueBackend {
     }
 
     /// Create a new `GitHubIssueBackend` with a custom base URL (for testing).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying `reqwest` client cannot be built (this should
+    /// not happen under normal conditions).
     #[must_use]
     pub fn with_base_url(
         owner: String,
@@ -497,11 +509,10 @@ impl GitHubIssueBackend {
     }
 
     /// Convert a GitHub API issue JSON to a `types::Issue`.
-    async fn github_to_issue(
-        &self,
+    fn github_to_issue(
         gh: &serde_json::Value,
         ns2_id: &str,
-    ) -> Result<Issue> {
+    ) -> Issue {
         use chrono::Utc;
         let title = gh["title"].as_str().unwrap_or("").to_string();
         let body = gh["body"].as_str().unwrap_or("").to_string();
@@ -527,15 +538,13 @@ impl GitHubIssueBackend {
         let created_at = gh["created_at"]
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
+            .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc));
         let updated_at = gh["updated_at"]
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
+            .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc));
 
-        Ok(Issue {
+        Issue {
             id: ns2_id.to_string(),
             title,
             body,
@@ -548,7 +557,7 @@ impl GitHubIssueBackend {
             comments: vec![],
             created_at,
             updated_at,
-        })
+        }
     }
 }
 
@@ -629,7 +638,7 @@ impl IssueBackend for GitHubIssueBackend {
             .await
             .map_err(|e| Error::Other(format!("Failed to parse GitHub response: {e}")))?;
 
-        self.github_to_issue(&gh, id).await
+        Ok(Self::github_to_issue(&gh, id))
     }
 
     async fn list(&self, filter: IssueFilter) -> Result<Vec<Issue>> {
@@ -669,10 +678,7 @@ impl IssueBackend for GitHubIssueBackend {
 
         let mut issues = Vec::new();
         for gh in &gh_issues {
-            let number = match gh["number"].as_i64() {
-                Some(n) => n,
-                None => continue,
-            };
+            let Some(number) = gh["number"].as_i64() else { continue };
             // Look up ns2_id from mapping
             let ns2_id = self
                 .mapping
@@ -680,15 +686,12 @@ impl IssueBackend for GitHubIssueBackend {
                 .await
                 .map_err(|e| Error::Other(format!("Mapping lookup failed: {e}")))?;
 
-            let ns2_id = match ns2_id {
-                Some(id) => id,
-                None => {
-                    tracing::debug!(
-                        github_number = number,
-                        "GitHubIssueBackend::list: no ns2_id for GitHub issue, skipping"
-                    );
-                    continue;
-                }
+            let Some(ns2_id) = ns2_id else {
+                tracing::debug!(
+                    github_number = number,
+                    "GitHubIssueBackend::list: no ns2_id for GitHub issue, skipping"
+                );
+                continue;
             };
 
             // Apply assignee filter if provided
@@ -707,7 +710,7 @@ impl IssueBackend for GitHubIssueBackend {
                 }
             }
 
-            let issue = self.github_to_issue(gh, &ns2_id).await?;
+            let issue = Self::github_to_issue(gh, &ns2_id);
             issues.push(issue);
         }
 
@@ -782,6 +785,7 @@ impl IssueBackend for GitHubIssueBackend {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use chrono::Utc;
@@ -1183,13 +1187,13 @@ command = "/path/to/backend.sh"
 
     // ── GitHubIssueBackend tests (with mockito) ───────────────────────────────
 
-    /// Build an in-memory GitHubMappingStore for tests.
+    /// Build an in-memory `GitHubMappingStore` for tests.
     async fn make_mapping_store() -> Arc<dyn db::GitHubMappingStore> {
         let (_, _, mapping) = db::connect("sqlite::memory:").await.unwrap();
         mapping
     }
 
-    /// Build a GitHubIssueBackend pointing at a mockito server.
+    /// Build a `GitHubIssueBackend` pointing at a mockito server.
     fn make_github_backend(base_url: &str, mapping: Arc<dyn db::GitHubMappingStore>) -> GitHubIssueBackend {
         GitHubIssueBackend::with_base_url(
             "owner".to_string(),

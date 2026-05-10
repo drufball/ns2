@@ -694,7 +694,7 @@ mod tests {
     struct MemoryDb {
         sessions: Mutex<HashMap<Uuid, Session>>,
         /// Also stores issues so that `list_issues_by_session_id` works in
-        /// orphan_sweep tests.
+        /// `orphan_sweep` tests.
         issues: Mutex<HashMap<String, Issue>>,
     }
 
