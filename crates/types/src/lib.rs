@@ -156,27 +156,41 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+// ── Event domain types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKind {
+    Webhook { secret: Option<String> },
+    Timer { schedule: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub id: String,
+    pub name: String,
+    pub kind: EventKind,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Hook domain types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hook {
     pub id: String,
     pub name: String,
-    pub source: HookSource,
+    /// Names of events this hook listens for (e.g. "issue.created",
+    /// "external.ci-complete", "timer.heartbeat"). Use `"*"` to match all.
+    pub event_names: Vec<String>,
     pub filter: Option<HookFilter>,
     pub action: HookAction,
     pub enabled: bool,
     pub created_by: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HookSource {
-    Internal { event_types: Vec<String> },
-    External { secret: Option<String> },
-    Timer { schedule: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +549,86 @@ mod tests {
         assert_eq!(s, "waiting");
         let parsed: SessionStatus = s.parse().unwrap();
         assert_eq!(parsed, SessionStatus::Waiting);
+    }
+
+    // ── Event / EventKind serde round-trips ───────────────────────────────────
+
+    #[test]
+    fn event_kind_webhook_serde_round_trip() {
+        let kind = EventKind::Webhook {
+            secret: Some("s3cr3t".into()),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: EventKind = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, EventKind::Webhook { secret: Some(ref s) } if s == "s3cr3t"));
+    }
+
+    #[test]
+    fn event_kind_timer_serde_round_trip() {
+        let kind = EventKind::Timer {
+            schedule: "0 9 * * 1".into(),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        let back: EventKind = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, EventKind::Timer { ref schedule } if schedule == "0 9 * * 1")
+        );
+    }
+
+    #[test]
+    fn event_serde_round_trip() {
+        let ev = Event {
+            id: "abcd".into(),
+            name: "ci-complete".into(),
+            kind: EventKind::Webhook {
+                secret: Some("s3cr3t".into()),
+            },
+            description: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "abcd");
+        assert_eq!(back.name, "ci-complete");
+        assert!(back.description.is_none());
+        assert!(back.enabled);
+        assert!(
+            matches!(back.kind, EventKind::Webhook { secret: Some(ref s) } if s == "s3cr3t")
+        );
+    }
+
+    #[test]
+    fn event_enabled_field_defaults_serde() {
+        // enabled=false should survive round-trip
+        let ev = Event {
+            id: "xyz1".into(),
+            name: "timer-daily".into(),
+            kind: EventKind::Timer {
+                schedule: "0 9 * * *".into(),
+            },
+            description: Some("daily timer".into()),
+            enabled: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+    }
+
+    #[test]
+    fn event_kind_tag_is_snake_case() {
+        let webhook_kind = EventKind::Webhook { secret: None };
+        let v: serde_json::Value = serde_json::to_value(&webhook_kind).unwrap();
+        assert_eq!(v["type"], "webhook");
+
+        let timer_kind = EventKind::Timer {
+            schedule: "* * * * *".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&timer_kind).unwrap();
+        assert_eq!(v["type"], "timer");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-05-10T11:09:22Z
+verified: 2026-06-02T00:00:00Z
 ---
 
 # server crate
@@ -11,58 +11,61 @@ The server crate is the HTTP layer for ns2. It owns the axum router, the runtime
 
 ## What it does
 
-The server handles four families of HTTP endpoints: session management, issue management, SSE event streaming, and external webhook ingestion. Route handlers are intentionally thin — they parse input, call a service or the database, and return a response. No business logic lives in a handler.
+The server handles these families of HTTP endpoints: session management, issue management, SSE event streaming, external webhook ingestion, hook CRUD, and named-event CRUD. Route handlers are intentionally thin — they parse input, call a service or the database, and return a response. No business logic lives in a handler.
 
-On startup, `run(config)` initializes the database, constructs `AppState`, spawns background tasks (hook evaluator, timer scheduler), runs the orphan sweep (see Session Lifecycle Spec), and binds the TCP listener with graceful SIGTERM/Ctrl-C shutdown.
+On startup, `run(config)` initializes the database, constructs `AppState`, spawns background tasks (hook evaluator, timer scheduler, issue lifecycle subscriber), runs the orphan sweep (see Session Lifecycle Spec), and binds the TCP listener with graceful SIGTERM/Ctrl-C shutdown.
 
 ## Key modules
 
 - **`lib.rs`** — router construction and the public `run()` entry point. Pure wiring, no business logic.
 - **`state.rs`** — owns `AppState` and the `spawn_harness_sync` function. Single authority over all runtime maps.
-- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, named events, and shared error types. Delegates to `state.rs` or the `issues` crate service.
 
 ## Background tasks
 
-Two background tasks are spawned at server startup:
+Three background tasks are spawned at server startup:
 
-- **Hook evaluator** — subscribes to the `EventBus` and fires internal hooks whose `event_types` and `filter` match incoming `SystemEvent`s.
-- **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer hooks, and emits `SystemEvent::TimerFired` for any whose 5-field cron schedule falls within the 60-second rolling window ending at `now`. The action is then executed in a spawned task identical to the evaluator path.
-
-## Hook validation
-
-`POST /hooks` validates timer hook schedules before persisting. If the `schedule` field cannot be parsed as a 5-field cron expression, the server returns `400 Bad Request` with `{ "error": "invalid cron schedule: ..." }`.
-
+- **Hook evaluator** — subscribes to the `EventBus` and fires hooks whose `event_names` and optional `filter` match incoming `SystemEvent`s.
+- **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer events from `EventStore`, and emits `SystemEvent::TimerFired { event_id, event_name, fired_at }` for any whose 5-field cron schedule falls within the rolling window. Hooks listening for `timer.<name>` are matched by the evaluator.
+- **Issue lifecycle subscriber** (`spawn_issue_lifecycle_subscriber`) — subscribes to the `EventBus` to drive issue status transitions from session events.
 
 ## AppState and channel ownership
 
-`AppState` holds the database handle, the issue service, and two ephemeral maps:
+`AppState` holds the database handle, the issue service, the event bus, the hook store, the event store, and two ephemeral maps:
 
 - `sessions` — maps `session_id → broadcast::Sender<SessionEvent>`, used by SSE streaming to push live events.
 - `msg_senders` — maps `session_id → mpsc::Sender<String>`, used to deliver messages to a running harness.
 
 No module other than `state.rs` may insert into or remove from these maps. All harness spawning goes through `spawn_harness_sync`, which creates both channels, registers them atomically, and cleans them up when the harness exits.
 
-## POST /webhooks/:hook_id
+## POST /webhooks/:event_id
 
-External services (e.g. GitHub, CI systems) can trigger hook actions by posting to this endpoint.
+External services (e.g. GitHub, CI systems) can trigger events by posting to this endpoint.
 
 **Request flow:**
 
-1. Look up the hook by `hook_id`; return 404 if not found, not an `External` hook, or disabled.
-2. **HMAC verification** (only when the hook has a `secret` configured): reads the `X-Hub-Signature-256` header (expected format: `sha256=<hex>`), computes HMAC-SHA256 of the raw request body using the secret, and compares with constant-time `verify_slice`. Returns 401 on missing, malformed, or mismatched signature. Skips the check entirely when no secret is set.
+1. Look up the named Event by `event_id` from `EventStore`; return 404 if not found, not a Webhook-kind event, or disabled.
+2. **HMAC verification** (only when the event has a `secret` configured): reads the `X-Hub-Signature-256` header (expected format: `sha256=<hex>`), computes HMAC-SHA256 of the raw request body using the secret, and compares with constant-time `verify_slice`. Returns 401 on missing, malformed, or mismatched signature. Skips the check entirely when no secret is set.
 3. Parse the request body as JSON; return 400 on invalid JSON.
-4. Emit `SystemEvent::External { hook_id, payload }` to the event bus.
+4. Emit `SystemEvent::External { event_id, event_name, payload }` to the event bus.
 5. Return `200 OK` with body `{"ok": true}`.
 
-## Hook evaluator and External events
+Hooks that include `external.<name>` in their `event_names` list are then matched by the hook evaluator via the normal filter path.
 
-`spawn_hook_evaluator` (in `lib.rs`) runs a background task subscribed to the event bus. When it receives a `SystemEvent::External` event, it takes an early branch before the normal `matches_event` loop:
+## Named-event routes
 
-1. Looks up the hook directly by `hook_id` from the event.
-2. If found and enabled, spawns a task to run its action via `hooks::execute::run_action`.
-3. Skips the general `matches_event` loop (which only handles Internal hooks) via `continue`.
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/named-events` | Create a named event (webhook or timer) |
+| `GET` | `/named-events` | List all named events |
+| `GET` | `/named-events/:id` | Get a named event by ID |
+| `DELETE` | `/named-events/:id` | Delete a named event |
 
-This means External hooks are dispatched without a filter scan — the route has already validated the hook identity, so the evaluator just runs the action directly.
+`POST /named-events` validates timer cron schedules before persisting. If the `schedule` field cannot be parsed, the server returns `400 Bad Request` with `{ "error": "invalid cron schedule: ..." }`. Returns `201 Created` on success.
+
+## Hook validation
+
+`POST /hooks` accepts an `event_names` array instead of a `source` field.
 
 ## Invariants
 
@@ -73,6 +76,6 @@ This means External hooks are dispatched without a filter scan — the route has
 
 ## Connect Sections
 
-- **session lifecycle:** `crates/server/src/session-lifecycle.spec.md` — session states, orphan sweep, SSE event stream
-- **issue lifecycle:** `crates/server/src/issue-lifecycle.spec.md` — issue states and transitions
-- **architecture:** `crates/arch-tests/architecture.spec.md` — crate dependency rules
+- **session lifecycle:** `specs/session-lifecycle.spec.md` — session states, orphan sweep, SSE event stream
+- **issue lifecycle:** `specs/issue-lifecycle.spec.md` — issue states and transitions
+- **architecture:** `specs/architecture.spec.md` — crate dependency rules
