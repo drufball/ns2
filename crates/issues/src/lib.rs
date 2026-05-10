@@ -1,6 +1,5 @@
 use chrono::Utc;
 use events::{EventBus, IssueEvent, SystemEvent};
-use std::fmt::Write as _;
 use std::sync::Arc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
@@ -63,7 +62,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct StartIssueOutcome {
     pub issue: Issue,
     pub session: Session,
-    pub initial_message: String,
 }
 
 #[derive(Clone)]
@@ -351,25 +349,7 @@ impl IssueService {
                 to: IssueStatus::InProgress,
             }));
 
-        let mut initial_message = format!("{}\n\n{}", issue.title, issue.body);
-        if !issue.comments.is_empty() {
-            initial_message.push_str("\n\n---\n# Issue History\n");
-            for comment in &issue.comments {
-                let _ = writeln!(
-                    initial_message,
-                    "\n**{}** ({}): {}",
-                    comment.author,
-                    comment.created_at.format("%Y-%m-%d %H:%M UTC"),
-                    comment.body
-                );
-            }
-        }
-
-        Ok(StartIssueOutcome {
-            issue,
-            session,
-            initial_message,
-        })
+        Ok(StartIssueOutcome { issue, session })
     }
 
     /// # Errors
@@ -498,6 +478,46 @@ impl IssueService {
                 issue: issue.clone(),
                 from,
                 to: IssueStatus::Open,
+            }));
+        Ok(issue)
+    }
+
+    /// Transition a `Waiting` issue back to `InProgress` without creating a new
+    /// session. The issue must be in `Waiting` state and must have an existing
+    /// `session_id` (set when the session was first created).
+    ///
+    /// Publishes `IssueEvent::StatusChanged { from: Waiting, to: InProgress }` so
+    /// the global lifecycle subscriber in `server` can resume the harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadRequest` if the issue is not `Waiting`, or if `session_id` is
+    /// `None` (a Waiting issue with no session cannot be resumed).
+    /// Returns a `Db` error if the database write fails.
+    pub async fn resume_issue(&self, id: String) -> Result<Issue> {
+        let mut issue = self.db.get_issue(id.clone()).await?;
+
+        if issue.status != IssueStatus::Waiting {
+            return Err(Error::BadRequest(format!(
+                "cannot resume issue {id}: only waiting issues can be resumed (current status: {})",
+                issue.status
+            )));
+        }
+        if issue.session_id.is_none() {
+            return Err(Error::BadRequest(format!(
+                "cannot resume issue {id}: no session is linked (create a fresh start instead)"
+            )));
+        }
+
+        let from = issue.status.clone();
+        issue.status = IssueStatus::InProgress;
+        issue.updated_at = Utc::now();
+        self.db.update_issue(&issue).await?;
+        self.event_bus
+            .send(SystemEvent::Issue(IssueEvent::StatusChanged {
+                issue: issue.clone(),
+                from,
+                to: IssueStatus::InProgress,
             }));
         Ok(issue)
     }
@@ -1477,6 +1497,97 @@ mod tests {
 
         assert_eq!(result.status, IssueStatus::Open);
         assert!(result.session_id.is_none());
+    }
+
+    // --- resume_issue ---
+
+    #[tokio::test]
+    async fn resume_issue_transitions_waiting_to_in_progress() {
+        let db = Arc::new(MemoryDb::new());
+        let session_id = Uuid::new_v4();
+        let session = Session {
+            id: session_id,
+            name: "issue-ab12".into(),
+            status: SessionStatus::Created,
+            agent: Some("swe".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_session(&session).await.unwrap();
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await.unwrap();
+
+        assert_eq!(result.status, IssueStatus::InProgress);
+        assert_eq!(result.session_id, Some(session_id));
+
+        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(persisted.status, IssueStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn resume_issue_rejects_non_waiting() {
+        let db = Arc::new(MemoryDb::new());
+        let issue = open_issue("ab12"); // Open status
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await;
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn resume_issue_rejects_waiting_without_session_id() {
+        let db = Arc::new(MemoryDb::new());
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = None;
+        db.create_issue(&issue).await.unwrap();
+
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let result = svc.resume_issue("ab12".into()).await;
+        assert!(matches!(result, Err(Error::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn resume_issue_emits_status_changed_event() {
+        let db = Arc::new(MemoryDb::new());
+        let session_id = Uuid::new_v4();
+        let session = Session {
+            id: session_id,
+            name: "issue-ab12".into(),
+            status: SessionStatus::Created,
+            agent: Some("swe".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_session(&session).await.unwrap();
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::Waiting;
+        issue.session_id = Some(session_id);
+        db.create_issue(&issue).await.unwrap();
+
+        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let mut rx = bus.subscribe();
+
+        svc.resume_issue("ab12".into()).await.unwrap();
+
+        let ev = rx.try_recv().expect("should have received an event");
+        assert!(
+            matches!(
+                ev,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    from: IssueStatus::Waiting,
+                    to: IssueStatus::InProgress,
+                    ..
+                })
+            ),
+            "expected StatusChanged Waiting->InProgress, got: {ev:?}"
+        );
     }
 
     // --- slugify ---

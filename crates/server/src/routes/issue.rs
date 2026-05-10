@@ -269,29 +269,16 @@ pub async fn update_issue_status(
             ));
         }
 
-        // If the issue is Waiting with an existing session, emit a StatusChanged event
-        // so the global lifecycle subscriber can resume the harness.
-        if issue.status == types::IssueStatus::Waiting {
-            if let Some(_session_id) = issue.session_id {
-                // Update the issue to InProgress state (emits StatusChanged event).
-                let mut updated_issue = issue.clone();
-                updated_issue.status = types::IssueStatus::InProgress;
-                updated_issue.updated_at = chrono::Utc::now();
-                state.db.update_issue(&updated_issue).await?;
-                state.issue_service.event_bus().send(events::SystemEvent::Issue(
-                    events::IssueEvent::StatusChanged {
-                        issue: updated_issue.clone(),
-                        from: types::IssueStatus::Waiting,
-                        to: types::IssueStatus::InProgress,
-                    },
-                ));
-                let refreshed = state.db.get_issue(id).await?;
-                return Ok(Json(refreshed));
-            }
-            // session_id is None: a Waiting issue with no session cannot be
-            // resumed.  Fall through to the checks below, which will produce
-            // the "in waiting state" error — the correct behaviour.
+        // If the issue is Waiting with an existing session, delegate to
+        // IssueService::resume_issue() which owns the Waiting→InProgress
+        // transition and publishes the StatusChanged event so the global
+        // lifecycle subscriber can resume the harness.
+        if issue.status == types::IssueStatus::Waiting && issue.session_id.is_some() {
+            let updated = state.issue_service.resume_issue(id).await?;
+            return Ok(Json(updated));
         }
+        // A Waiting issue with no session_id cannot be resumed; fall through
+        // to the checks below, which will produce the appropriate error.
 
         // If the issue has a Failed session, cancel it and clear session_id so
         // start_issue creates a fresh one.

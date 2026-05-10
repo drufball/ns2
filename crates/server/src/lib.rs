@@ -173,7 +173,17 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
                 let initial_message = build_initial_message(&issue);
                 let msg_tx = crate::harness_spawn::spawn_harness_sync(state, session);
                 msg_tx.send(initial_message).await.ok();
+                return;
             }
+            // Session exists but is in a state where we cannot (or need not)
+            // spawn a harness (e.g. already Running, Completed, Failed,
+            // Cancelled). Log so operators can diagnose unexpected paths.
+            tracing::debug!(
+                issue_id = %issue.id,
+                session_id = %session_id,
+                session_status = %session.status,
+                "handle_in_progress: session in unexpected state, skipping harness spawn"
+            );
         }
     }
 }
@@ -201,7 +211,15 @@ pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
     let state = state.clone();
 
     tokio::spawn(async move {
-        // Per-session stop info: session_id → (status, optional comment)
+        // Per-session stop info: session_id → (status, optional comment).
+        //
+        // Entries are inserted on `Stopped` and removed on `Done` or `Error`.
+        // If a harness terminates abnormally without emitting either terminal
+        // event (e.g. OS kill, tokio runtime shutdown), the entry is never
+        // removed.  This is a known bounded leak: the server process is
+        // typically short-lived relative to session count, and each entry is
+        // tiny (~50 bytes).  A periodic sweep could be added if this becomes
+        // a concern.
         let mut stop_map: HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> = HashMap::new();
 
         loop {
