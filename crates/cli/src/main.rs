@@ -34,7 +34,7 @@ enum Command {
     },
     #[command(
         about = "Inspect agent sessions (implementation detail — use `issue` to get work done).",
-        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  waiting    agent finished; session paused waiting for next message\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
+        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
     )]
     Session {
         #[command(subcommand)]
@@ -73,20 +73,20 @@ enum Command {
         action: HookSubcommand,
     },
     #[command(
-        about = "Manage named events (webhooks and timers).",
-        long_about = "Named events are triggers that hooks can listen to. Each event has a name, a type (webhook or timer), and optional metadata.\n\nSubcommands:\n  new     Create a new named event\n  list    List all named events\n  delete  Delete a named event by ID\n\nTypical workflow:\n  id=$(ns2 event new ci-complete --type webhook --secret abc123)\n  ns2 event list\n  ns2 event delete --id \"$id\""
-    )]
-    Event {
-        #[command(subcommand)]
-        action: EventSubcommand,
-    },
-    #[command(
         about = "Manage git worktrees for branches.",
         long_about = "Worktrees let multiple branches be checked out simultaneously into separate directories.\nEach worktree maps a branch to a directory under the configured worktree base path.\n\nThe base path is read from ns2.toml ([worktrees] path = ...) or defaults to\n~/.ns2/<repo-name>/worktrees/.\n\nSubcommands:\n  list    Print all worktrees under the base path\n  create  Create a worktree for a branch (idempotent)\n  delete  Remove a worktree and its branch"
     )]
     Worktree {
         #[command(subcommand)]
         action: WorktreeAction,
+    },
+    #[command(
+        about = "Emit events on the event bus.",
+        long_about = "Emit custom events on the ns2 event bus.\n\nSubcommands:\n  emit  Emit an event with an optional JSON payload"
+    )]
+    Event {
+        #[command(subcommand)]
+        action: EventAction,
     },
 }
 
@@ -95,13 +95,15 @@ enum Command {
 enum HookSubcommand {
     #[command(
         about = "Create a new hook.",
-        long_about = "Create a new hook that reacts to system events.\n\nExamples:\n  ns2 hook new --name notify --event issue.status_changed \\\n    --action send-message --target issue:<id> --body \"Status: {{ event.data.to }}\"\n\n  ns2 hook new --name alert --event issue.created \\\n    --action send-message --target issue:<watcher-id> --body \"New issue created\"\n\n  ns2 hook new --name ci-handler --event external.ci-complete \\\n    --action send-message --target issue:<id> --body \"CI done\"\n\n  ns2 hook new --name ticker --event timer.heartbeat \\\n    --action send-message --target issue:<id> --body \"tick\""
+        long_about = "Create a new hook that reacts to system events.\n\nExamples:\n  ns2 hook new --name notify --source internal --event-type issue.status_changed \\\n    --action send-message --target issue:<id> --body \"Status: {{ event.data.to }}\"\n\n  ns2 hook new --name alert --source internal --event-type issue.created \\\n    --action send-message --target issue:<watcher-id> --body \"New issue created\""
     )]
     New {
         #[arg(long, help = "Hook name. Required.")]
         name: String,
-        #[arg(long = "event", num_args = 0.., help = "Event name(s) to listen for. Repeatable. Examples: issue.created, external.ci-complete, timer.heartbeat, '*'.")]
-        event_names: Vec<String>,
+        #[arg(long, help = "Source type: internal, external, or timer.")]
+        source: String,
+        #[arg(long = "event-type", num_args = 0.., help = "Event type(s) to listen for (for internal source). Repeatable. Use '*' for all.")]
+        event_types: Vec<String>,
         #[arg(long = "filter-field", num_args = 0.., help = "Field condition in 'field=value' form. Repeatable (AND'd).")]
         filter_fields: Vec<String>,
         #[arg(long, help = "Action type: send-message, create-issue, or run-shell.")]
@@ -120,11 +122,15 @@ enum HookSubcommand {
         title: Option<String>,
         #[arg(long, help = "Assignee for create-issue action.")]
         assignee: Option<String>,
+        #[arg(long, help = "Cron schedule for timer source (e.g. '0 9 * * 1' = Monday 9am).")]
+        schedule: Option<String>,
     },
     #[command(about = "List hooks.")]
     List {
         #[arg(long, help = "Only show enabled hooks.")]
         enabled: bool,
+        #[arg(long, help = "Filter by source type: internal, external, timer.")]
+        source_type: Option<String>,
     },
     #[command(about = "Show details of a hook.")]
     Show {
@@ -156,33 +162,6 @@ enum HookSubcommand {
             help = "Maximum number of executions to show."
         )]
         limit: usize,
-    },
-}
-
-#[derive(Subcommand)]
-enum EventSubcommand {
-    #[command(
-        about = "Create a new named event.",
-        long_about = "Create a named event that hooks can listen to.\n\nExamples:\n  ns2 event new ci-complete --type webhook --secret abc123\n  ns2 event new heartbeat --type timer --schedule \"* * * * *\""
-    )]
-    New {
-        #[arg(help = "The event name (e.g. ci-complete, deploy-done).")]
-        name: String,
-        #[arg(long = "type", help = "Event type: webhook or timer. Required.")]
-        event_type: String,
-        #[arg(long, help = "HMAC secret for webhook events (optional).")]
-        secret: Option<String>,
-        #[arg(long, help = "Cron schedule for timer events (e.g. '* * * * *'). Required for --type timer.")]
-        schedule: Option<String>,
-        #[arg(long, help = "Optional human-readable description.")]
-        description: Option<String>,
-    },
-    #[command(about = "List all named events.")]
-    List,
-    #[command(about = "Delete a named event by ID.")]
-    Delete {
-        #[arg(long, help = "The event ID to delete. Required.")]
-        id: String,
     },
 }
 
@@ -262,7 +241,7 @@ enum SessionAction {
     List {
         #[arg(
             long,
-            help = "Show only sessions in this state. Values: created, running, waiting, failed, cancelled."
+            help = "Show only sessions in this state. Values: created, running, completed, failed, cancelled."
         )]
         status: Option<String>,
         #[arg(
@@ -295,13 +274,13 @@ enum SessionAction {
         #[arg(
             long,
             requires = "message",
-            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on waiting, non-zero on failed/cancelled. Requires --message."
+            help = "Block until session reaches terminal state. Emits session id to stdout, then only the final turn's content. Exits 0 on completed, non-zero on failed/cancelled. Requires --message."
         )]
         wait: bool,
     },
     #[command(
         about = "Stream a session's output to stdout.",
-        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session finished; now in waiting state\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
+        long_about = "Stream a session's output to stdout. Blocks until the session finishes, then exits 0 on success or non-zero on error.\n\nOutput format:\n  [turn <uuid>]          new agent turn starting\n  <text>                 model's text response, streamed\n  [tool: name(input)]    tool call\n  [result: content]      tool result\n  [done]                 session completed successfully\n  [error] <message>      session failed (also to stderr; exits non-zero)\n\nRequires --id or --name."
     )]
     Tail {
         #[arg(
@@ -318,7 +297,7 @@ enum SessionAction {
         turns: Option<usize>,
         #[arg(
             long,
-            help = "Exit after N seconds even if the session has not finished. Exits 0 if session finished naturally (waiting state), 1 if timeout fired."
+            help = "Exit after N seconds even if the session has not finished. Exits 0 if session completed naturally, 1 if timeout fired."
         )]
         timeout: Option<u64>,
     },
@@ -336,7 +315,7 @@ enum SessionAction {
     },
     #[command(
         about = "Cancel a running or created session.",
-        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `waiting`, `failed`, or `cancelled`."
+        long_about = "Cancel a running or created session.\n\nUse this to abort a session that's stuck, heading in the wrong direction, or no longer needed. Has no effect on sessions that are already `completed` or `cancelled`."
     )]
     Stop {
         #[arg(long, help = "Identify session by UUID (preferred).")]
@@ -346,7 +325,7 @@ enum SessionAction {
     },
     #[command(
         about = "Block until all specified sessions reach a terminal state.",
-        long_about = "Polls the listed sessions every second and exits once all of them are in 'waiting', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions finished (waiting or cancelled); exits 1 if any session failed or does not exist."
+        long_about = "Polls the listed sessions every second and exits once all of them are in 'completed', 'failed', or 'cancelled' state.\n\nExits 0 if all sessions completed or were cancelled; exits 1 if any session failed or does not exist."
     )]
     Wait {
         #[arg(long = "id", num_args = 1.., help = "Session UUIDs to wait on. Repeat for multiple.")]
@@ -440,8 +419,6 @@ enum IssueAction {
         watch: bool,
         #[arg(long, help = "Subscribe to status/comment events on this issue. Value: 'issue:<id>' or 'session:<id>'.")]
         subscribe: Option<String>,
-        #[arg(long, help = "When used with --subscribe, subscribe recursively to the entire issue tree.")]
-        recursive: bool,
     },
     #[command(
         about = "Edit an existing issue.",
@@ -573,8 +550,6 @@ enum IssueAction {
             help = "Notification target in the form 'issue:<id>' or 'session:<id>'. Required."
         )]
         deliver_to: String,
-        #[arg(long, help = "Subscribe to descendant issues as well as the root.")]
-        recursive: bool,
     },
 }
 
@@ -602,6 +577,22 @@ enum WorktreeAction {
         branch: String,
         #[arg(long, help = "Delete even if the branch has unmerged commits.")]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventAction {
+    #[command(
+        about = "Emit a custom event on the event bus.",
+        long_about = "Emit a custom event on the ns2 event bus.\n\nThe event is broadcast to all subscribers (SSE clients, hooks, etc.).\n\nExamples:\n  ns2 event emit custom.test\n  ns2 event emit custom.test '{\"key\": \"value\"}'\n\nExits non-zero if payload-json is provided but is not valid JSON."
+    )]
+    Emit {
+        #[arg(help = "Event type string (e.g. 'issue.status_changed', 'custom.event').")]
+        event_type: String,
+        #[arg(
+            help = "Optional JSON payload string. Defaults to {} if omitted. Exits non-zero if invalid JSON."
+        )]
+        payload_json: Option<String>,
     },
 }
 
@@ -724,7 +715,6 @@ async fn main() {
                 wait,
                 watch,
                 subscribe,
-                recursive,
             } => {
                 commands::issue::run_new(
                     &cli.server,
@@ -738,7 +728,6 @@ async fn main() {
                     wait,
                     watch,
                     subscribe,
-                    recursive,
                 )
                 .await;
             }
@@ -794,37 +783,44 @@ async fn main() {
             IssueAction::Watch { id } => {
                 commands::issue::run_watch(&cli.server, id).await;
             }
-            IssueAction::Subscribe { id, deliver_to, recursive } => {
-                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true, recursive)
+            IssueAction::Subscribe { id, deliver_to } => {
+                commands::issue::run_subscribe(&cli.server, id, deliver_to, "--deliver-to", true)
                     .await;
             }
         },
         Command::Hook { action } => match action {
             HookSubcommand::New {
                 name,
-                event_names,
+                source,
+                event_types,
                 filter_fields,
                 action,
                 target,
                 body,
                 title,
                 assignee,
+                schedule,
             } => {
                 commands::hook::run_new(
                     &cli.server,
                     name,
-                    event_names,
+                    source,
+                    event_types,
                     filter_fields,
                     action,
                     target,
                     body,
                     title,
                     assignee,
+                    schedule,
                 )
                 .await;
             }
-            HookSubcommand::List { enabled } => {
-                commands::hook::run_list(&cli.server, enabled).await;
+            HookSubcommand::List {
+                enabled,
+                source_type,
+            } => {
+                commands::hook::run_list(&cli.server, enabled, source_type).await;
             }
             HookSubcommand::Show { id } => {
                 commands::hook::run_show(&cli.server, id).await;
@@ -842,31 +838,6 @@ async fn main() {
                 commands::hook::run_logs(&cli.server, id, limit).await;
             }
         },
-        Command::Event { action } => match action {
-            EventSubcommand::New {
-                name,
-                event_type,
-                secret,
-                schedule,
-                description,
-            } => {
-                commands::event::run_new(
-                    &cli.server,
-                    name,
-                    event_type,
-                    secret,
-                    schedule,
-                    description,
-                )
-                .await;
-            }
-            EventSubcommand::List => {
-                commands::event::run_list(&cli.server).await;
-            }
-            EventSubcommand::Delete { id } => {
-                commands::event::run_delete(&cli.server, id).await;
-            }
-        },
         Command::Worktree { action } => match action {
             WorktreeAction::List => {
                 commands::worktree::run_list().await;
@@ -876,6 +847,14 @@ async fn main() {
             }
             WorktreeAction::Delete { branch, force } => {
                 commands::worktree::run_delete(branch, force).await;
+            }
+        },
+        Command::Event { action } => match action {
+            EventAction::Emit {
+                event_type,
+                payload_json,
+            } => {
+                commands::event::run_emit(&cli.server, event_type, payload_json).await;
             }
         },
     }
@@ -894,7 +873,6 @@ mod tests {
         render_session_line, render_tree_line, session_status_symbol, spinner_char, truncate_str,
         IssueTreeNode, SPINNER_FRAMES,
     };
-    use clap::CommandFactory;
     use events::SessionEvent;
     use types::*;
     use uuid::Uuid;
@@ -1512,7 +1490,6 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1543,7 +1520,6 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1760,7 +1736,6 @@ mod tests {
             assignee: Some("swe".into()),
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
@@ -1968,7 +1943,6 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::Utc::now(),
@@ -2607,14 +2581,115 @@ mod tests {
     // ─── `ns2 hook` CLI parse tests ──────────────────────────────────────────
 
     #[test]
-    fn hook_new_parses_event_flag() {
+    fn hook_new_parses_schedule_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "timer-hook",
+            "--source",
+            "timer",
+            "--schedule",
+            "0 9 * * 1",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "Monday morning",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action:
+                    HookSubcommand::New {
+                        name,
+                        source,
+                        schedule,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "timer-hook");
+                assert_eq!(source, "timer");
+                assert_eq!(schedule.as_deref(), Some("0 9 * * 1"));
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_no_schedule_is_none() {
         let cli = Cli::try_parse_from([
             "ns2",
             "hook",
             "new",
             "--name",
             "notify",
-            "--event",
+            "--source",
+            "internal",
+            "--event-type",
+            "issue.created",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "hi",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { schedule, .. },
+            } => {
+                assert!(schedule.is_none());
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_timer_source_with_every_minute_schedule() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "every-minute",
+            "--source",
+            "timer",
+            "--schedule",
+            "* * * * *",
+            "--action",
+            "send-message",
+            "--target",
+            "issue:abc1",
+            "--body",
+            "tick",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Hook {
+                action: HookSubcommand::New { schedule, source, .. },
+            } => {
+                assert_eq!(source, "timer");
+                assert_eq!(schedule.as_deref(), Some("* * * * *"));
+            }
+            _ => panic!("expected hook new command"),
+        }
+    }
+
+    #[test]
+    fn hook_new_parses_required_flags() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "hook",
+            "new",
+            "--name",
+            "notify",
+            "--source",
+            "internal",
+            "--event-type",
             "issue.status_changed",
             "--action",
             "send-message",
@@ -2629,7 +2704,8 @@ mod tests {
                 action:
                     HookSubcommand::New {
                         name,
-                        event_names,
+                        source,
+                        event_types,
                         action,
                         target,
                         body,
@@ -2637,7 +2713,8 @@ mod tests {
                     },
             } => {
                 assert_eq!(name, "notify");
-                assert_eq!(event_names, vec!["issue.status_changed"]);
+                assert_eq!(source, "internal");
+                assert_eq!(event_types, vec!["issue.status_changed"]);
                 assert_eq!(action, "send-message");
                 assert_eq!(target.as_deref(), Some("issue:abc1"));
                 assert_eq!(body.as_deref(), Some("Status changed"));
@@ -2647,16 +2724,18 @@ mod tests {
     }
 
     #[test]
-    fn hook_new_parses_multiple_event_names() {
+    fn hook_new_parses_multiple_event_types() {
         let cli = Cli::try_parse_from([
             "ns2",
             "hook",
             "new",
             "--name",
             "multi",
-            "--event",
+            "--source",
+            "internal",
+            "--event-type",
             "issue.created",
-            "--event",
+            "--event-type",
             "issue.status_changed",
             "--action",
             "send-message",
@@ -2668,67 +2747,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Hook {
-                action: HookSubcommand::New { event_names, .. },
+                action: HookSubcommand::New { event_types, .. },
             } => {
-                assert_eq!(event_names.len(), 2);
-                assert!(event_names.contains(&"issue.created".to_string()));
-                assert!(event_names.contains(&"issue.status_changed".to_string()));
-            }
-            _ => panic!("expected hook new command"),
-        }
-    }
-
-    #[test]
-    fn hook_new_parses_external_event_name() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "hook",
-            "new",
-            "--name",
-            "ci-handler",
-            "--event",
-            "external.ci-complete",
-            "--action",
-            "send-message",
-            "--target",
-            "issue:abc1",
-            "--body",
-            "CI done",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Hook {
-                action: HookSubcommand::New { event_names, .. },
-            } => {
-                assert_eq!(event_names, vec!["external.ci-complete"]);
-            }
-            _ => panic!("expected hook new command"),
-        }
-    }
-
-    #[test]
-    fn hook_new_parses_timer_event_name() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "hook",
-            "new",
-            "--name",
-            "ticker",
-            "--event",
-            "timer.heartbeat",
-            "--action",
-            "send-message",
-            "--target",
-            "issue:abc1",
-            "--body",
-            "tick",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Hook {
-                action: HookSubcommand::New { event_names, .. },
-            } => {
-                assert_eq!(event_names, vec!["timer.heartbeat"]);
+                assert_eq!(event_types.len(), 2);
+                assert!(event_types.contains(&"issue.created".to_string()));
+                assert!(event_types.contains(&"issue.status_changed".to_string()));
             }
             _ => panic!("expected hook new command"),
         }
@@ -2742,7 +2765,9 @@ mod tests {
             "new",
             "--name",
             "filtered",
-            "--event",
+            "--source",
+            "internal",
+            "--event-type",
             "issue.status_changed",
             "--filter-field",
             "data.issue.status=running",
@@ -2770,9 +2795,14 @@ mod tests {
         let cli = Cli::try_parse_from(["ns2", "hook", "list", "--enabled"]).unwrap();
         match cli.command {
             Command::Hook {
-                action: HookSubcommand::List { enabled },
+                action:
+                    HookSubcommand::List {
+                        enabled,
+                        source_type,
+                    },
             } => {
                 assert!(enabled);
+                assert!(source_type.is_none());
             }
             _ => panic!("expected hook list command"),
         }
@@ -2783,9 +2813,14 @@ mod tests {
         let cli = Cli::try_parse_from(["ns2", "hook", "list"]).unwrap();
         match cli.command {
             Command::Hook {
-                action: HookSubcommand::List { enabled },
+                action:
+                    HookSubcommand::List {
+                        enabled,
+                        source_type,
+                    },
             } => {
                 assert!(!enabled);
+                assert!(source_type.is_none());
             }
             _ => panic!("expected hook list command"),
         }
@@ -2908,7 +2943,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::Subscribe { id, deliver_to, .. },
+                action: IssueAction::Subscribe { id, deliver_to },
             } => {
                 assert_eq!(id, "ab12");
                 assert_eq!(deliver_to, "issue:watcher1");
@@ -3083,130 +3118,6 @@ mod tests {
         }
     }
 
-    // ─── `ns2 issue subscribe` --recursive CLI parse tests ───────────────────
-
-    #[test]
-    fn issue_subscribe_recursive_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "issue",
-            "subscribe",
-            "--id",
-            "ab12",
-            "--deliver-to",
-            "issue:cd34",
-            "--recursive",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::Subscribe { id, deliver_to, recursive },
-            } => {
-                assert_eq!(id, "ab12");
-                assert_eq!(deliver_to, "issue:cd34");
-                assert!(recursive, "recursive should be true when --recursive is passed");
-            }
-            _ => panic!("expected issue subscribe command"),
-        }
-    }
-
-    #[test]
-    fn issue_subscribe_no_recursive_flag_is_false() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "issue",
-            "subscribe",
-            "--id",
-            "ab12",
-            "--deliver-to",
-            "issue:cd34",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::Subscribe { recursive, .. },
-            } => {
-                assert!(!recursive, "recursive should be false when --recursive is not passed");
-            }
-            _ => panic!("expected issue subscribe command"),
-        }
-    }
-
-    #[test]
-    fn issue_new_recursive_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "issue",
-            "new",
-            "--title",
-            "T",
-            "--body",
-            "B",
-            "--subscribe",
-            "issue:ab12",
-            "--recursive",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::New { subscribe, recursive, .. },
-            } => {
-                assert_eq!(subscribe.as_deref(), Some("issue:ab12"));
-                assert!(recursive, "recursive should be true when --recursive is passed");
-            }
-            _ => panic!("expected issue new command"),
-        }
-    }
-
-    #[test]
-    fn issue_new_no_recursive_flag_is_false() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "issue",
-            "new",
-            "--title",
-            "T",
-            "--body",
-            "B",
-            "--subscribe",
-            "issue:ab12",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::New { recursive, .. },
-            } => {
-                assert!(!recursive, "recursive should be false when --recursive is not passed");
-            }
-            _ => panic!("expected issue new command"),
-        }
-    }
-
-    #[test]
-    fn issue_new_recursive_without_subscribe_parses_ok() {
-        // --recursive without --subscribe should still parse successfully
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "issue",
-            "new",
-            "--title",
-            "T",
-            "--body",
-            "B",
-            "--recursive",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Issue {
-                action: IssueAction::New { subscribe, recursive, .. },
-            } => {
-                assert!(subscribe.is_none(), "subscribe should be None");
-                assert!(recursive, "recursive should be true");
-            }
-            _ => panic!("expected issue new command"),
-        }
-    }
-
     // ─── Scenario A: --subscribe parses correctly in CLI ─────────────────────
 
     #[test]
@@ -3249,162 +3160,6 @@ mod tests {
         }
     }
 
-    // ─── Help string: session status lifecycle uses 'waiting' not 'completed' ─
-
-    #[test]
-    fn session_subcommand_long_about_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        // Find the Session subcommand
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let long_about = session_cmd
-            .get_long_about()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            long_about.contains("waiting"),
-            "session long_about must contain 'waiting', got: {long_about}"
-        );
-        assert!(
-            !long_about.contains("completed"),
-            "session long_about must not contain 'completed', got: {long_about}"
-        );
-    }
-
-    #[test]
-    fn session_list_status_help_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let list_cmd = session_cmd
-            .find_subcommand_mut("list")
-            .expect("session list subcommand must exist");
-        let status_arg = list_cmd
-            .get_arguments()
-            .find(|a| a.get_id() == "status")
-            .expect("status arg must exist");
-        let help = status_arg
-            .get_help()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            help.contains("waiting"),
-            "session list --status help must contain 'waiting', got: {help}"
-        );
-        assert!(
-            !help.contains("completed"),
-            "session list --status help must not contain 'completed', got: {help}"
-        );
-    }
-
-    #[test]
-    fn session_new_wait_help_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let new_cmd = session_cmd
-            .find_subcommand_mut("new")
-            .expect("session new subcommand must exist");
-        let wait_arg = new_cmd
-            .get_arguments()
-            .find(|a| a.get_id() == "wait")
-            .expect("wait arg must exist");
-        let help = wait_arg
-            .get_help()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            help.contains("waiting"),
-            "session new --wait help must contain 'waiting', got: {help}"
-        );
-        assert!(
-            !help.contains("completed"),
-            "session new --wait help must not contain 'completed', got: {help}"
-        );
-    }
-
-    #[test]
-    fn session_tail_timeout_help_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let tail_cmd = session_cmd
-            .find_subcommand_mut("tail")
-            .expect("session tail subcommand must exist");
-        let timeout_arg = tail_cmd
-            .get_arguments()
-            .find(|a| a.get_id() == "timeout")
-            .expect("timeout arg must exist");
-        let help = timeout_arg
-            .get_help()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            help.contains("waiting"),
-            "session tail --timeout help must contain 'waiting', got: {help}"
-        );
-        assert!(
-            !help.contains("completed"),
-            "session tail --timeout help must not contain 'completed', got: {help}"
-        );
-    }
-
-    #[test]
-    fn session_stop_long_about_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let stop_cmd = session_cmd
-            .find_subcommand_mut("stop")
-            .expect("session stop subcommand must exist");
-        let long_about = stop_cmd
-            .get_long_about()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            long_about.contains("waiting"),
-            "session stop long_about must contain 'waiting', got: {long_about}"
-        );
-        assert!(
-            !long_about.contains("completed"),
-            "session stop long_about must not contain 'completed', got: {long_about}"
-        );
-    }
-
-    #[test]
-    fn session_wait_long_about_contains_waiting_not_completed() {
-        use clap::CommandFactory;
-        let mut app = Cli::command();
-        let session_cmd = app
-            .find_subcommand_mut("session")
-            .expect("session subcommand must exist");
-        let wait_cmd = session_cmd
-            .find_subcommand_mut("wait")
-            .expect("session wait subcommand must exist");
-        let long_about = wait_cmd
-            .get_long_about()
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        assert!(
-            long_about.contains("waiting"),
-            "session wait long_about must contain 'waiting', got: {long_about}"
-        );
-        assert!(
-            !long_about.contains("completed"),
-            "session wait long_about must not contain 'completed', got: {long_about}"
-        );
-    }
-
     // ─── Scenario C: --subscribe with session target parses ──────────────────
 
     #[test]
@@ -3431,169 +3186,60 @@ mod tests {
         }
     }
 
-    // ─── Regression: session tail long_about must not reference stale status ─
+    // ─── Scenarios 1-3: ns2 event emit parses correctly ─────────────────────
 
     #[test]
-    fn session_tail_long_about_does_not_contain_completed() {
-        // "completed" was removed as a session status in GH#131.
-        // This test guards against stale wording creeping back into the
-        // tail subcommand's help text.
-        let cmd = Cli::command();
-        let session_sub = cmd
-            .get_subcommands()
-            .find(|s| s.get_name() == "session")
-            .expect("session subcommand should exist");
-        let tail_sub = session_sub
-            .get_subcommands()
-            .find(|s| s.get_name() == "tail")
-            .expect("tail subcommand should exist");
-        let long_about = tail_sub
-            .get_long_about()
-            .expect("tail subcommand should have long_about")
-            .to_string();
-        assert!(
-            long_about.contains("waiting"),
-            "session tail long_about must describe the 'waiting' state; got: {long_about}"
-        );
-        assert!(
-            !long_about.contains("completed"),
-            "session tail long_about must not contain 'completed', got: {long_about}"
-        );
-    }
-
-    // ─── `ns2 event` CLI parse tests ─────────────────────────────────────────
-
-    #[test]
-    fn event_new_webhook_parses() {
+    fn event_emit_with_event_type_and_payload_parses() {
         let cli = Cli::try_parse_from([
             "ns2",
             "event",
-            "new",
-            "ci-complete",
-            "--type",
-            "webhook",
-            "--secret",
-            "abc123",
+            "emit",
+            "custom.test",
+            r#"{"key": "value"}"#,
         ])
         .unwrap();
         match cli.command {
             Command::Event {
-                action:
-                    EventSubcommand::New {
-                        name,
-                        event_type,
-                        secret,
-                        schedule,
-                        ..
-                    },
+                action: EventAction::Emit {
+                    ref event_type,
+                    ref payload_json,
+                },
             } => {
-                assert_eq!(name, "ci-complete");
-                assert_eq!(event_type, "webhook");
-                assert_eq!(secret.as_deref(), Some("abc123"));
-                assert!(schedule.is_none());
+                assert_eq!(event_type, "custom.test");
+                assert_eq!(payload_json.as_deref(), Some(r#"{"key": "value"}"#));
             }
-            _ => panic!("expected event new command"),
+            _ => panic!("expected event emit command"),
         }
     }
 
     #[test]
-    fn event_new_timer_parses() {
-        let cli = Cli::try_parse_from([
-            "ns2",
-            "event",
-            "new",
-            "heartbeat",
-            "--type",
-            "timer",
-            "--schedule",
-            "* * * * *",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::Event {
-                action:
-                    EventSubcommand::New {
-                        name,
-                        event_type,
-                        schedule,
-                        secret,
-                        ..
-                    },
-            } => {
-                assert_eq!(name, "heartbeat");
-                assert_eq!(event_type, "timer");
-                assert_eq!(schedule.as_deref(), Some("* * * * *"));
-                assert!(secret.is_none());
-            }
-            _ => panic!("expected event new command"),
-        }
-    }
-
-    #[test]
-    fn event_new_webhook_no_secret() {
+    fn event_emit_without_payload_parses() {
         let cli =
-            Cli::try_parse_from(["ns2", "event", "new", "mywebhook", "--type", "webhook"])
-                .unwrap();
+            Cli::try_parse_from(["ns2", "event", "emit", "custom.test"]).unwrap();
         match cli.command {
             Command::Event {
-                action:
-                    EventSubcommand::New {
-                        name,
-                        event_type,
-                        secret,
-                        ..
-                    },
+                action: EventAction::Emit {
+                    ref event_type,
+                    ref payload_json,
+                },
             } => {
-                assert_eq!(name, "mywebhook");
-                assert_eq!(event_type, "webhook");
-                assert!(secret.is_none(), "secret should be None when not provided");
+                assert_eq!(event_type, "custom.test");
+                assert!(payload_json.is_none(), "payload_json should be None when not provided");
             }
-            _ => panic!("expected event new command"),
+            _ => panic!("expected event emit command"),
         }
     }
 
     #[test]
-    fn event_list_parses() {
-        let cli = Cli::try_parse_from(["ns2", "event", "list"]).unwrap();
-        assert!(
-            matches!(
-                cli.command,
-                Command::Event {
-                    action: EventSubcommand::List
-                }
-            ),
-            "expected event list command"
-        );
-    }
-
-    #[test]
-    fn event_delete_parses() {
-        let cli = Cli::try_parse_from(["ns2", "event", "delete", "--id", "e001"]).unwrap();
-        match cli.command {
-            Command::Event {
-                action: EventSubcommand::Delete { id },
-            } => {
-                assert_eq!(id, "e001");
-            }
-            _ => panic!("expected event delete command"),
-        }
-    }
-
-    #[test]
-    fn event_delete_missing_id_fails_to_parse() {
-        let result = Cli::try_parse_from(["ns2", "event", "delete"]);
+    fn event_emit_invalid_json_payload_is_detected_at_runtime() {
+        // CLI parsing itself succeeds — the error is detected when run_emit
+        // is called with an invalid JSON string. We test the detection logic
+        // directly rather than spawning a process.
+        let invalid_json = "not-json".to_string();
+        let result = serde_json::from_str::<serde_json::Value>(&invalid_json);
         assert!(
             result.is_err(),
-            "event delete without --id should fail to parse"
-        );
-    }
-
-    #[test]
-    fn event_new_missing_type_fails_to_parse() {
-        let result = Cli::try_parse_from(["ns2", "event", "new", "mywebhook"]);
-        assert!(
-            result.is_err(),
-            "event new without --type should fail to parse"
+            "invalid JSON must fail to parse: {invalid_json:?}"
         );
     }
 }

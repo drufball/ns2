@@ -2,43 +2,38 @@
 targets:
   - crates/cli/src/commands/hook.rs
   - crates/cli/src/main.rs
-verified: 2026-05-10T18:26:29Z
+verified: 2026-05-10T11:09:26Z
 ---
 
 # ns2 hook
 
-Hooks react to system events and fire actions. A hook listens for one or more **named events** (identified by their `event_names` list). Common built-in event names:
+Hooks react to system events and fire actions. There are three source types:
 
-- `issue.created`, `issue.status_changed`, `issue.comment_added` — internal issue lifecycle events
-- `session.done` — session completed
-- `external.<name>` — fired when a named webhook event is received (e.g. `external.ci-complete`)
-- `timer.<name>` — fired by the timer scheduler for a named timer event (e.g. `timer.heartbeat`)
-- `*` — matches all events
+- **internal** — fires when a `SystemEvent` matches the hook's `event_types` and optional filter
+- **external** — fires when `POST /hooks/:id/trigger` is called directly
+- **timer** — fires on a recurring cron schedule
 
 ## Creating hooks
 
 ```bash
-# React to an issue status change
-ns2 hook new --name notify --event issue.status_changed \
+# Internal hook: post a comment when an issue status changes
+ns2 hook new --name notify --source internal \
+  --event-type issue.status_changed \
   --action send-message --target issue:<id> \
   --body "Status is now {{ event.data.to }}"
 
-# React to a named external webhook event
-ns2 hook new --name ci-handler --event external.ci-complete \
-  --action send-message --target issue:<id> --body "CI done"
-
-# React to a named timer event
-ns2 hook new --name ticker --event timer.heartbeat \
-  --action send-message --target issue:<id> --body "tick"
-
-# React to multiple events
-ns2 hook new --name multi --event issue.created --event issue.status_changed \
-  --action send-message --target issue:<id> --body "{{ event.data }}"
+# Timer hook: post every Monday at 9am UTC
+ns2 hook new --name weekly --source timer \
+  --schedule "0 9 * * 1" \
+  --action send-message --target issue:<id> \
+  --body "Weekly check-in"
 ```
 
-`--event` (repeatable) specifies the event names to listen for. Use `--event '*'` to match all events.
+`--schedule` is required when `--source timer` is used. The schedule is a standard 5-field cron expression (`minute hour dom month dow`). Invalid schedules are rejected by the server with a `400` error.
 
-`--action` is always required: `send-message`, `create-issue`, or `run-shell`.
+`--event-type` (repeatable) is required when `--source internal` is used. Common values: `issue.created`, `issue.status_changed`, `issue.comment_added`, `session.done`.
+
+`--action` is always required: `send-message` (currently implemented), `create-issue`, or `run-shell` (both placeholder).
 
 `--target` is required for `send-message`: `issue:<id>` routes the message as a comment on the specified issue.
 
@@ -47,10 +42,11 @@ ns2 hook new --name multi --event issue.created --event issue.status_changed \
 ## Listing and inspecting
 
 ```bash
-ns2 hook list              # all hooks
-ns2 hook list --enabled    # only enabled hooks
+ns2 hook list                        # all hooks
+ns2 hook list --source-type timer    # only timer hooks
+ns2 hook list --enabled true         # only enabled hooks
 ns2 hook show --id <id>
-ns2 hook logs --id <id>    # recent executions (default limit: 20)
+ns2 hook logs --id <id>              # recent executions (default limit: 20)
 ```
 
 ## Enabling and disabling
@@ -63,7 +59,7 @@ ns2 hook delete --id <id>
 
 ## Subscribe shortcut
 
-`ns2 issue subscribe` is sugar for creating a hook that watches a specific issue for status changes and new comments:
+`ns2 issue subscribe` is sugar for creating an internal hook that watches a specific issue for status changes and new comments:
 
 ```bash
 ns2 issue subscribe --id <issue-id> --deliver-to issue:<watcher-issue-id>

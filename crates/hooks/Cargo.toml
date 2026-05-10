@@ -18,5 +18,6 @@ minijinja = "2"
 cron = "0.12"
 
 [dev-dependencies]
+issue-backend = { path = "../issue-backend" }
 tokio = { workspace = true }
 async-trait = { workspace = true }

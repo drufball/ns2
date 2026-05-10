@@ -1123,21 +1123,21 @@ fn issue_new_subscribe_hook_payload_shape() {
         .find(|h| h["name"].as_str() == Some(&format!("subscribe-{issue_id}")))
         .unwrap_or_else(|| panic!("hook named subscribe-{issue_id} should exist in the hooks list"));
 
-    // Verify event_names contains both required event types
-    let event_names = hook["event_names"]
+    // Verify event_types contains both required event types
+    let event_types = hook["source"]["event_types"]
         .as_array()
-        .expect("event_names should be an array");
-    let event_name_strings: Vec<&str> = event_names
+        .expect("source.event_types should be an array");
+    let event_type_strings: Vec<&str> = event_types
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        event_name_strings.contains(&"issue.status_changed"),
-        "event_names should contain 'issue.status_changed'; got: {event_names:?}"
+        event_type_strings.contains(&"issue.status_changed"),
+        "event_types should contain 'issue.status_changed'; got: {event_types:?}"
     );
     assert!(
-        event_name_strings.contains(&"issue.comment_added"),
-        "event_names should contain 'issue.comment_added'; got: {event_names:?}"
+        event_type_strings.contains(&"issue.comment_added"),
+        "event_types should contain 'issue.comment_added'; got: {event_types:?}"
     );
 
     // Verify filter condition matches the issue ID

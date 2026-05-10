@@ -402,7 +402,6 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),

@@ -139,7 +139,6 @@ mod tests {
             assignee: Some("bot".to_string()),
             session_id: Some(session_id),
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: chrono::Utc::now(),

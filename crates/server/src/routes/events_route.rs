@@ -40,6 +40,7 @@ impl EventsQuery {
                 SystemEvent::Issue(_) => "issue",
                 SystemEvent::External { .. } => "external",
                 SystemEvent::TimerFired { .. } => "timer",
+                SystemEvent::Custom { .. } => "custom",
             };
             if !types_str.split(',').map(str::trim).any(|x| x == type_name) {
                 return false;
@@ -202,7 +203,6 @@ mod tests {
             assignee: None,
             session_id: None,
             parent_id: None,
-            ancestor_ids: vec![],
             blocked_on: vec![],
             comments: vec![],
             created_at: Utc::now(),

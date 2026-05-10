@@ -5,7 +5,7 @@ targets:
   - crates/anthropic/src/**/*.rs
   - crates/tools/src/**/*.rs
 severity: warning
-verified: 2026-06-02T00:00:00Z
+verified: 2026-05-10T11:09:26Z
 ---
 
 # Agent Harness Spec
