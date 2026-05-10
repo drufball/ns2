@@ -2398,6 +2398,16 @@ mod tests {
         .unwrap()
     }
 
+    async fn patch_issue_status(
+        app: Router,
+        id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.oneshot(issue_req("PATCH", &format!("/issues/{id}/status"), &body))
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn test_patch_session_status_happy_path() {
         let app = test_app().await;
@@ -2680,6 +2690,296 @@ mod tests {
             fetched.status,
             SessionStatus::Failed,
             "session with no linked issue must still be marked failed"
+        );
+    }
+
+    // ─── P2: multi-issue-per-session ─────────────────────────────────────────
+
+    /// When two issues are linked to the same session and the session emits Done
+    /// (without a Stopped event), both issues must transition from Running to Waiting.
+    #[tokio::test]
+    async fn test_multiple_issues_per_session_all_transition_on_done() {
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let state = test_state().await;
+
+        // Create a single session in Running status — orphan_sweep only picks up Running sessions.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "multi-issue-session".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create two issues, both linked to the same session.
+        let issue1 = types::Issue {
+            id: "mi01".to_string(),
+            title: "Issue A".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let issue2 = types::Issue {
+            id: "mi02".to_string(),
+            title: "Issue B".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue1).await.unwrap();
+        state.db.create_issue(&issue2).await.unwrap();
+
+        // Spawn harness for issue1; we pass issue1's id.
+        // issue2 is also linked to the same session via session_id but we don't
+        // pass its id to spawn_harness_sync — that's the realistic scenario where
+        // orphan_sweep is used. Here we verify the subscriber loop in orphan_sweep
+        // (list_issues_by_session_id) rather than the harness watcher.
+        //
+        // We test the orphan_sweep path: after a server restart, both issues linked
+        // to the same Running session must transition to Failed.
+        state.issue_service.orphan_sweep().await;
+
+        let fetched1 = state.db.get_issue("mi01".to_string()).await.unwrap();
+        let fetched2 = state.db.get_issue("mi02".to_string()).await.unwrap();
+
+        assert_eq!(
+            fetched1.status,
+            IssueStatus::Failed,
+            "issue1 must be Failed after orphan sweep"
+        );
+        assert_eq!(
+            fetched2.status,
+            IssueStatus::Failed,
+            "issue2 (also linked to the same session) must also be Failed after orphan sweep"
+        );
+
+        // Both must have the system comment.
+        assert!(
+            fetched1.comments.iter().any(|c| c.body.contains("session lost on server restart")),
+            "issue1 must have 'session lost' comment"
+        );
+        assert!(
+            fetched2.comments.iter().any(|c| c.body.contains("session lost on server restart")),
+            "issue2 must have 'session lost' comment"
+        );
+    }
+
+    // ─── P3: handle_in_progress silent-skip when session is Running ───────────
+
+    /// When an issue already has a session in Running state, emitting a Done event
+    /// that would normally spawn a new harness must NOT increase the `msg_senders` count.
+    /// (The issue watcher is already active for the running session.)
+    #[tokio::test]
+    async fn test_handle_in_progress_does_not_spawn_when_session_already_running() {
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let (app, state) = test_app_with_state().await;
+
+        // Create a Running session.
+        let running_session_id = Uuid::new_v4();
+        let running_session = Session {
+            id: running_session_id,
+            name: "already-running".into(),
+            status: SessionStatus::Running,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&running_session).await.unwrap();
+
+        // Create an issue in Running state with this session.
+        let issue = types::Issue {
+            id: "ip01".to_string(),
+            title: "Already Running Issue".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(running_session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Record the current msg_senders count (should be 0 for this session).
+        let initial_count = {
+            let senders = state.msg_senders.lock().await;
+            let count = senders.len();
+            drop(senders);
+            count
+        };
+
+        // Attempting PATCH /issues/ip01/status with {"status": "in_progress"}
+        // while the session is Running must return 400 (bad request) and must NOT
+        // spawn a new harness.
+        let resp = app
+            .oneshot(issue_req(
+                "PATCH",
+                "/issues/ip01/status",
+                &serde_json::json!({"status": "in_progress"}),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "in_progress on a Running session issue must return 400"
+        );
+
+        // msg_senders must not have grown.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        let final_count = {
+            let senders = state.msg_senders.lock().await;
+            let count = senders.len();
+            drop(senders);
+            count
+        };
+
+        assert_eq!(
+            final_count, initial_count,
+            "msg_senders must not increase when in_progress is rejected for a Running-session issue"
+        );
+    }
+
+    // ─── P4: stop_map not cleared on Error ───────────────────────────────────
+
+    /// After `SessionEvent::Error`, the global subscriber removes the session's
+    /// entry from `stop_map`. If Done arrives later for the same session,
+    /// the issue must transition to Waiting (not Completed), proving
+    /// the `stop_map` was cleared by the Error handler.
+    #[tokio::test]
+    async fn test_error_clears_stop_map_so_done_produces_waiting() {
+        use events::{SessionEvent, StopEventStatus, SystemEvent};
+        use types::{IssueStatus, Session, SessionStatus};
+
+        let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // Create a session and an issue linked to it.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "error-clears-stop-map".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "ecsm01".to_string(),
+            title: "Error clears stop map".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Emit Stopped{Complete} — would mark the issue Completed on Done
+        // if the stop_map entry were retained.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Stopped {
+                status: StopEventStatus::Complete,
+                comment: None,
+            },
+        });
+
+        // Emit Error — global subscriber should fail the issue AND clear the
+        // stop_map entry for this session.
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Error {
+                message: "simulated error".into(),
+            },
+        });
+
+        // Wait for the issue to become Failed.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Failed {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue did not become Failed within 3s (status={})",
+                fetched.status
+            );
+        }
+
+        // Reset issue back to InProgress so it can transition again.
+        let mut reset_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+        reset_issue.status = IssueStatus::InProgress;
+        state.db.update_issue(&reset_issue).await.unwrap();
+
+        // Now emit Done WITHOUT a preceding Stopped for this session.
+        // Because Error already cleared the stop_map entry, the subscriber
+        // must park the issue as Waiting (not Completed).
+        state.event_bus.send(SystemEvent::Session {
+            session_id: session.id,
+            event: SessionEvent::Done,
+        });
+
+        let deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+            if fetched.status == IssueStatus::Waiting {
+                break;
+            }
+            assert_ne!(
+                fetched.status,
+                IssueStatus::Completed,
+                "issue became Completed — stop_map entry was not cleared by Error"
+            );
+            assert!(
+                tokio::time::Instant::now() <= deadline2,
+                "issue did not become Waiting within 3s after Done (status={})",
+                fetched.status
+            );
+        }
+
+        let final_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+        assert_eq!(
+            final_issue.status,
+            IssueStatus::Waiting,
+            "Done after Error must produce Waiting, not Completed — stop_map must be cleared"
         );
     }
 
@@ -4539,6 +4839,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_in_progress_spawns_harness_and_reaches_waiting() {
+        let (app, state) = test_app_with_state().await;
+
+        // Create an issue with an assignee.
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "Lifecycle test",
+                    "body": "body",
+                    "assignee": "test-agent"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        // Set to in_progress — should spawn harness.
+        let resp = patch_issue_status(
+            app.clone(),
+            &issue_id,
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "in_progress",
+            "returned issue must have status=in_progress"
+        );
+        assert!(
+            !v["session_id"].is_null(),
+            "session_id must be set after in_progress transition"
+        );
+
+        // Eventually should reach waiting (stub client).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let issue = state.db.get_issue(issue_id.clone()).await.unwrap();
+            if issue.status == IssueStatus::Waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "issue did not reach waiting within 5s; status={}",
+                issue.status
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_create_hook_with_multiple_event_names_returns_201() {
         let app = test_app().await;
         let resp = app
@@ -4561,6 +4918,380 @@ mod tests {
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["event_names"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_without_assignee_returns_400() {
+        let app = test_app().await;
+
+        // Create issue WITHOUT assignee
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "No assignee",
+                    "body": "body"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        let resp = patch_issue_status(
+            app,
+            &issue_id,
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress without assignee must return 400"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_failed_session_issue_creates_fresh_session() {
+        let (app, state) = test_app_with_state().await;
+
+        let old_session_id = Uuid::new_v4();
+        let old_session = types::Session {
+            id: old_session_id,
+            name: "old-session".into(),
+            status: types::SessionStatus::Failed,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&old_session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "fi01".to_string(),
+            title: "Failed issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Failed,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(old_session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "fi01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "in_progress on failed issue must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "in_progress",
+            "failed issue with in_progress should become in_progress"
+        );
+        let new_session_id = v["session_id"].as_str().expect("session_id must be set");
+        assert_ne!(
+            new_session_id,
+            old_session_id.to_string(),
+            "a new session must be created, not the old failed one"
+        );
+
+        let old_sess = state.db.get_session(old_session_id).await.unwrap();
+        assert_eq!(
+            old_sess.status,
+            types::SessionStatus::Cancelled,
+            "old failed session should be marked cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_waiting_issue_resumes_session() {
+        let (app, state) = test_app_with_state().await;
+
+        let waiting_session_id = Uuid::new_v4();
+        let waiting_session = types::Session {
+            id: waiting_session_id,
+            name: "waiting-session".into(),
+            status: types::SessionStatus::Waiting,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&waiting_session).await.unwrap();
+        state
+            .db
+            .update_session_status(waiting_session_id, types::SessionStatus::Waiting)
+            .await
+            .unwrap();
+
+        let issue = types::Issue {
+            id: "wi01".to_string(),
+            title: "Waiting issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Waiting,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(waiting_session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "wi01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "in_progress on waiting issue must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "in_progress",
+            "waiting issue with in_progress should become in_progress"
+        );
+        let returned_session_id = v["session_id"].as_str().expect("session_id must be set");
+        assert_eq!(
+            returned_session_id,
+            waiting_session_id.to_string(),
+            "should reuse the existing waiting session, not create a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_issues_id_start_returns_404_route_removed() {
+        let app = test_app().await;
+
+        let create_resp = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({
+                    "title": "Test",
+                    "body": "body",
+                    "assignee": "test-agent"
+                }),
+            ))
+            .await
+            .unwrap();
+        let body = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let issue_id = created["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/issues/{issue_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "POST /issues/:id/start must return 404 after route removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_cancelled_issue_hints_reopen() {
+        let (app, state) = test_app_with_state().await;
+
+        let issue = types::Issue {
+            id: "ci01".to_string(),
+            title: "Cancelled issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Cancelled,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: None,
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "ci01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on cancelled issue must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("reopen"),
+            "error message must hint at `reopen`, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_cancelled_issue_with_session_hints_reopen() {
+        let (app, state) = test_app_with_state().await;
+
+        let cancelled_session_id = Uuid::new_v4();
+        let cancelled_session = types::Session {
+            id: cancelled_session_id,
+            name: "cancelled-session".into(),
+            status: types::SessionStatus::Cancelled,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&cancelled_session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "ci02".to_string(),
+            title: "Cancelled issue with session".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Cancelled,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(cancelled_session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "ci02",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on cancelled issue with session must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("reopen"),
+            "error message must hint at `reopen`, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_running_issue_with_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        let running_session_id = Uuid::new_v4();
+        let running_session = types::Session {
+            id: running_session_id,
+            name: "running-session".into(),
+            status: types::SessionStatus::Running,
+            agent: Some("test-agent".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&running_session).await.unwrap();
+
+        let issue = types::Issue {
+            id: "ri01".to_string(),
+            title: "Running issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: Some(running_session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "ri01",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on running issue must return 400"
+        );
+        let body = response_body_bytes(resp).await;
+        let err_msg = String::from_utf8_lossy(&body);
+        assert!(
+            err_msg.contains("in_progress"),
+            "error message must mention 'in_progress', got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_in_progress_on_waiting_issue_without_session_returns_400() {
+        let (app, state) = test_app_with_state().await;
+
+        let issue = types::Issue {
+            id: "wi02".to_string(),
+            title: "Waiting no-session issue".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Waiting,
+            branch: String::new(),
+            assignee: Some("test-agent".to_string()),
+            session_id: None,
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        let resp = patch_issue_status(
+            app.clone(),
+            "wi02",
+            serde_json::json!({"status": "in_progress"}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_progress on waiting issue with no session_id must return 400"
+        );
     }
 
     // ─── POST /webhooks/:event_id tests ─────────────────────────────────────

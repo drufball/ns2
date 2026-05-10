@@ -12,7 +12,7 @@ Issues are the primary way to get work done. An issue is a lightweight work item
 ## Lifecycle
 
 - **open** — created, not yet started
-- **running** — an agent session is actively working on it
+- **in_progress** — an agent session is actively working on it
 - **completed** — work finished and reviewed
 - **failed** — session ended with an error
 
@@ -20,12 +20,12 @@ Issues are the primary way to get work done. An issue is a lightweight work item
 
 ```bash
 id=$(ns2 issue new --title "Add retry logic" --body "..." --assignee swe)
-ns2 issue set-status --id "$id" --status in_progress
+ns2 issue edit --id "$id" --status in_progress
 ns2 issue wait --id "$id"
 ns2 issue complete --id "$id" --comment "Done: added exponential backoff"
 ```
 
-`issue new` prints the issue ID to stdout, making it easy to capture. `issue set-status --status in_progress` starts the assigned agent — it creates the session, sends the issue as the opening prompt, and links everything together. `issue wait` polls silently until the issue reaches a terminal state. `issue complete` requires `--comment` as a mandatory final summary.
+`issue new` prints the issue ID to stdout, making it easy to capture. `issue edit --status in_progress` starts the assigned agent — it creates the session, sends the issue as the opening prompt, and links everything together. `issue wait` polls silently until the issue reaches a terminal state. `issue complete` requires `--comment` as a mandatory final summary.
 
 You can combine creation and start in a single command:
 
@@ -42,7 +42,7 @@ Add `--recursive` alongside `--subscribe` to subscribe to the entire issue tree 
 
 ## Setting status and starting
 
-`ns2 issue set-status --id <id> --status <status>` updates the issue status via `PATCH /issues/:id/status`. When `--status in_progress` is passed, the server auto-starts the issue: it validates that an assignee is set, and then either creates a fresh session (for open/failed issues) or resumes the existing session (for waiting issues). The issue moves to `running` — `in_progress` is only an input signal, never a stored state.
+`ns2 issue edit --id <id> --status <status>` updates the issue status via `PATCH /issues/:id/status`. When `--status in_progress` is passed, the server auto-starts the issue: it validates that an assignee is set, and then either creates a fresh session (for open/failed issues) or resumes the existing session (for waiting issues). The issue moves to `in_progress` — `in_progress` is both the input signal and the stored state.
 
 ## Listing and filtering
 
