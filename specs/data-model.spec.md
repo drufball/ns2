@@ -60,7 +60,7 @@ Work items that can be assigned to agents and tracked through a lifecycle.
 | `id` | TEXT PK | 4-character random alphanumeric (see below) |
 | `title` | TEXT | short description |
 | `body` | TEXT | full issue text |
-| `status` | TEXT | `open`, `running`, `completed`, `failed`, `cancelled`, `waiting` |
+| `status` | TEXT | `open`, `in_progress`, `completed`, `failed`, `cancelled`, `waiting` |
 | `branch` | TEXT | git branch the issue operates on |
 | `assignee` | TEXT | optional; agent type name |
 | `session_id` | TEXT | optional; UUID of the linked agent session |
