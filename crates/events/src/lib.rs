@@ -108,6 +108,10 @@ pub enum SystemEvent {
         hook_id: String,
         fired_at: DateTime<Utc>,
     },
+    Custom {
+        event_type: String,
+        payload: serde_json::Value,
+    },
 }
 
 // ── EventBus ──────────────────────────────────────────────────────────────────
@@ -273,6 +277,19 @@ mod tests {
         let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
         assert!(
             matches!(decoded, SystemEvent::TimerFired { ref hook_id, .. } if hook_id == "timer-1")
+        );
+    }
+
+    #[test]
+    fn system_event_custom_serde_round_trip() {
+        let ev = SystemEvent::Custom {
+            event_type: "custom.test".into(),
+            payload: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SystemEvent::Custom { ref event_type, .. } if event_type == "custom.test")
         );
     }
 

@@ -104,11 +104,15 @@ impl SqliteDb {
 /// # Errors
 ///
 /// Returns an error if the database connection or migration fails.
-pub async fn connect(url: &str) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>)> {
+pub async fn connect(
+    url: &str,
+) -> Result<(Arc<dyn Db>, Arc<dyn HookStore>, Arc<dyn GitHubMappingStore>)> {
     let sqlite_db = SqliteDb::connect(url).await?;
     let hook_store: Arc<dyn HookStore> = Arc::new(SqliteHookStore::new(sqlite_db.pool().clone()));
+    let github_mapping: Arc<dyn GitHubMappingStore> =
+        Arc::new(SqliteGitHubMappingStore::new(sqlite_db.pool().clone()));
     let db: Arc<dyn Db> = Arc::new(sqlite_db);
-    Ok((db, hook_store))
+    Ok((db, hook_store, github_mapping))
 }
 
 fn parse_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
@@ -799,6 +803,76 @@ impl HookStore for SqliteHookStore {
         .await?;
         rows.iter().map(parse_execution_row).collect()
     }
+}
+
+// ── GitHubMappingStore ────────────────────────────────────────────────────────
+
+/// Stores the mapping from ns2 issue ID to GitHub issue number.
+///
+/// The mapping is persisted in the `github_issue_mapping` SQLite table so that
+/// `GitHubIssueBackend` can look up the GitHub issue number for any ns2 issue.
+#[async_trait]
+pub trait GitHubMappingStore: Send + Sync {
+    /// Insert or replace a mapping from `ns2_id` to `github_number`.
+    async fn upsert_mapping(&self, ns2_id: &str, github_number: i64) -> Result<()>;
+    /// Return the GitHub issue number for `ns2_id`, or `None` if not mapped.
+    async fn get_github_number(&self, ns2_id: &str) -> Result<Option<i64>>;
+    /// Return the ns2 issue ID for `github_number`, or `None` if not mapped.
+    async fn get_ns2_id(&self, github_number: i64) -> Result<Option<String>>;
+}
+
+pub(crate) struct SqliteGitHubMappingStore {
+    pool: SqlitePool,
+}
+
+impl SqliteGitHubMappingStore {
+    #[must_use]
+    pub(crate) const fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl GitHubMappingStore for SqliteGitHubMappingStore {
+    async fn upsert_mapping(&self, ns2_id: &str, github_number: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO github_issue_mapping (ns2_id, github_number) VALUES (?, ?)
+             ON CONFLICT(ns2_id) DO UPDATE SET github_number = excluded.github_number",
+        )
+        .bind(ns2_id)
+        .bind(github_number)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_github_number(&self, ns2_id: &str) -> Result<Option<i64>> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT github_number FROM github_issue_mapping WHERE ns2_id = ?")
+                .bind(ns2_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(n,)| n))
+    }
+
+    async fn get_ns2_id(&self, github_number: i64) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT ns2_id FROM github_issue_mapping WHERE github_number = ?")
+                .bind(github_number)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(s,)| s))
+    }
+}
+
+/// Create a [`GitHubMappingStore`] backed by the given pool.
+///
+/// # Errors
+///
+/// Currently infallible but returns `Result` for symmetry with other factory
+/// functions in this module.
+pub fn connect_github_mapping_store(pool: SqlitePool) -> Result<Arc<dyn GitHubMappingStore>> {
+    Ok(Arc::new(SqliteGitHubMappingStore::new(pool)))
 }
 
 #[cfg(test)]
@@ -1933,5 +2007,46 @@ mod tests {
         assert_eq!(executions[0].id, "exec-order-2");
         assert_eq!(executions[1].id, "exec-order-1");
         assert_eq!(executions[2].id, "exec-order-0");
+    }
+
+    // ── GitHubMappingStore tests ──────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_github_mapping_upsert_and_get_github_number(pool: SqlitePool) {
+        let store = SqliteGitHubMappingStore::new(pool);
+        store.upsert_mapping("ab12", 42).await.unwrap();
+        let number = store.get_github_number("ab12").await.unwrap();
+        assert_eq!(number, Some(42));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_github_mapping_get_github_number_missing_returns_none(pool: SqlitePool) {
+        let store = SqliteGitHubMappingStore::new(pool);
+        let number = store.get_github_number("xxxx").await.unwrap();
+        assert_eq!(number, None);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_github_mapping_get_ns2_id(pool: SqlitePool) {
+        let store = SqliteGitHubMappingStore::new(pool);
+        store.upsert_mapping("ab12", 99).await.unwrap();
+        let ns2_id = store.get_ns2_id(99).await.unwrap();
+        assert_eq!(ns2_id, Some("ab12".to_string()));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_github_mapping_get_ns2_id_missing_returns_none(pool: SqlitePool) {
+        let store = SqliteGitHubMappingStore::new(pool);
+        let ns2_id = store.get_ns2_id(999).await.unwrap();
+        assert_eq!(ns2_id, None);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_github_mapping_upsert_updates_existing(pool: SqlitePool) {
+        let store = SqliteGitHubMappingStore::new(pool);
+        store.upsert_mapping("ab12", 1).await.unwrap();
+        store.upsert_mapping("ab12", 2).await.unwrap(); // upsert should update
+        let number = store.get_github_number("ab12").await.unwrap();
+        assert_eq!(number, Some(2), "upsert should overwrite existing mapping");
     }
 }

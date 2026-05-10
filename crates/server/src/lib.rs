@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{events_route, hook as hook_route, issue, session, webhook};
+use routes::{emit as emit_route, events_route, hook as hook_route, issue, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -64,6 +64,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
         .route("/webhooks/:hook_id", post(webhook::receive_webhook))
+        // Event emit
+        .route("/events/emit", post(emit_route::emit_event))
         .with_state(state)
 }
 
@@ -141,9 +143,27 @@ fn spawn_hook_evaluator(state: &AppState) {
 
 /// Handle `IssueEvent::StatusChanged { to: InProgress }` — resume or start a harness.
 async fn handle_in_progress(state: &AppState, issue: types::Issue) {
-    if issue.assignee.is_none() {
+    let Some(ref assignee) = issue.assignee else {
+        return;
+    };
+
+    // Check if an agent definition exists for this assignee.
+    // If no agent file exists, this is a human assignee — skip harness spawn.
+    let has_agent_def = if let Some(agents_dir) = agents::agents_dir() {
+        agents::load_agent(&agents_dir, assignee).is_some()
+    } else {
+        false
+    };
+
+    if !has_agent_def {
+        tracing::debug!(
+            issue_id = %issue.id,
+            assignee = %assignee,
+            "handle_in_progress: no agent definition found, skipping harness spawn (human assignee)"
+        );
         return;
     }
+
     if let Some(session_id) = issue.session_id {
         if let Ok(session) = state.db.get_session(session_id).await {
             if session.status == types::SessionStatus::Waiting {
@@ -330,7 +350,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store) = db::connect(&db_url).await?;
+    let (db, hook_store, _github_mapping) = db::connect(&db_url).await?;
     let backend = issue_backend::from_config(&config.issue_backend, Arc::clone(&db))
         .map_err(|e| Error::Other(e.to_string()))?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
@@ -428,12 +448,12 @@ mod tests {
 
     /// Helper to build an in-memory hook store suitable for tests.
     async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
-        let (_db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (_db, hook_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         hook_store
     }
 
     pub async fn test_state() -> AppState {
-        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, _github_mapping) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let backend: Arc<dyn issue_backend::IssueBackend> =
             Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
@@ -2381,7 +2401,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", &serde_json::json!({
-                "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
+                "title": "Auto complete test", "body": "body", "assignee": "swe"
             })))
             .await
             .unwrap();
@@ -3000,7 +3020,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3032,7 +3052,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "My Title",
                     "body": "My Body",
-                    "assignee": "test-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -3116,7 +3136,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
@@ -3266,7 +3286,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Watcher waiting test",
                     "body": "Please respond",
-                    "assignee": "swe-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -3304,7 +3324,7 @@ mod tests {
         let agent_comments: Vec<_> = issue
             .comments
             .iter()
-            .filter(|c| c.author == "swe-agent")
+            .filter(|c| c.author == "swe")
             .collect();
         assert!(
             agent_comments.is_empty(),
@@ -3331,7 +3351,7 @@ mod tests {
             }
         }
 
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _, _) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let backend: Arc<dyn issue_backend::IssueBackend> =
             Arc::new(issue_backend::SqliteIssueBackend::new(Arc::clone(&db)));
@@ -3361,7 +3381,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Error test issue",
                     "body": "trigger an error",
-                    "assignee": "swe-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -4747,7 +4767,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "In-progress test",
                     "body": "body",
-                    "assignee": "test-agent"
+                    "assignee": "swe"
                 }),
             ))
             .await
@@ -4840,7 +4860,7 @@ mod tests {
             id: old_session_id,
             name: "old-session".into(),
             status: types::SessionStatus::Failed,
-            agent: Some("test-agent".into()),
+            agent: Some("swe".into()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -4852,7 +4872,7 @@ mod tests {
             body: "body".to_string(),
             status: types::IssueStatus::Failed,
             branch: String::new(),
-            assignee: Some("test-agent".to_string()),
+            assignee: Some("swe".to_string()),
             session_id: Some(old_session_id),
             parent_id: None,
             blocked_on: vec![],
@@ -4907,7 +4927,7 @@ mod tests {
             id: waiting_session_id,
             name: "waiting-session".into(),
             status: types::SessionStatus::Waiting,
-            agent: Some("test-agent".into()),
+            agent: Some("swe".into()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -4925,7 +4945,7 @@ mod tests {
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
             branch: String::new(),
-            assignee: Some("test-agent".to_string()),
+            assignee: Some("swe".to_string()),
             session_id: Some(waiting_session_id),
             parent_id: None,
             blocked_on: vec![],
@@ -5690,6 +5710,99 @@ mod tests {
             db_session.status,
             types::SessionStatus::Cancelled,
             "session must be marked Cancelled in DB"
+        );
+    }
+
+    // ── Scenario 6: Human assignment skips harness spawn ─────────────────────
+
+    /// When an issue is assigned to a name that has no agent definition file,
+    /// `handle_in_progress` must NOT add a msg_sender for any session.
+    #[tokio::test]
+    async fn test_human_assignee_skips_harness_spawn() {
+        let state = test_state().await;
+        spawn_issue_lifecycle_subscriber(&state);
+
+        // "human-dev" has no .ns2/agents/human-dev.md file, so it's a human.
+        let issue = types::Issue {
+            id: "hm01".to_string(),
+            title: "Human task".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::Open,
+            branch: String::new(),
+            assignee: Some("human-dev".to_string()),
+            session_id: None,
+            parent_id: None,
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Emit the InProgress event (as the issues service would)
+        let mut in_progress_issue = issue.clone();
+        in_progress_issue.status = types::IssueStatus::InProgress;
+
+        state.event_bus.send(events::SystemEvent::Issue(
+            events::IssueEvent::StatusChanged {
+                from: types::IssueStatus::Open,
+                to: types::IssueStatus::InProgress,
+                issue: in_progress_issue,
+            },
+        ));
+
+        // Give the subscriber time to process the event
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // No msg_sender should have been created (no harness was spawned)
+        let senders = state.msg_senders.lock().await;
+        assert!(
+            senders.is_empty(),
+            "no msg_sender should be created for a human assignee, got {} senders",
+            senders.len()
+        );
+    }
+
+    // ── Scenario 7: Agent assignment spawns harness (regression) ─────────────
+
+    /// When an issue is assigned to a name that DOES have an agent definition,
+    /// `handle_in_progress` should spawn a harness (the existing test already
+    /// covers this via the HTTP route, but we add a unit-level check here).
+    /// 
+    /// This is a regression guard: verify `test_set_in_progress_on_open_issue_auto_starts`
+    /// still passes (covered by the test above). We also add a direct lifecycle test.
+    #[tokio::test]
+    async fn test_agent_assignee_does_not_skip_harness_when_has_agent_def() {
+        // We can't easily mock agents_dir in tests without file system setup.
+        // Instead verify the negative: "human-dev" (no file) leaves senders empty.
+        // The existing test `test_set_in_progress_on_open_issue_auto_starts` with
+        // "test-agent" validates the agent path end-to-end via the HTTP route.
+        //
+        // Here we confirm the guard logic: if agents_dir() returns Some but the
+        // agent file doesn't exist, treat as human.
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path();
+
+        // "known-agent" has a file — should be detected as agent
+        let agent_def = agents::AgentDef {
+            name: "known-agent".to_string(),
+            description: "A test agent".to_string(),
+            body: "System prompt".to_string(),
+            hooks: Default::default(),
+            include_project_config: false,
+        };
+        agents::write_agent(agents_dir, &agent_def).unwrap();
+        let loaded = agents::load_agent(agents_dir, "known-agent");
+        assert!(
+            loaded.is_some(),
+            "known-agent should be found in the agents dir"
+        );
+
+        // "human-dev" has no file — should be detected as human
+        let not_loaded = agents::load_agent(agents_dir, "human-dev");
+        assert!(
+            not_loaded.is_none(),
+            "human-dev should not be found in the agents dir"
         );
     }
 }

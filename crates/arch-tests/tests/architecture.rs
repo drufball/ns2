@@ -273,20 +273,22 @@ fn only_server_uses_axum_directly() {
     );
 }
 
-/// Only `anthropic` (Anthropic API) and `cli` (local server HTTP) may depend directly
-/// on `reqwest`. All other crates must go through one of these two.
+/// Only `anthropic` (Anthropic API), `cli` (local server HTTP), and
+/// `issue-backend` (GitHub REST API) may depend directly on `reqwest`.
+/// All other crates must go through one of these three.
 #[test]
 fn only_designated_http_crates_use_reqwest_directly() {
     let users = direct_users_of("reqwest");
-    let allowed = ["anthropic", "cli"];
+    let allowed = ["anthropic", "cli", "issue-backend"];
     let violations: Vec<&String> = users
         .iter()
         .filter(|name| !allowed.contains(&name.as_str()))
         .collect();
     assert!(
         violations.is_empty(),
-        "External crate ownership violation: only `anthropic` (Anthropic API) and \
-         `cli` (local server HTTP) may depend on reqwest directly.\n\
+        "External crate ownership violation: only `anthropic` (Anthropic API), \
+         `cli` (local server HTTP), and `issue-backend` (GitHub REST API) may \
+         depend on reqwest directly.\n\
          Violating crates:\n{}\n\
          See architecture.spec.md for the HTTP ownership rules.",
         violations

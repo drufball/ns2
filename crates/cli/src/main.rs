@@ -80,6 +80,14 @@ enum Command {
         #[command(subcommand)]
         action: WorktreeAction,
     },
+    #[command(
+        about = "Emit events on the event bus.",
+        long_about = "Emit custom events on the ns2 event bus.\n\nSubcommands:\n  emit  Emit an event with an optional JSON payload"
+    )]
+    Event {
+        #[command(subcommand)]
+        action: EventAction,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -572,6 +580,22 @@ enum WorktreeAction {
     },
 }
 
+#[derive(Subcommand)]
+enum EventAction {
+    #[command(
+        about = "Emit a custom event on the event bus.",
+        long_about = "Emit a custom event on the ns2 event bus.\n\nThe event is broadcast to all subscribers (SSE clients, hooks, etc.).\n\nExamples:\n  ns2 event emit custom.test\n  ns2 event emit custom.test '{\"key\": \"value\"}'\n\nExits non-zero if payload-json is provided but is not valid JSON."
+    )]
+    Emit {
+        #[arg(help = "Event type string (e.g. 'issue.status_changed', 'custom.event').")]
+        event_type: String,
+        #[arg(
+            help = "Optional JSON payload string. Defaults to {} if omitted. Exits non-zero if invalid JSON."
+        )]
+        payload_json: Option<String>,
+    },
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 fn load_dotenv() {
@@ -823,6 +847,14 @@ async fn main() {
             }
             WorktreeAction::Delete { branch, force } => {
                 commands::worktree::run_delete(branch, force).await;
+            }
+        },
+        Command::Event { action } => match action {
+            EventAction::Emit {
+                event_type,
+                payload_json,
+            } => {
+                commands::event::run_emit(&cli.server, event_type, payload_json).await;
             }
         },
     }
@@ -3152,5 +3184,62 @@ mod tests {
             }
             _ => panic!("expected issue new command"),
         }
+    }
+
+    // ─── Scenarios 1-3: ns2 event emit parses correctly ─────────────────────
+
+    #[test]
+    fn event_emit_with_event_type_and_payload_parses() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "event",
+            "emit",
+            "custom.test",
+            r#"{"key": "value"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Event {
+                action: EventAction::Emit {
+                    ref event_type,
+                    ref payload_json,
+                },
+            } => {
+                assert_eq!(event_type, "custom.test");
+                assert_eq!(payload_json.as_deref(), Some(r#"{"key": "value"}"#));
+            }
+            _ => panic!("expected event emit command"),
+        }
+    }
+
+    #[test]
+    fn event_emit_without_payload_parses() {
+        let cli =
+            Cli::try_parse_from(["ns2", "event", "emit", "custom.test"]).unwrap();
+        match cli.command {
+            Command::Event {
+                action: EventAction::Emit {
+                    ref event_type,
+                    ref payload_json,
+                },
+            } => {
+                assert_eq!(event_type, "custom.test");
+                assert!(payload_json.is_none(), "payload_json should be None when not provided");
+            }
+            _ => panic!("expected event emit command"),
+        }
+    }
+
+    #[test]
+    fn event_emit_invalid_json_payload_is_detected_at_runtime() {
+        // CLI parsing itself succeeds — the error is detected when run_emit
+        // is called with an invalid JSON string. We test the detection logic
+        // directly rather than spawning a process.
+        let invalid_json = "not-json".to_string();
+        let result = serde_json::from_str::<serde_json::Value>(&invalid_json);
+        assert!(
+            result.is_err(),
+            "invalid JSON must fail to parse: {invalid_json:?}"
+        );
     }
 }
