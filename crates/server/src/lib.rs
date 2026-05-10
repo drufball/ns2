@@ -329,7 +329,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store) = db::connect(&db_url).await?;
+    let (db, hook_store, event_store) = db::connect(&db_url).await?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 
@@ -343,6 +343,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         model: config.model,
         event_bus,
         hook_store,
+        event_store,
     };
 
     // Spawn the hook evaluator background task.
@@ -423,14 +424,8 @@ mod tests {
         }
     }
 
-    /// Helper to build an in-memory hook store suitable for tests.
-    async fn make_test_hook_store() -> Arc<dyn db::HookStore> {
-        let (_db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
-        hook_store
-    }
-
     pub async fn test_state() -> AppState {
-        let (db, hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
@@ -445,6 +440,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         }
     }
 
@@ -2995,14 +2991,13 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
-        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3013,6 +3008,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3109,14 +3105,13 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(CapturingClient {
             captured: Arc::clone(&captured),
         }) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
-        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3127,6 +3122,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3322,12 +3318,11 @@ mod tests {
             }
         }
 
-        let (db, _) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(ErrorClient) as Arc<dyn anthropic::AnthropicClient>;
         let issue_service =
             issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
         let event_bus = issue_service.event_bus().clone();
-        let hook_store = make_test_hook_store().await;
         let state = AppState {
             db,
             issue_service,
@@ -3338,6 +3333,7 @@ mod tests {
             model: "claude-opus-4-5".into(),
             event_bus,
             hook_store,
+            event_store,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());

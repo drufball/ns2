@@ -28,4 +28,7 @@ pub struct AppState {
     pub(crate) event_bus: EventBus,
     /// Hook store for CRUD operations on hooks.
     pub(crate) hook_store: Arc<dyn HookStore>,
+    /// Event store for CRUD operations on named events.
+    #[allow(dead_code)]
+    pub(crate) event_store: Arc<dyn db::EventStore>,
 }

@@ -183,7 +183,7 @@ mod tests {
     }
 
     async fn make_issue_service() -> issues::IssueService {
-        let (db, _hook_store) = db::connect("sqlite::memory:").await.unwrap();
+        let (db, _hook_store, _event_store) = db::connect("sqlite::memory:").await.unwrap();
         issues::IssueService::new(db)
     }
 
