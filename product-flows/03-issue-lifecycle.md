@@ -84,7 +84,23 @@ ns2 issue complete --id "$ISSUE2" --comment "Decided not to proceed with this ta
 
 Expected: command exits 0.
 
-### Step 8: Add a regular comment
+### Step 8: Create an issue and subscribe a watcher in one command
+
+```bash
+WATCHER=$(ns2 issue new --title "Watcher" --body "Receives notifications")
+WORK=$(ns2 issue new --title "Do work" --body "Some task" --assignee swe --subscribe "issue:$WATCHER")
+echo "Work: $WORK"
+```
+
+Expected: a 4-character issue ID printed to stdout for `$WORK`. A hook is created automatically linking `$WORK` to `$WATCHER`. The hook should appear in `ns2 hook list`.
+
+```bash
+ns2 hook list
+```
+
+Expected: a table row showing a hook for `$WORK`, enabled=true.
+
+### Step 9: Add a regular comment
 
 ```bash
 ns2 issue comment --id "$ISSUE" --body "Good work!" --author reviewer
@@ -100,6 +116,8 @@ Expected: command exits 0.
 - [ ] `ns2 issue new --status in_progress --wait` blocks until the issue reaches a terminal state, then prints the ID
 - [ ] `ns2 issue new --wait` without `--status in_progress` exits non-zero with error: `--wait requires --status in_progress`
 - [ ] `ns2 issue new --watch --status in_progress` prints SSE events as the issue progresses (requires `--wait` to be passed for now)
+- [ ] `ns2 issue new --subscribe issue:<id>` creates a hook that delivers a notification to the target when the issue changes status or gets a comment
+- [ ] `--subscribe` in `issue new` uses the same hook creation logic as `ns2 issue subscribe`
 - [ ] Setting status to `in_progress` automatically creates a session and starts execution
 - [ ] The session uses the issue's assignee as the agent type
 - [ ] `ns2 issue wait` blocks until the issue reaches a terminal state and exits 0
