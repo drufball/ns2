@@ -652,6 +652,29 @@ async fn run_watch_to(server: &str, id: String, to_stderr: bool) {
 
 /// `ns2 issue subscribe --id X --deliver-to issue:<id>|session:<id>`
 ///
+/// Build the JSON request body for an `mcp_notify` hook subscription.
+///
+/// Pure function extracted from `run_subscribe` so it can be tested in
+/// isolation without a live server.
+pub fn build_mcp_notify_hook_body(issue_id: &str, channel_id: &str) -> serde_json::Value {
+    let hook_name = format!("subscribe-{issue_id}");
+    let body_template = "Issue {{ event.data.issue.id }} ({{ event.data.issue.title }}): {{ event.data.from }} → {{ event.data.to }}".to_string();
+    json!({
+        "name": hook_name,
+        "event_names": ["issue.status_changed"],
+        "filter": {
+            "conditions": [
+                { "field": "data.issue.id", "op": "eq", "value": issue_id }
+            ]
+        },
+        "action": {
+            "type": "mcp_notify",
+            "channel_id": channel_id,
+            "body": body_template,
+        },
+    })
+}
+
 /// Sugar for creating an internal hook that delivers a notification comment
 /// whenever issue X has a status change or a comment added.
 ///
@@ -676,45 +699,70 @@ pub async fn run_subscribe(
     let client = reqwest::Client::new();
     let url = format!("{server}/hooks");
 
-    // Parse "issue:<id>" or "session:<id>"
-    #[allow(clippy::option_if_let_else)]
-    let (target_type, target_id) = if let Some(rest) = deliver_to.strip_prefix("issue:") {
-        ("issue", rest.to_string())
-    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
-        ("session", rest.to_string())
-    } else {
-        eprintln!("Error: {flag_name} must be 'issue:<id>' or 'session:<id>', got: {deliver_to}");
-        std::process::exit(1);
-    };
-
-    let (hook_name, filter_conditions) = if recursive {
-        let name = format!("subscribe-{id}-recursive");
-        let conditions = serde_json::json!([
-            { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
-        ]);
-        (name, conditions)
-    } else {
-        let name = format!("subscribe-{id}");
-        let conditions = serde_json::json!([
-            { "field": "data.issue.id", "op": "eq", "value": id }
-        ]);
-        (name, conditions)
-    };
-
+    // Parse "issue:<id>", "session:<id>", or "mcp:<channel_id>"
     let body_template = "Issue {{ event.data.issue.id }}: {{ event.data.to }}".to_string();
 
-    let req_body = json!({
-        "name": hook_name,
-        "event_names": ["issue.status_changed", "issue.comment_added"],
-        "filter": {
-            "conditions": filter_conditions
-        },
-        "action": {
-            "type": "send_message",
-            "target": { "type": target_type, "content": target_id },
-            "body": body_template,
-        },
-    });
+    let req_body = if let Some(rest) = deliver_to.strip_prefix("issue:") {
+        let target_id = rest.to_string();
+        let (hook_name, filter_conditions) = if recursive {
+            let name = format!("subscribe-{id}-recursive");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
+            ]);
+            (name, conditions)
+        } else {
+            let name = format!("subscribe-{id}");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]);
+            (name, conditions)
+        };
+        json!({
+            "name": hook_name,
+            "event_names": ["issue.status_changed", "issue.comment_added"],
+            "filter": {
+                "conditions": filter_conditions
+            },
+            "action": {
+                "type": "send_message",
+                "target": { "type": "issue", "content": target_id },
+                "body": body_template,
+            },
+        })
+    } else if let Some(rest) = deliver_to.strip_prefix("session:") {
+        let target_id = rest.to_string();
+        let (hook_name, filter_conditions) = if recursive {
+            let name = format!("subscribe-{id}-recursive");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.ancestor_ids", "op": "contains", "value": id }
+            ]);
+            (name, conditions)
+        } else {
+            let name = format!("subscribe-{id}");
+            let conditions = serde_json::json!([
+                { "field": "data.issue.id", "op": "eq", "value": id }
+            ]);
+            (name, conditions)
+        };
+        json!({
+            "name": hook_name,
+            "event_names": ["issue.status_changed", "issue.comment_added"],
+            "filter": {
+                "conditions": filter_conditions
+            },
+            "action": {
+                "type": "send_message",
+                "target": { "type": "session", "content": target_id },
+                "body": body_template,
+            },
+        })
+    } else if let Some(channel_id) = deliver_to.strip_prefix("mcp:") {
+        let channel_id = channel_id.to_string();
+        build_mcp_notify_hook_body(&id, &channel_id)
+    } else {
+        eprintln!("Error: {flag_name} must be 'issue:<id>', 'session:<id>', or 'mcp:<channel_id>', got: {deliver_to}");
+        std::process::exit(1);
+    };
 
     let resp = client
         .post(&url)
@@ -772,6 +820,27 @@ mod tests {
             snippet: None,
             children,
         }
+    }
+
+    // ── Scenario E — CLI: mcp: subscribe target creates correct hook JSON ────
+
+    /// Test that `build_mcp_notify_hook_body` produces a hook body with the
+    /// correct action type and fields — calling the actual function.
+    #[test]
+    fn subscribe_mcp_target_builds_correct_json() {
+        let req_body = build_mcp_notify_hook_body("ab12", "alice-laptop");
+
+        assert_eq!(req_body["action"]["type"], "mcp_notify");
+        assert_eq!(req_body["action"]["channel_id"], "alice-laptop");
+        assert!(
+            req_body["action"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("{{ event.data.issue.id }}"),
+            "body template must contain event.data.issue.id"
+        );
+        assert_eq!(req_body["source"]["event_types"][0], "issue.status_changed");
+        assert_eq!(req_body["name"], "subscribe-ab12");
     }
 
     #[test]

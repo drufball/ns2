@@ -1,3 +1,6 @@
 [worktrees]
 # base directory where ns2 creates git worktrees (default: ~/.ns2/<repo-name>/worktrees/)
 # path = "~/.ns2/my-project/worktrees/"
+
+[server]
+url = "http://127.0.0.1:9876"

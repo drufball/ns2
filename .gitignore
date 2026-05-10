@@ -4,3 +4,4 @@
 mutants.out
 mutants.out.old
 product-flows/.build/
+ns2.local.toml

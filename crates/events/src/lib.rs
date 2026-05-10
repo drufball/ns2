@@ -111,6 +111,11 @@ pub enum SystemEvent {
         event_name: String,
         fired_at: DateTime<Utc>,
     },
+    McpChannelNotification {
+        channel_id: String,
+        body: String,
+        meta: std::collections::HashMap<String, String>,
+    },
 }
 
 // ── EventBus ──────────────────────────────────────────────────────────────────
@@ -150,12 +155,62 @@ impl EventBus {
     }
 }
 
+// ── Event ID generation ───────────────────────────────────────────────────────
+
+/// Generate a short random event ID (4 lower-alphanumeric characters).
+///
+/// Uses the same alphabet and UUID-byte-sampling approach as `generate_hook_id`
+/// in the `hooks` crate so that the IDs are short, URL-safe, and practically
+/// unique for their intended use as ephemeral correlation tokens.
+#[must_use]
+pub fn generate_event_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    (0..4)
+        .map(|i| ALPHABET[(bytes[i] as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // ── Scenario B: McpChannelNotification round-trip ────────────────────────
+
+    #[test]
+    fn system_event_mcp_channel_notification_serde_round_trip() {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("issue_id".to_string(), "ab12".to_string());
+        let ev = SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "hi".into(),
+            meta,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "mcp_channel_notification");
+        assert_eq!(v["data"]["channel_id"], "alice");
+        assert_eq!(v["data"]["body"], "hi");
+        assert_eq!(v["data"]["meta"]["issue_id"], "ab12");
+
+        let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
+        match decoded {
+            SystemEvent::McpChannelNotification {
+                channel_id,
+                body,
+                meta,
+            } => {
+                assert_eq!(channel_id, "alice");
+                assert_eq!(body, "hi");
+                assert_eq!(meta.get("issue_id").map(String::as_str), Some("ab12"));
+            }
+            _ => panic!("expected McpChannelNotification variant"),
+        }
+    }
 
     // ── EventBus unit tests ───────────────────────────────────────────────────
 
@@ -461,5 +516,46 @@ mod tests {
         assert_eq!(v["type"], "error");
         let decoded: SessionEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, SessionEvent::Error { ref message } if message == "oops"));
+    }
+
+    // ── generate_event_id tests ───────────────────────────────────────────────
+
+    #[test]
+    fn generate_event_id_is_4_chars() {
+        let id = generate_event_id();
+        assert_eq!(id.len(), 4);
+        assert!(
+            id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "id must be lower-alphanumeric, got: {id:?}"
+        );
+    }
+
+    #[test]
+    fn generate_event_id_is_unique() {
+        let ids: std::collections::HashSet<String> =
+            (0..100).map(|_| generate_event_id()).collect();
+        assert!(ids.len() > 90, "expected >90 unique IDs, got {}", ids.len());
+    }
+
+    /// Verify that `generate_event_id` uses the full lower-alphanumeric alphabet
+    /// (guards against mutant `% → /` which would produce garbage characters
+    /// and not sample the alphabet at all).
+    #[test]
+    fn generate_event_id_uses_full_alphabet() {
+        let ids: Vec<String> = (0..10_000).map(|_| generate_event_id()).collect();
+        let chars: std::collections::HashSet<char> = ids.concat().chars().collect();
+        assert!(
+            chars.len() >= 30,
+            "expected at least 30 distinct chars from the alphabet, got {}",
+            chars.len()
+        );
+        // Every character must be lower-alphanumeric (guards against garbage from
+        // the mutant `% → /`).
+        for c in &chars {
+            assert!(
+                c.is_ascii_lowercase() || c.is_ascii_digit(),
+                "non-alphanumeric character found: {c:?}"
+            );
+        }
     }
 }
