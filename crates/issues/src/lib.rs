@@ -1,5 +1,6 @@
 use chrono::Utc;
 use events::{EventBus, IssueEvent, SystemEvent};
+use issue_backend::IssueBackend;
 use std::sync::Arc;
 use types::{Issue, IssueComment, IssueStatus, Session, SessionStatus};
 use uuid::Uuid;
@@ -81,6 +82,8 @@ pub struct EditIssueInput {
 pub enum Error {
     #[error("db error: {0}")]
     Db(#[from] db::Error),
+    #[error("backend error: {0}")]
+    Backend(#[from] issue_backend::Error),
     #[error("bad request: {0}")]
     BadRequest(String),
 }
@@ -94,13 +97,17 @@ pub struct StartIssueOutcome {
 
 #[derive(Clone)]
 pub struct IssueService {
+    /// Issue storage backend (for issue CRUD: create, get, list, save).
+    backend: Arc<dyn IssueBackend>,
+    /// Database handle (for session operations and `list_issues_by_session_id`).
     db: Arc<dyn db::Db>,
     event_bus: EventBus,
 }
 
 impl IssueService {
-    pub fn new(db: Arc<dyn db::Db>) -> Self {
+    pub fn new(db: Arc<dyn db::Db>, backend: Arc<dyn IssueBackend>) -> Self {
         Self {
+            backend,
             db,
             event_bus: EventBus::new(1024),
         }
@@ -109,8 +116,16 @@ impl IssueService {
     /// Create an `IssueService` with an externally-provided `EventBus`.
     /// Use this when you want issue events to flow into the same bus as
     /// session events (i.e. the server's global bus).
-    pub fn with_event_bus(db: Arc<dyn db::Db>, event_bus: EventBus) -> Self {
-        Self { db, event_bus }
+    pub fn with_event_bus(
+        db: Arc<dyn db::Db>,
+        backend: Arc<dyn IssueBackend>,
+        event_bus: EventBus,
+    ) -> Self {
+        Self {
+            backend,
+            db,
+            event_bus,
+        }
     }
 
     #[must_use]
@@ -132,7 +147,7 @@ impl IssueService {
         let branch = if let Some(b) = input.branch {
             b
         } else if let Some(ref parent_id) = input.parent_id {
-            match self.db.get_issue(parent_id.clone()).await {
+            match self.backend.get(parent_id).await {
                 Ok(parent) => parent.branch,
                 Err(_) => format!("{}-{}", id, slugify(&input.title)),
             }
@@ -153,7 +168,7 @@ impl IssueService {
             created_at: now,
             updated_at: now,
         };
-        self.db.create_issue(&issue).await?;
+        self.backend.create(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::Created(issue.clone())));
         Ok(issue)
@@ -163,7 +178,7 @@ impl IssueService {
     ///
     /// Returns an error if the issue is not found or the database write fails.
     pub async fn edit_issue(&self, id: String, input: EditIssueInput) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id).await?;
+        let mut issue = self.backend.get(&id).await?;
         if let Some(title) = input.title {
             issue.title = title;
         }
@@ -183,7 +198,7 @@ impl IssueService {
             issue.branch = branch;
         }
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         Ok(issue)
     }
 
@@ -191,7 +206,7 @@ impl IssueService {
     ///
     /// Returns an error if the issue is not found or the database write fails.
     pub async fn add_comment(&self, id: String, author: String, body: String) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id).await?;
+        let mut issue = self.backend.get(&id).await?;
         let comment = IssueComment {
             author,
             created_at: Utc::now(),
@@ -199,7 +214,7 @@ impl IssueService {
         };
         issue.comments.push(comment.clone());
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
                 issue: issue.clone(),
@@ -212,7 +227,7 @@ impl IssueService {
     ///
     /// Returns an error if the issue is not found or the database write fails.
     pub async fn finish_issue(&self, id: &str, summary: Option<String>) -> Result<()> {
-        let mut issue = self.db.get_issue(id.to_string()).await?;
+        let mut issue = self.backend.get(id).await?;
         let from = issue.status.clone();
         if let Some(text) = summary {
             if !text.is_empty() {
@@ -235,7 +250,7 @@ impl IssueService {
         }
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
@@ -271,7 +286,7 @@ impl IssueService {
             }
         }
 
-        let mut issue = self.db.get_issue(id.to_string()).await?;
+        let mut issue = self.backend.get(id).await?;
         let from = issue.status.clone();
 
         if let Some(text) = comment {
@@ -295,7 +310,7 @@ impl IssueService {
 
         issue.status = status.clone();
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
@@ -309,7 +324,7 @@ impl IssueService {
     ///
     /// Returns an error if the issue is not found or the database write fails.
     pub async fn fail_issue(&self, id: &str, error_message: String) -> Result<()> {
-        let mut issue = self.db.get_issue(id.to_string()).await?;
+        let mut issue = self.backend.get(id).await?;
         let from = issue.status.clone();
         let comment = IssueComment {
             author: "system".to_string(),
@@ -319,7 +334,7 @@ impl IssueService {
         issue.comments.push(comment.clone());
         issue.status = IssueStatus::Failed;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
                 issue: issue.clone(),
@@ -339,7 +354,7 @@ impl IssueService {
     /// Returns an error if the issue is not found, has no assignee, is not open,
     /// or a database write fails.
     pub async fn start_issue(&self, id: String) -> Result<StartIssueOutcome> {
-        let mut issue = self.db.get_issue(id.clone()).await?;
+        let mut issue = self.backend.get(&id).await?;
 
         if issue.assignee.is_none() {
             return Err(Error::BadRequest(
@@ -368,7 +383,7 @@ impl IssueService {
         issue.session_id = Some(session.id);
         issue.status = IssueStatus::InProgress;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
 
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
@@ -385,7 +400,7 @@ impl IssueService {
     /// Returns an error if the issue is not found, is already completed or failed,
     /// or a database write fails.
     pub async fn complete_issue(&self, id: String, comment: String) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id.clone()).await?;
+        let mut issue = self.backend.get(&id).await?;
         if matches!(issue.status, IssueStatus::Completed | IssueStatus::Failed) {
             return Err(Error::BadRequest(format!(
                 "issue is already {}",
@@ -401,7 +416,7 @@ impl IssueService {
         issue.comments.push(new_comment.clone());
         issue.status = IssueStatus::Completed;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
                 issue: issue.clone(),
@@ -421,7 +436,7 @@ impl IssueService {
     /// Returns an error if the issue is not found, is not open or running,
     /// or a database write fails.
     pub async fn cancel_issue(&self, id: String) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id.clone()).await?;
+        let mut issue = self.backend.get(&id).await?;
 
         match issue.status {
             IssueStatus::Open | IssueStatus::InProgress | IssueStatus::Waiting => {}
@@ -442,7 +457,7 @@ impl IssueService {
         issue.comments.push(comment.clone());
         issue.status = IssueStatus::Cancelled;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::CommentAdded {
                 issue: issue.clone(),
@@ -462,7 +477,7 @@ impl IssueService {
     /// Returns an error if the issue is not found, is not failed/completed/cancelled,
     /// or a database write fails.
     pub async fn reopen_issue(&self, id: String, comment: Option<String>) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id.clone()).await?;
+        let mut issue = self.backend.get(&id).await?;
 
         // Only `failed`, `completed`, and `cancelled` can be reopened
         let keep_session_id = match issue.status {
@@ -500,7 +515,7 @@ impl IssueService {
             issue.session_id = None;
         }
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
@@ -523,7 +538,7 @@ impl IssueService {
     /// `None` (a Waiting issue with no session cannot be resumed).
     /// Returns a `Db` error if the database write fails.
     pub async fn resume_issue(&self, id: String) -> Result<Issue> {
-        let mut issue = self.db.get_issue(id.clone()).await?;
+        let mut issue = self.backend.get(&id).await?;
 
         if issue.status != IssueStatus::Waiting {
             return Err(Error::BadRequest(format!(
@@ -540,7 +555,7 @@ impl IssueService {
         let from = issue.status.clone();
         issue.status = IssueStatus::InProgress;
         issue.updated_at = Utc::now();
-        self.db.update_issue(&issue).await?;
+        self.backend.save(&issue).await?;
         self.event_bus
             .send(SystemEvent::Issue(IssueEvent::StatusChanged {
                 issue: issue.clone(),
@@ -601,7 +616,7 @@ impl IssueService {
                 issue.status = types::IssueStatus::Failed;
                 issue.updated_at = Utc::now();
 
-                if let Err(e) = self.db.update_issue(&issue).await {
+                if let Err(e) = self.backend.save(&issue).await {
                     eprintln!(
                         "[orphan_sweep] failed to update issue {} to failed: {e}",
                         issue.id
@@ -617,14 +632,69 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use db::{IssueDb, SessionDb};
+    use issue_backend::{IssueBackend, IssueFilter};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use types::{ContentBlock, Role, Turn};
 
-    // --- MemoryDb ---
+    // ── MemoryBackend (mocks IssueBackend) ────────────────────────────────────
+
+    struct MemoryBackend {
+        issues: Mutex<HashMap<String, Issue>>,
+    }
+
+    impl MemoryBackend {
+        fn new() -> Self {
+            Self {
+                issues: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl IssueBackend for MemoryBackend {
+        async fn create(&self, issue: &Issue) -> issue_backend::Result<()> {
+            self.issues
+                .lock()
+                .unwrap()
+                .insert(issue.id.clone(), issue.clone());
+            Ok(())
+        }
+
+        async fn get(&self, id: &str) -> issue_backend::Result<Issue> {
+            self.issues
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or(issue_backend::Error::NotFound)
+        }
+
+        async fn list(&self, _filter: IssueFilter) -> issue_backend::Result<Vec<Issue>> {
+            Ok(self.issues.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn save(&self, issue: &Issue) -> issue_backend::Result<()> {
+            let mut issues = self.issues.lock().unwrap();
+            if !issues.contains_key(&issue.id) {
+                return Err(issue_backend::Error::NotFound);
+            }
+            issues.insert(issue.id.clone(), issue.clone());
+            drop(issues);
+            Ok(())
+        }
+
+        async fn delete(&self, _id: &str) -> issue_backend::Result<()> {
+            Ok(())
+        }
+    }
+
+    // ── MemoryDb (mocks db::Db — sessions only) ───────────────────────────────
 
     struct MemoryDb {
         sessions: Mutex<HashMap<Uuid, Session>>,
+        /// Also stores issues so that `list_issues_by_session_id` works in
+        /// orphan_sweep tests.
         issues: Mutex<HashMap<String, Issue>>,
     }
 
@@ -763,10 +833,13 @@ mod tests {
         }
     }
 
-    // --- Helpers ---
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn make_service(db: Arc<dyn db::Db>) -> IssueService {
-        IssueService::new(db)
+    fn make_service(
+        db: Arc<dyn db::Db>,
+        backend: Arc<dyn IssueBackend>,
+    ) -> IssueService {
+        IssueService::new(db, backend)
     }
 
     fn open_issue(id: &str) -> Issue {
@@ -787,22 +860,23 @@ mod tests {
         }
     }
 
-    // --- Tests ---
+    // ── Tests ─────────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn start_issue_transitions_open_to_running() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let outcome = svc.start_issue("ab12".into()).await.unwrap();
 
         assert_eq!(outcome.issue.status, IssueStatus::InProgress);
         assert!(outcome.issue.session_id.is_some());
 
-        // Verify persisted in db
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        // Verify persisted in backend
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::InProgress);
         assert!(persisted.session_id.is_some());
     }
@@ -810,11 +884,12 @@ mod tests {
     #[tokio::test]
     async fn start_issue_requires_assignee() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.assignee = None;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.start_issue("ab12".into()).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -823,11 +898,12 @@ mod tests {
     #[tokio::test]
     async fn start_issue_requires_open_status() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.start_issue("ab12".into()).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -836,11 +912,12 @@ mod tests {
     #[tokio::test]
     async fn complete_issue_adds_comment_and_marks_completed() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc
             .complete_issue("ab12".into(), "Looks good".into())
             .await
@@ -851,18 +928,19 @@ mod tests {
         assert_eq!(result.comments[0].author, "user");
         assert_eq!(result.comments[0].body, "Looks good");
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
     }
 
     #[tokio::test]
     async fn complete_issue_fails_if_already_completed() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Completed;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.complete_issue("ab12".into(), "again".into()).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -871,11 +949,12 @@ mod tests {
     #[tokio::test]
     async fn complete_issue_fails_if_already_failed() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Failed;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.complete_issue("ab12".into(), "again".into()).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -884,47 +963,50 @@ mod tests {
     #[tokio::test]
     async fn reopen_failed_issue_clears_session_id() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Failed;
         issue.session_id = Some(Uuid::new_v4());
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.reopen_issue("ab12".into(), None).await.unwrap();
 
         assert_eq!(result.status, IssueStatus::Open);
         assert!(result.session_id.is_none());
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert!(persisted.session_id.is_none());
     }
 
     #[tokio::test]
     async fn reopen_completed_issue_keeps_session_id() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let session_id = Uuid::new_v4();
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Completed;
         issue.session_id = Some(session_id);
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.reopen_issue("ab12".into(), None).await.unwrap();
 
         assert_eq!(result.status, IssueStatus::Open);
         assert_eq!(result.session_id, Some(session_id));
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.session_id, Some(session_id));
     }
 
     #[tokio::test]
     async fn reopen_open_issue_fails() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.reopen_issue("ab12".into(), None).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -933,11 +1015,12 @@ mod tests {
     #[tokio::test]
     async fn reopen_running_issue_fails() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.reopen_issue("ab12".into(), None).await;
 
         assert!(matches!(result, Err(Error::BadRequest(_))));
@@ -946,11 +1029,12 @@ mod tests {
     #[tokio::test]
     async fn reopen_with_comment_appends_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Failed;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc
             .reopen_issue("ab12".into(), Some("please try again".into()))
             .await
@@ -965,6 +1049,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_sweep_marks_running_session_failed() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
@@ -976,7 +1061,7 @@ mod tests {
         };
         db.create_session(&session).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         svc.orphan_sweep().await;
 
         let fetched = db.get_session(session.id).await.unwrap();
@@ -986,6 +1071,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_sweep_marks_linked_issue_failed_with_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
@@ -997,15 +1083,20 @@ mod tests {
         };
         db.create_session(&session).await.unwrap();
 
+        // The issue needs to be in BOTH the db (for list_issues_by_session_id)
+        // and the backend (for save/update in orphan_sweep).
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.session_id = Some(session.id);
+        // Insert into db (for list_issues_by_session_id)
         db.create_issue(&issue).await.unwrap();
+        // Insert into backend (for save)
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         svc.orphan_sweep().await;
 
-        let fetched_issue = db.get_issue("ab12".into()).await.unwrap();
+        let fetched_issue = backend.get("ab12").await.unwrap();
         assert_eq!(fetched_issue.status, IssueStatus::Failed);
         assert_eq!(fetched_issue.comments.len(), 1);
         assert_eq!(fetched_issue.comments[0].author, "system");
@@ -1020,7 +1111,8 @@ mod tests {
     #[tokio::test]
     async fn create_issue_returns_open_issue_with_generated_id() {
         let db = Arc::new(MemoryDb::new());
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let backend = Arc::new(MemoryBackend::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let issue = svc
             .create_issue(CreateIssueInput {
@@ -1038,14 +1130,15 @@ mod tests {
         assert_eq!(issue.id.len(), 4);
         assert!(issue.branch.contains("fix-the-bug"));
 
-        let persisted = db.get_issue(issue.id.clone()).await.unwrap();
+        let persisted = backend.get(&issue.id).await.unwrap();
         assert_eq!(persisted.title, "Fix the bug");
     }
 
     #[tokio::test]
     async fn create_issue_uses_explicit_branch() {
         let db = Arc::new(MemoryDb::new());
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let backend = Arc::new(MemoryBackend::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let issue = svc
             .create_issue(CreateIssueInput {
@@ -1065,7 +1158,8 @@ mod tests {
     #[tokio::test]
     async fn create_issue_inherits_parent_branch() {
         let db = Arc::new(MemoryDb::new());
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let backend = Arc::new(MemoryBackend::new());
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let parent = svc
             .create_issue(CreateIssueInput {
@@ -1099,9 +1193,10 @@ mod tests {
     #[tokio::test]
     async fn edit_issue_updates_fields() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let updated = svc
             .edit_issue(
@@ -1125,10 +1220,11 @@ mod tests {
     #[tokio::test]
     async fn edit_issue_clears_parent_with_explicit_none() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.parent_id = Some("parent1".into());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let updated = svc
             .edit_issue(
@@ -1151,10 +1247,11 @@ mod tests {
     #[tokio::test]
     async fn edit_issue_absent_field_leaves_unchanged() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.parent_id = Some("parent1".into());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let updated = svc
             .edit_issue(
@@ -1179,9 +1276,10 @@ mod tests {
     #[tokio::test]
     async fn add_comment_appends_to_issue() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let updated = svc
             .add_comment("ab12".into(), "user".into(), "Great issue".into())
@@ -1192,7 +1290,7 @@ mod tests {
         assert_eq!(updated.comments[0].author, "user");
         assert_eq!(updated.comments[0].body, "Great issue");
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.comments.len(), 1);
     }
 
@@ -1201,17 +1299,18 @@ mod tests {
     #[tokio::test]
     async fn finish_issue_marks_completed_with_summary_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.assignee = Some("swe".into());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.finish_issue("ab12", Some("Done! All tests pass.".into()))
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
         assert_eq!(persisted.comments.len(), 1);
         assert_eq!(persisted.comments[0].author, "swe");
@@ -1221,14 +1320,15 @@ mod tests {
     #[tokio::test]
     async fn finish_issue_no_summary_adds_no_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.finish_issue("ab12", None).await.unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
         assert_eq!(persisted.comments.len(), 0);
     }
@@ -1236,14 +1336,15 @@ mod tests {
     #[tokio::test]
     async fn finish_issue_empty_summary_adds_no_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.finish_issue("ab12", Some(String::new())).await.unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
         assert_eq!(persisted.comments.len(), 0);
     }
@@ -1251,17 +1352,18 @@ mod tests {
     #[tokio::test]
     async fn finish_issue_uses_agent_author_when_no_assignee() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.assignee = None;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.finish_issue("ab12", Some("summary".into()))
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.comments[0].author, "agent");
     }
 
@@ -1270,17 +1372,18 @@ mod tests {
     #[tokio::test]
     async fn park_issue_complete_with_comment_marks_completed_and_adds_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.assignee = Some("swe".into());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue("ab12", IssueStatus::Completed, Some("Task done.".into()), None)
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
         assert_eq!(persisted.comments.len(), 1);
         assert_eq!(persisted.comments[0].body, "Task done.");
@@ -1290,14 +1393,15 @@ mod tests {
     #[tokio::test]
     async fn park_issue_waiting_with_no_comment_marks_waiting_no_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue("ab12", IssueStatus::Waiting, None, None).await.unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Waiting);
         assert_eq!(persisted.comments.len(), 0);
     }
@@ -1305,14 +1409,15 @@ mod tests {
     #[tokio::test]
     async fn park_issue_complete_no_comment_marks_completed_no_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue("ab12", IssueStatus::Completed, None, None).await.unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Completed);
         assert_eq!(persisted.comments.len(), 0);
     }
@@ -1320,11 +1425,12 @@ mod tests {
     #[tokio::test]
     async fn park_issue_uses_explicit_author_when_provided() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.assignee = Some("bot".into());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue(
             "ab12",
@@ -1335,34 +1441,36 @@ mod tests {
         .await
         .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.comments[0].author, "custom-author");
     }
 
     #[tokio::test]
     async fn park_issue_falls_back_to_agent_when_no_assignee_and_no_author() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.assignee = None;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue("ab12", IssueStatus::Completed, Some("summary".into()), None)
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.comments[0].author, "agent");
     }
 
     #[tokio::test]
     async fn park_issue_rejects_invalid_status() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.park_issue("ab12", IssueStatus::InProgress, None, None).await;
         assert!(
@@ -1392,16 +1500,17 @@ mod tests {
     #[tokio::test]
     async fn park_issue_empty_string_comment_not_added() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.park_issue("ab12", IssueStatus::Waiting, Some(String::new()), None)
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(
             persisted.status,
             IssueStatus::Waiting,
@@ -1419,16 +1528,17 @@ mod tests {
     #[tokio::test]
     async fn fail_issue_marks_failed_with_system_comment() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         svc.fail_issue("ab12", "timeout exceeded".into())
             .await
             .unwrap();
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Failed);
         assert_eq!(persisted.comments.len(), 1);
         assert_eq!(persisted.comments[0].author, "system");
@@ -1440,9 +1550,10 @@ mod tests {
     #[tokio::test]
     async fn cancel_open_issue_transitions_to_cancelled() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.cancel_issue("ab12".into()).await.unwrap();
 
@@ -1451,18 +1562,19 @@ mod tests {
         assert_eq!(result.comments[0].author, "system");
         assert_eq!(result.comments[0].body, "issue cancelled by user");
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::Cancelled);
     }
 
     #[tokio::test]
     async fn cancel_running_issue_transitions_to_cancelled() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
         issue.session_id = Some(Uuid::new_v4());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.cancel_issue("ab12".into()).await.unwrap();
 
@@ -1476,10 +1588,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_completed_issue_fails() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Completed;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.cancel_issue("ab12".into()).await;
 
@@ -1489,10 +1602,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_failed_issue_fails() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Failed;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.cancel_issue("ab12".into()).await;
 
@@ -1502,10 +1616,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_already_cancelled_issue_fails() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Cancelled;
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.cancel_issue("ab12".into()).await;
 
@@ -1515,11 +1630,12 @@ mod tests {
     #[tokio::test]
     async fn reopen_cancelled_issue_clears_session_id() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Cancelled;
         issue.session_id = Some(Uuid::new_v4());
-        db.create_issue(&issue).await.unwrap();
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        backend.create(&issue).await.unwrap();
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
 
         let result = svc.reopen_issue("ab12".into(), None).await.unwrap();
 
@@ -1532,6 +1648,7 @@ mod tests {
     #[tokio::test]
     async fn resume_issue_transitions_waiting_to_in_progress() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let session_id = Uuid::new_v4();
         let session = Session {
             id: session_id,
@@ -1545,25 +1662,26 @@ mod tests {
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Waiting;
         issue.session_id = Some(session_id);
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.resume_issue("ab12".into()).await.unwrap();
 
         assert_eq!(result.status, IssueStatus::InProgress);
         assert_eq!(result.session_id, Some(session_id));
 
-        let persisted = db.get_issue("ab12".into()).await.unwrap();
+        let persisted = backend.get("ab12").await.unwrap();
         assert_eq!(persisted.status, IssueStatus::InProgress);
     }
 
     #[tokio::test]
     async fn resume_issue_rejects_non_waiting() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12"); // Open status
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.resume_issue("ab12".into()).await;
         assert!(matches!(result, Err(Error::BadRequest(_))));
     }
@@ -1571,12 +1689,13 @@ mod tests {
     #[tokio::test]
     async fn resume_issue_rejects_waiting_without_session_id() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Waiting;
         issue.session_id = None;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>);
+        let svc = make_service(Arc::clone(&db) as Arc<dyn db::Db>, Arc::clone(&backend) as Arc<dyn IssueBackend>);
         let result = svc.resume_issue("ab12".into()).await;
         assert!(matches!(result, Err(Error::BadRequest(_))));
     }
@@ -1584,6 +1703,7 @@ mod tests {
     #[tokio::test]
     async fn resume_issue_emits_status_changed_event() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let session_id = Uuid::new_v4();
         let session = Session {
             id: session_id,
@@ -1597,9 +1717,12 @@ mod tests {
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Waiting;
         issue.session_id = Some(session_id);
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.resume_issue("ab12".into()).await.unwrap();
@@ -1639,16 +1762,23 @@ mod tests {
 
     // --- event emission ---
 
-    fn make_service_with_bus(db: &Arc<dyn db::Db>) -> (IssueService, events::EventBus) {
+    fn make_service_with_bus(
+        db: Arc<dyn db::Db>,
+        backend: Arc<dyn IssueBackend>,
+    ) -> (IssueService, events::EventBus) {
         let bus = events::EventBus::new(32);
-        let svc = IssueService::with_event_bus(Arc::clone(db), bus.clone());
+        let svc = IssueService::with_event_bus(db, backend, bus.clone());
         (svc, bus)
     }
 
     #[tokio::test]
     async fn create_issue_emits_created_event() {
         let db = Arc::new(MemoryDb::new());
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let backend = Arc::new(MemoryBackend::new());
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.create_issue(CreateIssueInput {
@@ -1672,10 +1802,14 @@ mod tests {
     #[tokio::test]
     async fn start_issue_emits_status_changed_event() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.start_issue("ab12".into()).await.unwrap();
@@ -1697,11 +1831,15 @@ mod tests {
     #[tokio::test]
     async fn complete_issue_emits_status_changed_and_comment_added() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.complete_issue("ab12".into(), "All done".into())
@@ -1733,10 +1871,14 @@ mod tests {
     #[tokio::test]
     async fn add_comment_emits_comment_added_event() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.add_comment("ab12".into(), "tester".into(), "Great issue".into())
@@ -1758,10 +1900,14 @@ mod tests {
     #[tokio::test]
     async fn cancel_issue_emits_status_changed_event() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let issue = open_issue("ab12");
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.cancel_issue("ab12".into()).await.unwrap();
@@ -1785,11 +1931,15 @@ mod tests {
     #[tokio::test]
     async fn reopen_issue_emits_status_changed_event() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::Failed;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.reopen_issue("ab12".into(), None).await.unwrap();
@@ -1811,11 +1961,15 @@ mod tests {
     #[tokio::test]
     async fn fail_issue_emits_comment_added_and_status_changed() {
         let db = Arc::new(MemoryDb::new());
+        let backend = Arc::new(MemoryBackend::new());
         let mut issue = open_issue("ab12");
         issue.status = IssueStatus::InProgress;
-        db.create_issue(&issue).await.unwrap();
+        backend.create(&issue).await.unwrap();
 
-        let (svc, bus) = make_service_with_bus(&(Arc::clone(&db) as Arc<dyn db::Db>));
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
         let mut rx = bus.subscribe();
 
         svc.fail_issue("ab12", "timeout".into()).await.unwrap();

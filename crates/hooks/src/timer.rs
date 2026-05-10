@@ -184,7 +184,9 @@ mod tests {
 
     async fn make_issue_service() -> issues::IssueService {
         let (db, _hook_store) = db::connect("sqlite::memory:").await.unwrap();
-        issues::IssueService::new(db)
+        let backend: std::sync::Arc<dyn issue_backend::IssueBackend> =
+            std::sync::Arc::new(issue_backend::SqliteIssueBackend::new(std::sync::Arc::clone(&db)));
+        issues::IssueService::new(db, backend)
     }
 
     // ── should_fire tests ─────────────────────────────────────────────────────

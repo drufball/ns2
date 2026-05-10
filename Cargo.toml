@@ -3,6 +3,7 @@ members = [
     "crates/types",
     "crates/events",
     "crates/db",
+    "crates/issue-backend",
     "crates/anthropic",
     "crates/tools",
     "crates/workspace",
