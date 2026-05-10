@@ -308,7 +308,7 @@ mod tests {
         let ev = IssueEvent::StatusChanged {
             issue: make_issue(),
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         };
         let json = serde_json::to_string(&ev).unwrap();
         let decoded: IssueEvent = serde_json::from_str(&json).unwrap();
@@ -316,7 +316,7 @@ mod tests {
             decoded,
             IssueEvent::StatusChanged {
                 from: IssueStatus::Open,
-                to: IssueStatus::Running,
+                to: IssueStatus::InProgress,
                 ..
             }
         ));

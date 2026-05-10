@@ -138,6 +138,170 @@ fn spawn_hook_evaluator(state: &AppState) {
     });
 }
 
+/// Build the initial message for a fresh issue start (title + body + optional comment history).
+fn build_initial_message(issue: &types::Issue) -> String {
+    let mut msg = format!("{}\n\n{}", issue.title, issue.body);
+    if !issue.comments.is_empty() {
+        use std::fmt::Write as _;
+        msg.push_str("\n\n---\n# Issue History\n");
+        for comment in &issue.comments {
+            let _ = writeln!(
+                msg,
+                "\n**{}** ({}): {}",
+                comment.author,
+                comment.created_at.format("%Y-%m-%d %H:%M UTC"),
+                comment.body
+            );
+        }
+    }
+    msg
+}
+
+/// Handle `IssueEvent::StatusChanged { to: InProgress }` — resume or start a harness.
+async fn handle_in_progress(state: &AppState, issue: types::Issue) {
+    if issue.assignee.is_none() {
+        return;
+    }
+    if let Some(session_id) = issue.session_id {
+        if let Ok(session) = state.db.get_session(session_id).await {
+            if session.status == types::SessionStatus::Waiting {
+                let msg_tx = crate::harness_spawn::spawn_harness_sync(state, session);
+                msg_tx.send("Please continue.".to_string()).await.ok();
+                return;
+            }
+            if session.status == types::SessionStatus::Created {
+                let initial_message = build_initial_message(&issue);
+                let msg_tx = crate::harness_spawn::spawn_harness_sync(state, session);
+                msg_tx.send(initial_message).await.ok();
+            }
+        }
+    }
+}
+
+/// Spawn the global issue lifecycle subscriber.
+///
+/// This single long-lived task handles all cross-cutting session→issue and
+/// issue→session lifecycle transitions:
+///
+/// **Session events → issue state:**
+/// - `SessionEvent::Stopped` — stores stop info (status + comment) keyed by `session_id`
+/// - `SessionEvent::Done`    — looks up the linked issue and parks it (Completed or Waiting)
+/// - `SessionEvent::Error`   — looks up the linked issue and fails it
+///
+/// **Issue state changes → session actions:**
+/// - `IssueEvent::StatusChanged { to: InProgress }` — start or resume harness
+/// - `IssueEvent::StatusChanged { to: Cancelled }`  — drop msg sender to kill harness
+pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
+    use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
+    use std::collections::HashMap;
+    use tokio::sync::broadcast::error::RecvError;
+    use types::IssueStatus;
+
+    let mut rx = state.event_bus.subscribe();
+    let state = state.clone();
+
+    tokio::spawn(async move {
+        // Per-session stop info: session_id → (status, optional comment)
+        let mut stop_map: HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> = HashMap::new();
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => match event {
+                    // ── Session events → issue state ─────────────────────────
+
+                    SystemEvent::Session {
+                        session_id,
+                        event: SessionEvent::Stopped { status, comment },
+                    } => {
+                        stop_map.insert(session_id, (status, comment));
+                    }
+
+                    SystemEvent::Session {
+                        session_id,
+                        event: SessionEvent::Done,
+                    } => {
+                        let issues = state
+                            .db
+                            .list_issues_by_session_id(session_id)
+                            .await
+                            .unwrap_or_default();
+                        for issue in issues {
+                            let (park_status, comment) =
+                                if let Some((stop_status, stop_comment)) =
+                                    stop_map.remove(&session_id)
+                                {
+                                    let ps = if matches!(stop_status, StopEventStatus::Complete) {
+                                        IssueStatus::Completed
+                                    } else {
+                                        IssueStatus::Waiting
+                                    };
+                                    (ps, stop_comment)
+                                } else {
+                                    (IssueStatus::Waiting, None)
+                                };
+                            let _ = state
+                                .issue_service
+                                .park_issue(&issue.id, park_status, comment, None)
+                                .await;
+                        }
+                    }
+
+                    SystemEvent::Session {
+                        session_id,
+                        event: SessionEvent::Error { message },
+                    } => {
+                        stop_map.remove(&session_id);
+                        let issues = state
+                            .db
+                            .list_issues_by_session_id(session_id)
+                            .await
+                            .unwrap_or_default();
+                        for issue in issues {
+                            let _ = state
+                                .issue_service
+                                .fail_issue(&issue.id, message.clone())
+                                .await;
+                        }
+                    }
+
+                    // ── Issue state → session actions ─────────────────────────
+
+                    SystemEvent::Issue(IssueEvent::StatusChanged {
+                        issue,
+                        to: IssueStatus::InProgress,
+                        ..
+                    }) => {
+                        handle_in_progress(&state, issue).await;
+                    }
+
+                    SystemEvent::Issue(IssueEvent::StatusChanged {
+                        issue,
+                        to: IssueStatus::Cancelled,
+                        ..
+                    }) => {
+                        // Kill the active session if any
+                        if let Some(session_id) = issue.session_id {
+                            let mut senders = state.msg_senders.lock().await;
+                            senders.remove(&session_id);
+                            drop(senders);
+                            let _ = state
+                                .db
+                                .update_session_status(session_id, types::SessionStatus::Cancelled)
+                                .await;
+                        }
+                    }
+
+                    _ => {}
+                },
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("Issue lifecycle subscriber lagged by {n} messages");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// # Errors
 ///
 /// Returns an error if the data directory cannot be created, the PID file cannot
@@ -184,6 +348,9 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     // Spawn the hook evaluator background task.
     spawn_hook_evaluator(&state);
+
+    // Spawn the global issue lifecycle subscriber.
+    spawn_issue_lifecycle_subscriber(&state);
 
     // Spawn the timer scheduler background task.
     hooks::timer::spawn_timer_scheduler(&state.hook_store, &state.event_bus, &state.issue_service);
@@ -290,6 +457,7 @@ mod tests {
     async fn test_app_with_state() -> (Router, AppState) {
         let state = test_state().await;
         spawn_hook_evaluator(&state);
+        spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
         (app, state)
     }
@@ -1645,7 +1813,7 @@ mod tests {
             id: "wt01".to_string(),
             title: "Waiting issue".to_string(),
             body: "body".to_string(),
-            status: types::IssueStatus::Running,
+            status: types::IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
@@ -2448,7 +2616,7 @@ mod tests {
             id: "ab12".into(),
             title: "Test issue".into(),
             body: "body".into(),
-            status: types::IssueStatus::Running,
+            status: types::IssueStatus::InProgress,
             branch: String::new(),
             assignee: None,
             session_id: Some(session.id),
@@ -2638,7 +2806,7 @@ mod tests {
     #[tokio::test]
     async fn test_reopen_running_issue_returns_400() {
         let (app, state) = test_app_with_state().await;
-        let id = create_issue_with_status(&state, IssueStatus::Running).await;
+        let id = create_issue_with_status(&state, IssueStatus::InProgress).await;
 
         let resp = app
             .oneshot(
@@ -2847,6 +3015,7 @@ mod tests {
             event_bus,
             hook_store,
         };
+        spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
 
         let create_resp = app
@@ -2960,6 +3129,7 @@ mod tests {
             event_bus,
             hook_store,
         };
+        spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
 
         let create_resp = app
@@ -3170,6 +3340,7 @@ mod tests {
             event_bus,
             hook_store,
         };
+        spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
 
         let create_resp = app
@@ -3248,7 +3419,7 @@ mod tests {
             id: "tt01".to_string(),
             title: "Multi-turn test".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: None,
@@ -3775,7 +3946,7 @@ mod tests {
             id: "nt01".to_string(),
             title: "No text test".to_string(),
             body: "body".to_string(),
-            status: IssueStatus::Running,
+            status: IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("bot".to_string()),
             session_id: None,
@@ -4589,10 +4760,10 @@ mod tests {
         );
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // The returned status should be "running" (harness was spawned)
+        // The returned status should be "in_progress" (harness was spawned)
         assert_eq!(
-            v["status"], "running",
-            "returned issue must have status=running, not in_progress"
+            v["status"], "in_progress",
+            "returned issue must have status=in_progress"
         );
         assert!(
             !v["session_id"].is_null(),
@@ -4696,8 +4867,8 @@ mod tests {
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            v["status"], "running",
-            "failed issue with in_progress should become running"
+            v["status"], "in_progress",
+            "failed issue with in_progress should become in_progress"
         );
         // The session_id should NOT be the old failed one
         let new_session_id = v["session_id"].as_str().expect("session_id must be set");
@@ -4769,8 +4940,8 @@ mod tests {
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            v["status"], "running",
-            "waiting issue with in_progress should become running"
+            v["status"], "in_progress",
+            "waiting issue with in_progress should become in_progress"
         );
         // Session id should be the SAME waiting session (reuse)
         let returned_session_id = v["session_id"].as_str().expect("session_id must be set");
@@ -4938,7 +5109,7 @@ mod tests {
             id: "ri01".to_string(),
             title: "Running issue".to_string(),
             body: "body".to_string(),
-            status: types::IssueStatus::Running,
+            status: types::IssueStatus::InProgress,
             branch: String::new(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
@@ -4965,8 +5136,8 @@ mod tests {
         let body = response_body_bytes(resp).await;
         let err_msg = String::from_utf8_lossy(&body);
         assert!(
-            err_msg.contains("running"),
-            "error message must mention 'running', got: {err_msg}"
+            err_msg.contains("in_progress"),
+            "error message must mention 'in_progress', got: {err_msg}"
         );
     }
 

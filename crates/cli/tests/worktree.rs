@@ -235,7 +235,7 @@ fn issue_start_creates_worktree_for_issue_with_branch() {
     let branch = extract_json_str(&json, "branch");
 
     h.ns2()
-        .args(["issue", "set-status", "--id", &id, "--status", "in_progress"])
+        .args(["issue", "edit", "--id", &id, "--status", "in_progress"])
         .assert()
         .success();
     h.ns2()
@@ -276,7 +276,7 @@ fn issue_start_reuses_existing_worktree() {
         "feature/shared",
     ]);
     h.ns2()
-        .args(["issue", "set-status", "--id", &id_a, "--status", "in_progress"])
+        .args(["issue", "edit", "--id", &id_a, "--status", "in_progress"])
         .assert()
         .success();
     h.ns2()
@@ -297,7 +297,7 @@ fn issue_start_reuses_existing_worktree() {
         "feature/shared",
     ]);
     h.ns2()
-        .args(["issue", "set-status", "--id", &id_b, "--status", "in_progress"])
+        .args(["issue", "edit", "--id", &id_b, "--status", "in_progress"])
         .assert()
         .success();
     h.ns2()
@@ -351,7 +351,7 @@ fn worktree_not_deleted_after_session_completes() {
     let branch = extract_json_str(&json, "branch");
 
     h.ns2()
-        .args(["issue", "set-status", "--id", &id, "--status", "in_progress"])
+        .args(["issue", "edit", "--id", &id, "--status", "in_progress"])
         .assert()
         .success();
     h.ns2()

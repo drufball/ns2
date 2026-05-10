@@ -659,12 +659,12 @@ mod tests {
         bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(other_id),
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         }));
         bus.send(SystemEvent::Issue(IssueEvent::StatusChanged {
             issue: make_issue(target_id),
             from: IssueStatus::Open,
-            to: IssueStatus::Running,
+            to: IssueStatus::InProgress,
         }));
         // Also emit a session event (should be filtered out)
         bus.send(SystemEvent::Session {

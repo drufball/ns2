@@ -8,7 +8,7 @@ mod render;
 #[command(name = "ns2")]
 #[command(about = "An issue-driven agent orchestration tool.")]
 #[command(
-    long_about = "ns2 is an issue-driven agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  issue    a work item assigned to an agent; the primary way to get work done\n  session  internal implementation detail — created automatically when an issue starts\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue set-status --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done\""
+    long_about = "ns2 is an issue-driven agent orchestration tool.\n\nConcepts:\n  agent    a named system prompt stored in .ns2/agents/; defines how the model behaves\n  issue    a work item assigned to an agent; the primary way to get work done\n  session  internal implementation detail — created automatically when an issue starts\n\nTypical workflow:\n  ns2 server start\n  ns2 agent list\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue edit --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done\""
 )]
 struct Cli {
     #[arg(
@@ -34,7 +34,7 @@ enum Command {
     },
     #[command(
         about = "Inspect agent sessions (implementation detail — use `issue` to get work done).",
-        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue set-status --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
+        long_about = "Sessions are the internal agent runs that power issues. You typically don't create sessions directly — use `ns2 issue edit --id <id> --status in_progress` instead, which creates a session automatically.\n\nUse session commands for inspection: tail output, list recent runs, or stop a runaway session.\n\nLifecycle:\n  created    session exists but no message sent yet; agent not started\n  running    agent is active and processing messages\n  completed  agent finished successfully\n  failed     agent ended with an error (check tail output for details)\n  cancelled  stopped manually via session stop"
     )]
     Session {
         #[command(subcommand)]
@@ -58,7 +58,7 @@ enum Command {
     },
     #[command(
         about = "Track and manage work items.",
-        long_about = "Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.\n\nLifecycle:\n  open       issue created, not yet assigned to a session\n  running    an agent session is actively working on this issue\n  completed  work finished and reviewed\n  failed     session ended with an error\n\nTypical workflow:\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue set-status --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done: ...\"\n\nUse `issue list` to see current issues; use `issue wait` to block until issues finish."
+        long_about = "Issues are lightweight work items with a title, body, optional assignee agent, and status lifecycle.\n\nLifecycle:\n  open       issue created, not yet assigned to a session\n  in_progress  an agent session is actively working on this issue\n  completed  work finished and reviewed\n  failed     session ended with an error\n\nTypical workflow:\n  id=$(ns2 issue new --title \"...\" --body \"...\" --assignee swe)\n  ns2 issue edit --id \"$id\" --status in_progress\n  ns2 issue wait --id \"$id\"\n  ns2 issue complete --id \"$id\" --comment \"Done: ...\"\n\nUse `issue list` to see current issues; use `issue wait` to block until issues finish."
     )]
     Issue {
         #[command(subcommand)]
@@ -414,7 +414,7 @@ enum IssueAction {
     },
     #[command(
         about = "Edit an existing issue.",
-        long_about = "Edit fields of an existing issue. Only the flags you provide are changed."
+        long_about = "Edit fields of an existing issue. Only the flags you provide are changed.\n\nUse --status in_progress to auto-start the issue (spawns the agent harness)."
     )]
     Edit {
         #[arg(long, help = "The issue ID to edit. Required.")]
@@ -431,6 +431,8 @@ enum IssueAction {
         blocked_on: Option<Vec<String>>,
         #[arg(long, help = "New git branch name for this issue.")]
         branch: Option<String>,
+        #[arg(long, help = "Set the issue status (e.g. in_progress to auto-start, open, waiting, etc.).")]
+        status: Option<String>,
     },
     #[command(
         about = "Post a comment to an issue.")]
@@ -455,16 +457,6 @@ enum IssueAction {
         id: String,
         #[arg(long, help = "A final summary of what was done. Required.")]
         comment: String,
-    },
-    #[command(
-        about = "Set the status of an issue.",
-        long_about = "Update an issue's status directly. Use status 'in_progress' to auto-start the issue (spawns the agent harness).\n\nAvailable statuses: open, in_progress, running, completed, failed, cancelled, waiting\n\nTypical usage:\n  ns2 issue set-status --id \"$id\" --status in_progress\n\nSetting in_progress will:\n  - Create a new session and start the agent if the issue is open.\n  - Resume the existing session if the issue is waiting.\n  - Clear any failed session and create a fresh one if the issue is failed."
-    )]
-    SetStatus {
-        #[arg(long, help = "The issue ID. Required.")]
-        id: String,
-        #[arg(long, help = "The new status. Required.")]
-        status: String,
     },
     #[command(
         about = "Move a failed or completed issue back to open.",
@@ -723,6 +715,7 @@ async fn main() {
                 parent,
                 blocked_on,
                 branch,
+                status,
             } => {
                 commands::issue::run_edit(
                     &cli.server,
@@ -733,6 +726,7 @@ async fn main() {
                     parent,
                     blocked_on,
                     branch,
+                    status,
                 )
                 .await;
             }
@@ -741,9 +735,6 @@ async fn main() {
             }
             IssueAction::Complete { id, comment } => {
                 commands::issue::run_complete(&cli.server, id, comment).await;
-            }
-            IssueAction::SetStatus { id, status } => {
-                commands::issue::run_set_status(&cli.server, id, status).await;
             }
             IssueAction::Reopen { id, comment } => {
                 commands::issue::run_reopen(&cli.server, id, comment).await;
@@ -876,7 +867,7 @@ mod tests {
 
     #[test]
     fn issue_is_terminal_running_is_false() {
-        assert!(!issue_is_terminal(&types::IssueStatus::Running));
+        assert!(!issue_is_terminal(&types::IssueStatus::InProgress));
     }
 
     fn make_turn() -> Turn {
@@ -1603,14 +1594,32 @@ mod tests {
         assert!(result.is_err(), "cancel without --id should fail to parse");
     }
 
-    // ─── issue set-status CLI parse tests ─────────────────────────────────────
+    // ─── issue edit --status CLI parse tests (replaces set-status) ───────────
 
     #[test]
-    fn issue_set_status_parses_id_and_status() {
-        let cli = Cli::try_parse_from([
+    fn issue_set_status_subcommand_removed() {
+        // ns2 issue set-status is removed; should fail to parse
+        let result = Cli::try_parse_from([
             "ns2",
             "issue",
             "set-status",
+            "--id",
+            "ab12",
+            "--status",
+            "in_progress",
+        ]);
+        assert!(
+            result.is_err(),
+            "set-status subcommand must be removed; should fail to parse"
+        );
+    }
+
+    #[test]
+    fn issue_edit_parses_status_flag() {
+        let cli = Cli::try_parse_from([
+            "ns2",
+            "issue",
+            "edit",
             "--id",
             "ab12",
             "--status",
@@ -1619,40 +1628,34 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::SetStatus { id, status },
+                action: IssueAction::Edit { id, status, .. },
             } => {
                 assert_eq!(id, "ab12");
-                assert_eq!(status, "in_progress");
+                assert_eq!(status.as_deref(), Some("in_progress"));
             }
-            _ => panic!("expected issue set-status command"),
+            _ => panic!("expected issue edit command"),
         }
     }
 
     #[test]
-    fn issue_set_status_missing_id_fails_to_parse() {
-        let result =
-            Cli::try_parse_from(["ns2", "issue", "set-status", "--status", "in_progress"]);
-        assert!(
-            result.is_err(),
-            "set-status without --id should fail to parse"
-        );
+    fn issue_edit_no_status_flag_is_none() {
+        let cli = Cli::try_parse_from(["ns2", "issue", "edit", "--id", "ab12"]).unwrap();
+        match cli.command {
+            Command::Issue {
+                action: IssueAction::Edit { status, .. },
+            } => {
+                assert!(status.is_none());
+            }
+            _ => panic!("expected issue edit command"),
+        }
     }
 
     #[test]
-    fn issue_set_status_missing_status_fails_to_parse() {
-        let result = Cli::try_parse_from(["ns2", "issue", "set-status", "--id", "ab12"]);
-        assert!(
-            result.is_err(),
-            "set-status without --status should fail to parse"
-        );
-    }
-
-    #[test]
-    fn issue_set_status_with_open_status_parses() {
+    fn issue_edit_status_with_open_parses() {
         let cli = Cli::try_parse_from([
             "ns2",
             "issue",
-            "set-status",
+            "edit",
             "--id",
             "ab12",
             "--status",
@@ -1661,11 +1664,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Issue {
-                action: IssueAction::SetStatus { status, .. },
+                action: IssueAction::Edit { status, .. },
             } => {
-                assert_eq!(status, "open");
+                assert_eq!(status.as_deref(), Some("open"));
             }
-            _ => panic!("expected issue set-status command"),
+            _ => panic!("expected issue edit command"),
         }
     }
 
@@ -1843,10 +1846,10 @@ mod tests {
     }
 
     #[test]
-    fn issue_status_symbol_running_returns_spinner() {
-        let (sym, label) = issue_status_symbol(&types::IssueStatus::Running, 0);
+    fn issue_status_symbol_in_progress_returns_spinner() {
+        let (sym, label) = issue_status_symbol(&types::IssueStatus::InProgress, 0);
         assert_eq!(sym, SPINNER_FRAMES[0].to_string());
-        assert_eq!(label, "running");
+        assert_eq!(label, "in_progress");
     }
 
     #[test]
@@ -1933,20 +1936,20 @@ mod tests {
     #[test]
     fn render_tree_line_root_no_snippet() {
         let node = IssueTreeNode {
-            issue: make_tree_issue("ab12", "Fix the bug", types::IssueStatus::Running),
+            issue: make_tree_issue("ab12", "Fix the bug", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
         let line = render_tree_line(&node, "", 0, true);
         assert!(line.contains("[ab12]"), "must contain issue id");
         assert!(line.contains("Fix the bug"), "must contain title");
-        assert!(line.contains("running"), "must contain status label");
+        assert!(line.contains("in_progress"), "must contain status label");
     }
 
     #[test]
     fn render_tree_line_root_with_snippet() {
         let node = IssueTreeNode {
-            issue: make_tree_issue("ab12", "Fix the bug", types::IssueStatus::Running),
+            issue: make_tree_issue("ab12", "Fix the bug", types::IssueStatus::InProgress),
             snippet: Some("Working on tests".to_string()),
             children: vec![],
         };
@@ -1958,7 +1961,7 @@ mod tests {
             line.contains(": Working on tests"),
             "snippet must follow colon"
         );
-        assert!(line.contains("running"), "must contain status label");
+        assert!(line.contains("in_progress"), "must contain status label");
     }
 
     #[test]
@@ -2003,7 +2006,7 @@ mod tests {
     #[test]
     fn render_issue_tree_root_with_children() {
         let child1 = IssueTreeNode {
-            issue: make_tree_issue("cd34", "Child 1", types::IssueStatus::Running),
+            issue: make_tree_issue("cd34", "Child 1", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
@@ -2013,7 +2016,7 @@ mod tests {
             children: vec![],
         };
         let roots = vec![IssueTreeNode {
-            issue: make_tree_issue("ab12", "Root", types::IssueStatus::Running),
+            issue: make_tree_issue("ab12", "Root", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![child1, child2],
         }];
@@ -2041,7 +2044,7 @@ mod tests {
     fn render_issue_tree_multiple_roots() {
         let roots = vec![
             IssueTreeNode {
-                issue: make_tree_issue("aa11", "Root A", types::IssueStatus::Running),
+                issue: make_tree_issue("aa11", "Root A", types::IssueStatus::InProgress),
                 snippet: None,
                 children: vec![],
             },
@@ -2072,12 +2075,12 @@ mod tests {
             children: vec![],
         };
         let child = IssueTreeNode {
-            issue: make_tree_issue("cc33", "Child", types::IssueStatus::Running),
+            issue: make_tree_issue("cc33", "Child", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![grandchild],
         };
         let roots = vec![IssueTreeNode {
-            issue: make_tree_issue("rr00", "Root", types::IssueStatus::Running),
+            issue: make_tree_issue("rr00", "Root", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![child],
         }];
@@ -2097,7 +2100,7 @@ mod tests {
     #[test]
     fn render_tree_line_spinner_cycles_for_running() {
         let node = IssueTreeNode {
-            issue: make_tree_issue("ab12", "Task", types::IssueStatus::Running),
+            issue: make_tree_issue("ab12", "Task", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
@@ -2190,7 +2193,7 @@ mod tests {
     fn all_nodes_terminal_returns_false_when_child_is_running() {
         // Root is completed but child is still running — should NOT be terminal.
         let running_child = IssueTreeNode {
-            issue: make_tree_issue("ch01", "Child", types::IssueStatus::Running),
+            issue: make_tree_issue("ch01", "Child", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
@@ -2226,7 +2229,7 @@ mod tests {
     #[test]
     fn all_nodes_terminal_returns_false_when_grandchild_is_running() {
         let running_grandchild = IssueTreeNode {
-            issue: make_tree_issue("gc01", "Grandchild", types::IssueStatus::Running),
+            issue: make_tree_issue("gc01", "Grandchild", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
@@ -2253,13 +2256,13 @@ mod tests {
         // When there are 2 roots and the first root (├──) has children,
         // those children should be indented with "│   " (continuing bar).
         let child = IssueTreeNode {
-            issue: make_tree_issue("ch10", "Child of A", types::IssueStatus::Running),
+            issue: make_tree_issue("ch10", "Child of A", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
         let roots = vec![
             IssueTreeNode {
-                issue: make_tree_issue("aa10", "Root A", types::IssueStatus::Running),
+                issue: make_tree_issue("aa10", "Root A", types::IssueStatus::InProgress),
                 snippet: None,
                 children: vec![child],
             },
@@ -2286,7 +2289,7 @@ mod tests {
         // When there are 2 roots and the last root (└──) has children,
         // those children should be indented with "    " (four spaces, no bar).
         let child = IssueTreeNode {
-            issue: make_tree_issue("ch11", "Child of B", types::IssueStatus::Running),
+            issue: make_tree_issue("ch11", "Child of B", types::IssueStatus::InProgress),
             snippet: None,
             children: vec![],
         };
@@ -2297,7 +2300,7 @@ mod tests {
                 children: vec![],
             },
             IssueTreeNode {
-                issue: make_tree_issue("bb11", "Root B", types::IssueStatus::Running),
+                issue: make_tree_issue("bb11", "Root B", types::IssueStatus::InProgress),
                 snippet: None,
                 children: vec![child],
             },
@@ -2324,7 +2327,7 @@ mod tests {
     #[test]
     fn render_tree_line_snippet_with_newline_is_sanitized() {
         let node = IssueTreeNode {
-            issue: make_tree_issue("ab99", "Task", types::IssueStatus::Running),
+            issue: make_tree_issue("ab99", "Task", types::IssueStatus::InProgress),
             snippet: Some("line one\nline two".to_string()),
             children: vec![],
         };
@@ -2344,7 +2347,7 @@ mod tests {
     #[test]
     fn render_tree_line_snippet_with_carriage_return_is_sanitized() {
         let node = IssueTreeNode {
-            issue: make_tree_issue("ab98", "Task", types::IssueStatus::Running),
+            issue: make_tree_issue("ab98", "Task", types::IssueStatus::InProgress),
             snippet: Some("line one\r\nline two".to_string()),
             children: vec![],
         };

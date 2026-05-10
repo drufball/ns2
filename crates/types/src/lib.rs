@@ -7,7 +7,6 @@ use uuid::Uuid;
 pub enum IssueStatus {
     Open,
     InProgress,
-    Running,
     Completed,
     Failed,
     Cancelled,
@@ -19,7 +18,6 @@ impl std::fmt::Display for IssueStatus {
         match self {
             Self::Open => write!(f, "open"),
             Self::InProgress => write!(f, "in_progress"),
-            Self::Running => write!(f, "running"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
@@ -33,8 +31,7 @@ impl std::str::FromStr for IssueStatus {
     fn from_str(s: &str) -> std::result::Result<Self, String> {
         match s {
             "open" => Ok(Self::Open),
-            "in_progress" => Ok(Self::InProgress),
-            "running" => Ok(Self::Running),
+            "in_progress" | "running" => Ok(Self::InProgress),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
@@ -489,7 +486,6 @@ mod tests {
         for status in [
             IssueStatus::Open,
             IssueStatus::InProgress,
-            IssueStatus::Running,
             IssueStatus::Completed,
             IssueStatus::Failed,
             IssueStatus::Cancelled,
@@ -499,6 +495,13 @@ mod tests {
             let parsed: IssueStatus = s.parse().expect("should parse");
             assert_eq!(parsed, status);
         }
+    }
+
+    #[test]
+    fn issue_status_running_parses_to_in_progress() {
+        // Legacy "running" string maps to InProgress (backward compat)
+        let parsed: IssueStatus = "running".parse().expect("should parse");
+        assert_eq!(parsed, IssueStatus::InProgress);
     }
 
     #[test]

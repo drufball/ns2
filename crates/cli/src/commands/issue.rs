@@ -130,6 +130,7 @@ pub async fn run_edit(
     parent: Option<String>,
     blocked_on: Option<Vec<String>>,
     branch: Option<String>,
+    status: Option<String>,
 ) {
     let client = reqwest::Client::new();
     let url = format!("{server}/issues/{id}");
@@ -166,24 +167,31 @@ pub async fn run_edit(
     if let Some(br) = branch {
         req_body.insert("branch".into(), json!(br));
     }
-    let resp = client
-        .patch(&url)
-        .json(&serde_json::Value::Object(req_body))
-        .send()
-        .await
-        .unwrap_or_else(|e| handle_connection_error(&e));
-    if !resp.status().is_success() {
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            eprintln!("Error: issue not found: {id}");
-            std::process::exit(1);
+    // Only make the PATCH /issues/:id call if there are non-status fields to update
+    if !req_body.is_empty() {
+        let resp = client
+            .patch(&url)
+            .json(&serde_json::Value::Object(req_body))
+            .send()
+            .await
+            .unwrap_or_else(|e| handle_connection_error(&e));
+        if !resp.status().is_success() {
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                eprintln!("Error: issue not found: {id}");
+                std::process::exit(1);
+            }
+            print_error_response(resp).await;
         }
-        print_error_response(resp).await;
+        let issue: Issue = resp.json().await.unwrap_or_else(|e| {
+            eprintln!("Error parsing response: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("Updated issue {}.", issue.id);
     }
-    let issue: Issue = resp.json().await.unwrap_or_else(|e| {
-        eprintln!("Error parsing response: {e}");
-        std::process::exit(1);
-    });
-    eprintln!("Updated issue {}.", issue.id);
+    // If --status was provided, call the status endpoint
+    if let Some(s) = status {
+        run_set_status(server, id, s).await;
+    }
 }
 
 pub async fn run_comment(server: &str, id: String, body: String, author: String) {
@@ -329,7 +337,7 @@ pub async fn run_show(server: &str, id: String, json: bool) {
     }
 }
 
-/// `ns2 issue set-status --id X --status S`
+/// `ns2 issue edit --id X --status S` (or the older `ns2 issue set-status --id X --status S`)
 ///
 /// Calls `PATCH /issues/:id/status` with the given status.
 /// When status is `in_progress`, the server auto-starts the issue.
@@ -435,7 +443,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 
     // Recursively attach snippets to running nodes.
     fn attach_snippets(node: &mut IssueTreeNode, snippets: &HashMap<uuid::Uuid, Option<String>>) {
-        if node.issue.status == IssueStatus::Running {
+        if node.issue.status == IssueStatus::InProgress {
             if let Some(session_id) = node.issue.session_id {
                 if let Some(snippet_opt) = snippets.get(&session_id) {
                     node.snippet.clone_from(snippet_opt);
@@ -449,7 +457,7 @@ pub async fn run_wait(server: &str, ids: Vec<String>, timeout: Option<u64>) {
 
     // Collect all running session IDs from a tree.
     fn collect_running_sessions(node: &IssueTreeNode, out: &mut Vec<uuid::Uuid>) {
-        if node.issue.status == IssueStatus::Running {
+        if node.issue.status == IssueStatus::InProgress {
             if let Some(sid) = node.issue.session_id {
                 out.push(sid);
             }
@@ -779,7 +787,7 @@ mod tests {
 
     #[test]
     fn issue_is_not_terminal_running() {
-        assert!(!issue_is_terminal(&types::IssueStatus::Running));
+        assert!(!issue_is_terminal(&types::IssueStatus::InProgress));
     }
 
     #[test]
@@ -801,7 +809,7 @@ mod tests {
 
     #[test]
     fn all_nodes_terminal_single_running_is_false() {
-        let roots = vec![make_node(types::IssueStatus::Running, vec![])];
+        let roots = vec![make_node(types::IssueStatus::InProgress, vec![])];
         assert!(!all_nodes_terminal(&roots));
     }
 
@@ -814,7 +822,7 @@ mod tests {
 
     #[test]
     fn all_nodes_terminal_terminal_root_with_running_child() {
-        let child = make_node(types::IssueStatus::Running, vec![]);
+        let child = make_node(types::IssueStatus::InProgress, vec![]);
         let root = make_node(types::IssueStatus::Completed, vec![child]);
         assert!(!all_nodes_terminal(&[root]));
     }
@@ -832,7 +840,7 @@ mod tests {
     fn all_nodes_terminal_multiple_roots_one_non_terminal() {
         let roots = vec![
             make_node(types::IssueStatus::Completed, vec![]),
-            make_node(types::IssueStatus::Running, vec![]),
+            make_node(types::IssueStatus::InProgress, vec![]),
         ];
         assert!(!all_nodes_terminal(&roots));
     }
