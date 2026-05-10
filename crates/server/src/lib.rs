@@ -21,11 +21,46 @@ use state::AppState;
 
 use events::EventBus;
 
+// ── Issue backend config types ────────────────────────────────────────────────
+
+/// Which storage back-end the server should use for issues.
+#[derive(Debug, Clone, serde::Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    #[default]
+    Sqlite,
+    Shell,
+    GitHub,
+}
+
+/// Configuration for the shell back-end.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ShellConfig {
+    pub command: String,
+}
+
+/// Configuration for the GitHub back-end.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GithubConfig {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Top-level `[issues]` configuration block from `ns2.toml`.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct IssueBackendConfig {
+    #[serde(default)]
+    pub backend: BackendKind,
+    pub shell: Option<ShellConfig>,
+    pub github: Option<GithubConfig>,
+}
+
 pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub pid_file: PathBuf,
     pub model: String,
+    pub issue_backend: IssueBackendConfig,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -275,6 +310,62 @@ pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
     });
 }
 
+/// Create an [`issue_backend::IssueBackend`] from the server's `IssueBackendConfig`.
+///
+/// - `Sqlite` → wraps the passed `db`.
+/// - `Shell`  → creates a `ShellIssueBackend`.
+/// - `GitHub` → creates a `GitHubIssueBackend` (requires `GITHUB_TOKEN` env var
+///   and `[issues.github]` config).
+///
+/// # Errors
+///
+/// Returns an error if a required config field is missing.
+async fn create_issue_backend(
+    config: &IssueBackendConfig,
+    db: std::sync::Arc<dyn db::Db>,
+    db_url: &str,
+) -> Result<std::sync::Arc<dyn issue_backend::IssueBackend>> {
+    match config.backend {
+        BackendKind::Sqlite => Ok(std::sync::Arc::new(
+            issue_backend::SqliteIssueBackend::new(db),
+        )),
+        BackendKind::Shell => {
+            let cmd = config
+                .shell
+                .as_ref()
+                .ok_or_else(|| {
+                    Error::Other(
+                        "[issues.shell] command required when backend = shell".into(),
+                    )
+                })?
+                .command
+                .clone();
+            Ok(std::sync::Arc::new(issue_backend::ShellIssueBackend::new(cmd)))
+        }
+        BackendKind::GitHub => {
+            let gh_config = config.github.as_ref().ok_or_else(|| {
+                Error::Other(
+                    "[issues.github] config required when backend = github".into(),
+                )
+            })?;
+            let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
+                Error::Other(
+                    "GITHUB_TOKEN environment variable is required for GitHub backend".into(),
+                )
+            })?;
+            let mapping = db::connect_mapping_store(db_url)
+                .await
+                .map_err(|e| Error::Other(e.to_string()))?;
+            Ok(std::sync::Arc::new(issue_backend::GitHubIssueBackend::new(
+                gh_config.owner.clone(),
+                gh_config.repo.clone(),
+                token,
+                mapping,
+            )))
+        }
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error if the data directory cannot be created, the PID file cannot
@@ -304,6 +395,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let (db, hook_store, event_store) = db::connect(&db_url).await?;
+    let _issue_backend = create_issue_backend(&config.issue_backend, Arc::clone(&db), &db_url).await?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
 

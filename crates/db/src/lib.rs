@@ -16,6 +16,8 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -898,6 +900,82 @@ impl EventStore for SqliteEventStore {
         }
         Ok(())
     }
+}
+
+// ── GitHubMappingStore ────────────────────────────────────────────────────────
+
+/// A store for mapping ns2 issue IDs to GitHub issue numbers.
+///
+/// Used by the GitHub issue backend to look up and persist the mapping
+/// between ns2 canonical IDs and GitHub issue numbers.
+#[async_trait::async_trait]
+pub trait GitHubMappingStore: Send + Sync {
+    /// Look up the GitHub issue number for a given ns2 issue ID.
+    async fn get_github_number(&self, ns2_id: &str) -> Result<Option<i64>>;
+    /// Look up the ns2 issue ID for a given GitHub issue number.
+    async fn get_ns2_id(&self, github_number: i64) -> Result<Option<String>>;
+    /// Insert or update the mapping between a ns2 issue ID and a GitHub issue number.
+    async fn upsert_mapping(&self, ns2_id: &str, github_number: i64) -> Result<()>;
+}
+
+/// SQLite-backed implementation of [`GitHubMappingStore`].
+pub struct SqliteGitHubMappingStore {
+    pool: sqlx::SqlitePool,
+}
+
+impl SqliteGitHubMappingStore {
+    #[must_use]
+    pub fn new(pool: sqlx::SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl GitHubMappingStore for SqliteGitHubMappingStore {
+    async fn get_github_number(&self, ns2_id: &str) -> Result<Option<i64>> {
+        use sqlx::Row as _;
+        let row = sqlx::query("SELECT github_number FROM github_issue_mapping WHERE ns2_id = ?")
+            .bind(ns2_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?;
+        Ok(row.map(|r| r.get("github_number")))
+    }
+
+    async fn get_ns2_id(&self, github_number: i64) -> Result<Option<String>> {
+        use sqlx::Row as _;
+        let row = sqlx::query("SELECT ns2_id FROM github_issue_mapping WHERE github_number = ?")
+            .bind(github_number)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?;
+        Ok(row.map(|r| r.get("ns2_id")))
+    }
+
+    async fn upsert_mapping(&self, ns2_id: &str, github_number: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO github_issue_mapping (ns2_id, github_number, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(ns2_id) DO UPDATE SET github_number = excluded.github_number, updated_at = excluded.updated_at",
+        )
+        .bind(ns2_id)
+        .bind(github_number)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Other(e.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Create a [`GitHubMappingStore`] backed by SQLite at the given URL.
+///
+/// # Errors
+///
+/// Returns an error if the database connection or migration fails.
+pub async fn connect_mapping_store(url: &str) -> Result<Arc<dyn GitHubMappingStore>> {
+    let sqlite_db = SqliteDb::connect(url).await?;
+    let store = Arc::new(SqliteGitHubMappingStore::new(sqlite_db.pool().clone()));
+    Ok(store)
 }
 
 #[cfg(test)]

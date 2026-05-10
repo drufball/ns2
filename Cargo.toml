@@ -3,6 +3,7 @@ members = [
     "crates/types",
     "crates/events",
     "crates/db",
+    "crates/issue-backend",
     "crates/anthropic",
     "crates/tools",
     "crates/workspace",
@@ -17,6 +18,7 @@ members = [
     "crates/specs",
 ]
 resolver = "2"
+
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
