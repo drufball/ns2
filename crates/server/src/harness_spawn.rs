@@ -105,8 +105,8 @@ pub fn spawn_harness_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use events::{SessionEvent, StopEventStatus, SystemEvent};
+    use std::collections::HashMap;
     use types::{IssueStatus, Session, SessionStatus};
     use uuid::Uuid;
 
@@ -149,55 +149,39 @@ mod tests {
         issue
     }
 
-    /// Helper: wait for an issue to reach `target_status` within 3 seconds.
-    async fn wait_for_status(
-        state: &crate::state::AppState,
-        issue_id: &str,
-        target_status: IssueStatus,
-    ) {
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue(issue_id.to_string()).await.unwrap();
-            if fetched.status == target_status {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue {issue_id} did not become {target_status} within 3s (current: {})",
-                fetched.status
-            );
-        }
-    }
-
     /// Scenario 7a: Stopped{Complete, comment} then Done → issue Completed with comment.
-    /// The global subscriber (`spawn_issue_lifecycle_subscriber`) handles the transition.
+    /// Calls `process_lifecycle_event` directly — no background tasks, no sleeps.
     #[tokio::test]
     async fn test_stopped_complete_with_comment_marks_issue_completed() {
         let state = crate::tests::test_state().await;
-        // Start the global subscriber
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         make_linked_issue(&state, "sw-c1", session1.id).await;
 
-        let _tx = spawn_harness_sync(&state, session1.clone());
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        // Emit Stopped{Complete, "done"} then Done
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Stopped {
-                status: StopEventStatus::Complete,
-                comment: Some("done".into()),
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Stopped {
+                    status: StopEventStatus::Complete,
+                    comment: Some("done".into()),
+                },
             },
-        });
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Done,
-        });
+        )
+        .await;
 
-        wait_for_status(&state, "sw-c1", IssueStatus::Completed).await;
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let issue = state.db.get_issue("sw-c1".into()).await.unwrap();
         assert_eq!(issue.status, IssueStatus::Completed);
@@ -212,27 +196,34 @@ mod tests {
     #[tokio::test]
     async fn test_stopped_waiting_marks_issue_waiting_no_comment() {
         let state = crate::tests::test_state().await;
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         make_linked_issue(&state, "sw-w1", session1.id).await;
 
-        let _tx = spawn_harness_sync(&state, session1.clone());
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Stopped {
-                status: StopEventStatus::Waiting,
-                comment: None,
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Stopped {
+                    status: StopEventStatus::Waiting,
+                    comment: None,
+                },
             },
-        });
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Done,
-        });
+        )
+        .await;
 
-        wait_for_status(&state, "sw-w1", IssueStatus::Waiting).await;
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let issue = state.db.get_issue("sw-w1".into()).await.unwrap();
         assert_eq!(issue.status, IssueStatus::Waiting);
@@ -243,20 +234,21 @@ mod tests {
     #[tokio::test]
     async fn test_done_without_stopped_marks_issue_waiting() {
         let state = crate::tests::test_state().await;
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         make_linked_issue(&state, "sw-d1", session1.id).await;
 
-        let _tx = spawn_harness_sync(&state, session1.clone());
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Done,
-        });
-
-        wait_for_status(&state, "sw-d1", IssueStatus::Waiting).await;
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let issue = state.db.get_issue("sw-d1".into()).await.unwrap();
         assert_eq!(issue.status, IssueStatus::Waiting);
@@ -267,7 +259,6 @@ mod tests {
     #[tokio::test]
     async fn test_harness_spawn_done_only_finishes_own_issue() {
         let state = crate::tests::test_state().await;
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         // Create two sessions and two issues linked to each session.
         let session1 = make_session(&state).await;
@@ -275,22 +266,20 @@ mod tests {
         make_linked_issue(&state, "hs-d-i1", session1.id).await;
         make_linked_issue(&state, "hs-d-i2", session2.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone());
-        let _tx2 = spawn_harness_sync(&state, session2.clone());
+        let mut stop_map = HashMap::new();
 
-        // Give the subscriber a moment.
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        // Process Done for session2 — issue1 must NOT be affected.
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session2.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
-        // Emit Done for session2 — issue1 must NOT be affected.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session2.id,
-            event: SessionEvent::Done,
-        });
-
-        // Brief pause to let the event propagate.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // issue1 must still be InProgress.
+        // issue1 must still be InProgress (synchronous check, no sleep needed).
         let issue1 = state.db.get_issue("hs-d-i1".into()).await.unwrap();
         assert_eq!(
             issue1.status,
@@ -298,13 +287,16 @@ mod tests {
             "issue1 must remain InProgress after a Done event for a different session"
         );
 
-        // Emit Done for session1 — now issue1 should transition to Waiting.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Done,
-        });
-
-        wait_for_status(&state, "hs-d-i1", IssueStatus::Waiting).await;
+        // Process Done for session1 — now issue1 should transition to Waiting.
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let issue1_final = state.db.get_issue("hs-d-i1".into()).await.unwrap();
         assert_eq!(
@@ -326,26 +318,27 @@ mod tests {
     #[tokio::test]
     async fn test_harness_spawn_error_only_fails_own_issue() {
         let state = crate::tests::test_state().await;
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         let session2 = make_session(&state).await;
         make_linked_issue(&state, "hs-e-i1", session1.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone());
+        let mut stop_map = HashMap::new();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Emit Error for the unrelated session2 — issue1 must NOT be affected.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session2.id,
-            event: SessionEvent::Error {
-                message: "error from unrelated session".into(),
+        // Process Error for the unrelated session2 — issue1 must NOT be affected.
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session2.id,
+                event: SessionEvent::Error {
+                    message: "error from unrelated session".into(),
+                },
             },
-        });
+        )
+        .await;
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+        // Synchronous check — no sleep needed.
         let issue1 = state.db.get_issue("hs-e-i1".into()).await.unwrap();
         assert_eq!(
             issue1.status,
@@ -353,15 +346,18 @@ mod tests {
             "issue1 must remain InProgress after an Error event for a different session"
         );
 
-        // Emit Error for session1 — issue1 should fail.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Error {
-                message: "real failure".into(),
+        // Process Error for session1 — issue1 should fail.
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Error {
+                    message: "real failure".into(),
+                },
             },
-        });
-
-        wait_for_status(&state, "hs-e-i1", IssueStatus::Failed).await;
+        )
+        .await;
 
         let issue1_final = state.db.get_issue("hs-e-i1".into()).await.unwrap();
         assert_eq!(
@@ -375,31 +371,37 @@ mod tests {
     #[tokio::test]
     async fn test_stopped_event_only_applies_to_own_session() {
         let state = crate::tests::test_state().await;
-        crate::spawn_issue_lifecycle_subscriber(&state);
 
         let session1 = make_session(&state).await;
         let session2 = make_session(&state).await;
         make_linked_issue(&state, "sw-s1", session1.id).await;
 
-        let _tx1 = spawn_harness_sync(&state, session1.clone());
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        // Emit Stopped for session2 (should be ignored for issue linked to session1)
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session2.id,
-            event: SessionEvent::Stopped {
-                status: StopEventStatus::Complete,
-                comment: Some("should be ignored".into()),
+        // Process Stopped for session2 (should be ignored for issue linked to session1)
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session2.id,
+                event: SessionEvent::Stopped {
+                    status: StopEventStatus::Complete,
+                    comment: Some("should be ignored".into()),
+                },
             },
-        });
+        )
+        .await;
 
-        // Now emit Done for session1 (without Stopped → Waiting)
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session1.id,
-            event: SessionEvent::Done,
-        });
-
-        wait_for_status(&state, "sw-s1", IssueStatus::Waiting).await;
+        // Process Done for session1 (without Stopped → Waiting)
+        crate::process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session1.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let issue = state.db.get_issue("sw-s1".into()).await.unwrap();
         assert_eq!(issue.status, IssueStatus::Waiting);

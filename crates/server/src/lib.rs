@@ -143,6 +143,109 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
     }
 }
 
+/// Process a single lifecycle event, updating issue/session state accordingly.
+///
+/// This is the core logic extracted from the subscriber loop so tests can
+/// call it directly without timing assumptions.
+///
+/// `stop_map` tracks per-session stop info: `session_id → (status, optional
+/// comment)`.  Entries are inserted on `Stopped` and removed on `Done` or
+/// `Error`.
+pub(crate) async fn process_lifecycle_event(
+    state: &AppState,
+    stop_map: &mut std::collections::HashMap<uuid::Uuid, (events::StopEventStatus, Option<String>)>,
+    event: events::SystemEvent,
+) {
+    use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
+    use types::IssueStatus;
+
+    match event {
+        // ── Session events → issue state ─────────────────────────
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Stopped { status, comment },
+        } => {
+            stop_map.insert(session_id, (status, comment));
+        }
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Done,
+        } => {
+            let issues = state
+                .db
+                .list_issues_by_session_id(session_id)
+                .await
+                .unwrap_or_default();
+            for issue in issues {
+                let (park_status, comment) =
+                    if let Some((stop_status, stop_comment)) = stop_map.remove(&session_id) {
+                        let ps = if matches!(stop_status, StopEventStatus::Complete) {
+                            IssueStatus::Completed
+                        } else {
+                            IssueStatus::Waiting
+                        };
+                        (ps, stop_comment)
+                    } else {
+                        (IssueStatus::Waiting, None)
+                    };
+                let _ = state
+                    .issue_service
+                    .park_issue(&issue.id, park_status, comment, None)
+                    .await;
+            }
+        }
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Error { message },
+        } => {
+            stop_map.remove(&session_id);
+            let issues = state
+                .db
+                .list_issues_by_session_id(session_id)
+                .await
+                .unwrap_or_default();
+            for issue in issues {
+                let _ = state
+                    .issue_service
+                    .fail_issue(&issue.id, message.clone())
+                    .await;
+            }
+        }
+
+        // ── Issue state → session actions ─────────────────────────
+
+        SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            to: IssueStatus::InProgress,
+            ..
+        }) => {
+            handle_in_progress(state, issue).await;
+        }
+
+        SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            to: IssueStatus::Cancelled,
+            ..
+        }) => {
+            // Kill the active session if any
+            if let Some(session_id) = issue.session_id {
+                let mut senders = state.msg_senders.lock().await;
+                senders.remove(&session_id);
+                drop(senders);
+                let _ = state
+                    .db
+                    .update_session_status(session_id, types::SessionStatus::Cancelled)
+                    .await;
+            }
+        }
+
+        _ => {}
+    }
+}
+
 /// Spawn the global issue lifecycle subscriber.
 ///
 /// This single long-lived task handles all cross-cutting session→issue and
@@ -157,10 +260,8 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
 /// - `IssueEvent::StatusChanged { to: InProgress }` — start or resume harness
 /// - `IssueEvent::StatusChanged { to: Cancelled }`  — drop msg sender to kill harness
 pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
-    use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
-    use std::collections::HashMap;
+    use events::StopEventStatus;
     use tokio::sync::broadcast::error::RecvError;
-    use types::IssueStatus;
 
     let mut rx = state.event_bus.subscribe();
     let state = state.clone();
@@ -175,97 +276,12 @@ pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
         // typically short-lived relative to session count, and each entry is
         // tiny (~50 bytes).  A periodic sweep could be added if this becomes
         // a concern.
-        let mut stop_map: HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> = HashMap::new();
+        let mut stop_map: std::collections::HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> =
+            std::collections::HashMap::new();
 
         loop {
             match rx.recv().await {
-                Ok(event) => match event {
-                    // ── Session events → issue state ─────────────────────────
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Stopped { status, comment },
-                    } => {
-                        stop_map.insert(session_id, (status, comment));
-                    }
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Done,
-                    } => {
-                        let issues = state
-                            .db
-                            .list_issues_by_session_id(session_id)
-                            .await
-                            .unwrap_or_default();
-                        for issue in issues {
-                            let (park_status, comment) =
-                                if let Some((stop_status, stop_comment)) =
-                                    stop_map.remove(&session_id)
-                                {
-                                    let ps = if matches!(stop_status, StopEventStatus::Complete) {
-                                        IssueStatus::Completed
-                                    } else {
-                                        IssueStatus::Waiting
-                                    };
-                                    (ps, stop_comment)
-                                } else {
-                                    (IssueStatus::Waiting, None)
-                                };
-                            let _ = state
-                                .issue_service
-                                .park_issue(&issue.id, park_status, comment, None)
-                                .await;
-                        }
-                    }
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Error { message },
-                    } => {
-                        stop_map.remove(&session_id);
-                        let issues = state
-                            .db
-                            .list_issues_by_session_id(session_id)
-                            .await
-                            .unwrap_or_default();
-                        for issue in issues {
-                            let _ = state
-                                .issue_service
-                                .fail_issue(&issue.id, message.clone())
-                                .await;
-                        }
-                    }
-
-                    // ── Issue state → session actions ─────────────────────────
-
-                    SystemEvent::Issue(IssueEvent::StatusChanged {
-                        issue,
-                        to: IssueStatus::InProgress,
-                        ..
-                    }) => {
-                        handle_in_progress(&state, issue).await;
-                    }
-
-                    SystemEvent::Issue(IssueEvent::StatusChanged {
-                        issue,
-                        to: IssueStatus::Cancelled,
-                        ..
-                    }) => {
-                        // Kill the active session if any
-                        if let Some(session_id) = issue.session_id {
-                            let mut senders = state.msg_senders.lock().await;
-                            senders.remove(&session_id);
-                            drop(senders);
-                            let _ = state
-                                .db
-                                .update_session_status(session_id, types::SessionStatus::Cancelled)
-                                .await;
-                        }
-                    }
-
-                    _ => {}
-                },
+                Ok(event) => process_lifecycle_event(&state, &mut stop_map, event).await,
                 Err(RecvError::Lagged(n)) => {
                     tracing::warn!("Issue lifecycle subscriber lagged by {n} messages");
                 }
@@ -854,7 +870,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_to_running_session_returns_200() {
-        let (app, _state) = test_app_with_state().await;
+        let (app, state) = test_app_with_state().await;
 
         let create_resp = app
             .clone()
@@ -867,8 +883,22 @@ mod tests {
         let body = response_body_bytes(create_resp).await;
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let id = created["id"].as_str().unwrap().to_owned();
+        let session_id: Uuid = id.parse().unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until the harness has registered its sender in msg_senders.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let resp = app
             .oneshot(
@@ -929,7 +959,21 @@ mod tests {
         assert_eq!(r1.unwrap().status(), StatusCode::OK);
         assert_eq!(r2.unwrap().status(), StatusCode::OK);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until at least one sender is registered (at most one harness must
+        // have been spawned for this session).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let senders = state.msg_senders.lock().await;
         let sender_count = i32::from(senders.contains_key(&session_id));
@@ -978,7 +1022,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // The create request is synchronous — if no harness was spawned, the
+        // msg_senders map must be empty immediately (no need to sleep).
+        // Yield once to allow any spurious async work to settle.
+        tokio::task::yield_now().await;
 
         let senders = state.msg_senders.lock().await;
         let is_empty = senders.is_empty();
@@ -1001,7 +1048,20 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let session_id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until the harness registers its sender in msg_senders.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let senders = state.msg_senders.lock().await;
         let has_key = senders.contains_key(&session_id);
@@ -2989,8 +3049,8 @@ mod tests {
             "in_progress on a Running session issue must return 400"
         );
 
-        // msg_senders must not have grown.
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        // The request was rejected synchronously with 400, so no harness can have
+        // been spawned.  Check msg_senders immediately — no sleep needed.
         let final_count = {
             let senders = state.msg_senders.lock().await;
             let count = senders.len();
@@ -3010,13 +3070,15 @@ mod tests {
     /// entry from `stop_map`. If Done arrives later for the same session,
     /// the issue must transition to Waiting (not Completed), proving
     /// the `stop_map` was cleared by the Error handler.
+    ///
+    /// Calls `process_lifecycle_event` directly — no background tasks, no sleeps.
     #[tokio::test]
     async fn test_error_clears_stop_map_so_done_produces_waiting() {
         use events::{SessionEvent, StopEventStatus, SystemEvent};
+        use std::collections::HashMap;
         use types::{IssueStatus, Session, SessionStatus};
 
         let state = test_state().await;
-        spawn_issue_lifecycle_subscriber(&state);
 
         // Create a session and an issue linked to it.
         let session = Session {
@@ -3046,73 +3108,60 @@ mod tests {
         };
         state.db.create_issue(&issue).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        // Emit Stopped{Complete} — would mark the issue Completed on Done
+        // Process Stopped{Complete} — would mark the issue Completed on Done
         // if the stop_map entry were retained.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Stopped {
-                status: StopEventStatus::Complete,
-                comment: None,
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Stopped {
+                    status: StopEventStatus::Complete,
+                    comment: None,
+                },
             },
-        });
+        )
+        .await;
 
-        // Emit Error — global subscriber should fail the issue AND clear the
-        // stop_map entry for this session.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Error {
-                message: "simulated error".into(),
+        // Process Error — should fail the issue AND clear the stop_map entry.
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Error {
+                    message: "simulated error".into(),
+                },
             },
-        });
+        )
+        .await;
 
-        // Wait for the issue to become Failed.
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
-            if fetched.status == IssueStatus::Failed {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not become Failed within 3s (status={})",
-                fetched.status
-            );
-        }
+        let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            IssueStatus::Failed,
+            "issue must be Failed after Error event"
+        );
 
         // Reset issue back to InProgress so it can transition again.
         let mut reset_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
         reset_issue.status = IssueStatus::InProgress;
         state.db.update_issue(&reset_issue).await.unwrap();
 
-        // Now emit Done WITHOUT a preceding Stopped for this session.
+        // Process Done WITHOUT a preceding Stopped for this session.
         // Because Error already cleared the stop_map entry, the subscriber
         // must park the issue as Waiting (not Completed).
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Done,
-        });
-
-        let deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
-            if fetched.status == IssueStatus::Waiting {
-                break;
-            }
-            assert_ne!(
-                fetched.status,
-                IssueStatus::Completed,
-                "issue became Completed — stop_map entry was not cleared by Error"
-            );
-            assert!(
-                tokio::time::Instant::now() <= deadline2,
-                "issue did not become Waiting within 3s after Done (status={})",
-                fetched.status
-            );
-        }
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let final_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
         assert_eq!(
