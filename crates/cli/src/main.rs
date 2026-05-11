@@ -462,7 +462,7 @@ enum IssueAction {
         blocked_on: Option<Vec<String>>,
         #[arg(long, help = "New git branch name for this issue.")]
         branch: Option<String>,
-        #[arg(long, help = "Set the issue status. Only 'in_progress' is accepted here; use dedicated commands for other transitions (cancel, complete, reopen).")]
+        #[arg(long, help = "Set the issue status (e.g. in_progress to auto-start, open, cancelled).")]
         status: Option<String>,
     },
     #[command(

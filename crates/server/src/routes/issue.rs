@@ -226,19 +226,27 @@ pub async fn cancel_issue(
 
 /// PATCH /issues/:id/status — update an issue's status.
 ///
-/// Only `in_progress` is accepted.  When the new status is `in_progress`, this handler:
-/// 1. Checks the issue has an assignee (returns 400 if not).
-/// 2. If the issue has a linked session in `Failed` state, marks that session
-///    `Cancelled` and clears the `session_id` on the issue.
-/// 3. If the issue is in `Waiting` state (has an existing session), calls
-///    `issue_service.resume_issue()` so the lifecycle subscriber can resume the harness.
-/// 4. Otherwise calls `issue_service.start_issue()` and the lifecycle subscriber spawns
-///    the harness.
-/// 5. Returns the issue in `in_progress` state.
+/// Accepted status values and their behaviour:
 ///
-/// All other status values return `400 Bad Request` — they each have a dedicated
-/// endpoint (`cancel`, `complete`, `reopen`) that correctly handles session cleanup
-/// and event emission.
+/// - `in_progress` — starts or resumes the issue:
+///   1. Checks the issue has an assignee (returns 400 if not).
+///   2. If the issue has a linked session in `Failed` state, marks that session
+///      `Cancelled` and clears the `session_id` on the issue.
+///   3. If the issue is in `Waiting` state (has an existing session), calls
+///      `issue_service.resume_issue()` so the lifecycle subscriber can resume the harness.
+///   4. Otherwise calls `issue_service.start_issue()` and the lifecycle subscriber spawns
+///      the harness.
+///   5. Returns the issue in `in_progress` state.
+///
+/// - `cancelled` — routes through `issue_service.cancel_issue()`, which emits events
+///   and handles session cleanup via the lifecycle subscriber.
+///
+/// - `open` — routes through `issue_service.reopen_issue(id, None)`, which emits events.
+///   No comment is added. Use `POST /issues/:id/reopen` to reopen with a comment.
+///
+/// - `waiting` — returns 400: set automatically by the server, cannot be set via PATCH.
+/// - `failed` — returns 400: set automatically by the server, cannot be set via PATCH.
+/// - `completed` — returns 400: use `POST /issues/:id/complete` (requires `--comment`).
 pub async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -307,31 +315,34 @@ pub async fn update_issue_status(
         return do_start_issue(&state, id).await;
     }
 
-    // All other status values are rejected.  Each has a dedicated endpoint:
-    //   cancelled  → POST /issues/:id/cancel
-    //   completed  → POST /issues/:id/complete
-    //   failed     → set only by the harness error path or orphan sweep
-    //   waiting    → set only by the lifecycle subscriber (stop(waiting))
-    //   open       → POST /issues/:id/reopen
-    //
-    // Routing these through a raw DB write would bypass event emission, session
-    // cleanup, and hooks, so we return 400 with a helpful message instead.
+    // `cancelled` and `open` are routed through the service so that event
+    // emission, session cleanup, and hooks all fire correctly.
+    if new_status == IssueStatus::Cancelled {
+        let issue = state.issue_service.cancel_issue(id).await?;
+        return Ok(Json(issue));
+    }
+
+    if new_status == IssueStatus::Open {
+        let issue = state.issue_service.reopen_issue(id, None).await?;
+        return Ok(Json(issue));
+    }
+
+    // The remaining statuses (`waiting`, `failed`, `completed`) cannot be set
+    // via PATCH — they are either set automatically by the server or require a
+    // dedicated endpoint with additional required input.
     let hint = match new_status {
-        IssueStatus::Cancelled => {
-            "use `POST /issues/:id/cancel` (or `ns2 issue cancel --id <id>`)".to_string()
-        }
         IssueStatus::Completed => {
-            "use `POST /issues/:id/complete` (or `ns2 issue complete --id <id> --comment <text>`)".to_string()
+            "use `POST /issues/:id/complete` (requires --comment)".to_string()
         }
-        IssueStatus::Open => {
-            "use `POST /issues/:id/reopen` (or `ns2 issue reopen --id <id>`)".to_string()
+        IssueStatus::Waiting => {
+            "'waiting' is set automatically by the server and cannot be set via PATCH".to_string()
         }
-        IssueStatus::Failed | IssueStatus::Waiting => {
-            format!("'{new_status}' is set automatically by the server; it cannot be set via PATCH")
+        IssueStatus::Failed => {
+            "'failed' is set automatically by the server and cannot be set via PATCH".to_string()
         }
-        IssueStatus::InProgress => unreachable!("in_progress handled above"),
+        IssueStatus::InProgress | IssueStatus::Cancelled | IssueStatus::Open => {
+            unreachable!("handled above")
+        }
     };
-    Err(Error::BadRequest(format!(
-        "PATCH /issues/:id/status only accepts 'in_progress'; {hint}"
-    )))
+    Err(Error::BadRequest(hint))
 }

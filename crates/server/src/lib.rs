@@ -417,15 +417,97 @@ mod tests {
 
     /// Create an isolated temporary git root for tests that spawn a harness.
     ///
-    /// Sets up a minimal `.ns2/agents/` directory with stub agent files for every
-    /// agent name used in the server test suite, so the harness never reads from
-    /// the real repository's `.ns2/agents/` directory.
+    /// Sets up:
+    /// - A bare origin git repository + a local clone with an initial commit, so
+    ///   that `ensure_worktree` (called by `resolve_session_cwd`) can create real
+    ///   worktrees inside the temp directory rather than requiring a live remote.
+    /// - A `ns2.toml` that sets `worktrees.path` to a `worktrees/` subdirectory
+    ///   inside the temp root, keeping all worktrees isolated from the real repo.
+    /// - A minimal `.ns2/agents/` directory with stub agent files for every agent
+    ///   name used in the server test suite, so the harness never reads from the
+    ///   real repository's `.ns2/agents/` directory.
     ///
-    /// The `TempDir` is leaked so the directory stays alive for the duration of the
-    /// test process.  Memory is reclaimed by the OS at process exit.
+    /// The `TempDir` handles are leaked so the directories stay alive for the
+    /// duration of the test process.  Memory is reclaimed by the OS at process exit.
     pub fn make_isolated_git_root() -> std::path::PathBuf {
         let tmp = tempfile::TempDir::new().expect("TempDir::new");
         let root = tmp.path().to_owned();
+
+        // ── bare origin ────────────────────────────────────────────────────────
+        let origin_tmp = tempfile::TempDir::new().expect("TempDir::new for origin");
+        let origin_path = origin_tmp.path().to_owned();
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(&origin_path)
+            .status()
+            .expect("git init --bare for test origin");
+
+        // ── initialise the local clone ─────────────────────────────────────────
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git init for test root");
+
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", &origin_path.to_string_lossy()])
+            .current_dir(&root)
+            .status()
+            .expect("git remote add origin");
+
+        for (k, v) in &[("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&root)
+                .status()
+                .unwrap();
+        }
+
+        // Write a placeholder commit so `origin/main` exists and `ensure_worktree`
+        // can use it as the start point when creating new worktree branches.
+        std::fs::write(root.join(".gitkeep"), "").expect("write .gitkeep");
+        std::process::Command::new("git")
+            .args(["add", ".gitkeep"])
+            .current_dir(&root)
+            .status()
+            .expect("git add .gitkeep");
+        std::process::Command::new("git")
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .expect("git commit init");
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git push origin main");
+
+        // Set origin/HEAD so `detect_remote_default_branch` works.
+        std::process::Command::new("git")
+            .args(["remote", "set-head", "origin", "--auto"])
+            .current_dir(&root)
+            .status()
+            .expect("git remote set-head");
+
+        // ── worktrees config ───────────────────────────────────────────────────
+        // Point worktrees.path at a subdirectory inside the temp root so all
+        // worktrees created during tests are fully isolated.
+        let worktrees_dir = root.join("worktrees");
+        std::fs::create_dir_all(&worktrees_dir).expect("create worktrees dir");
+        std::fs::write(
+            root.join("ns2.toml"),
+            format!(
+                "[worktrees]\npath = \"{}\"\n",
+                worktrees_dir.to_string_lossy()
+            ),
+        )
+        .expect("write ns2.toml");
+
+        // ── stub agents ────────────────────────────────────────────────────────
         let agents_dir = root.join(".ns2").join("agents");
         std::fs::create_dir_all(&agents_dir).expect("create .ns2/agents");
 
@@ -449,8 +531,9 @@ mod tests {
             .expect("write stub agent");
         }
 
-        // Leak the TempDir: this keeps the directory alive until the test process
-        // exits, at which point the OS cleans it up.
+        // Leak both TempDirs: this keeps the directories alive until the test
+        // process exits, at which point the OS cleans them up.
+        Box::leak(Box::new(origin_tmp));
         Box::leak(Box::new(tmp));
         root
     }
@@ -1880,7 +1963,7 @@ mod tests {
             title: "Linked issue".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -1982,7 +2065,7 @@ mod tests {
             title: "Waiting issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2429,7 +2512,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Has assignee", "body": "B", "branch": "", "assignee": "swe"
+                    "title": "Has assignee", "body": "B", "branch": "issue-branch", "assignee": "swe"
                 }),
             ))
             .await
@@ -2546,7 +2629,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", &serde_json::json!({
-                "title": "Auto complete test", "body": "body", "branch": "", "assignee": "test-agent-no-disk-def"
+                "title": "Auto complete test", "body": "body", "branch": "issue-branch", "assignee": "test-agent-no-disk-def"
             })))
             .await
             .unwrap();
@@ -2796,7 +2879,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: None,
             session_id: Some(session.id),
             parent_id: None,
@@ -2919,7 +3002,7 @@ mod tests {
             title: "Issue A".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2934,7 +3017,7 @@ mod tests {
             title: "Issue B".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -3011,7 +3094,7 @@ mod tests {
             title: "Already Running Issue".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
             parent_id: None,
@@ -3096,7 +3179,7 @@ mod tests {
             title: "Error clears stop map".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -3180,7 +3263,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: None,
             session_id: Some(Uuid::new_v4()),
             parent_id: None,
@@ -3487,7 +3570,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "My Title",
                     "body": "My Body",
-                    "branch": "",
+                    "branch": "issue-branch",
                     "assignee": "test-agent"
                 }),
             ))
@@ -3603,7 +3686,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "PM Task",
                     "body": "Do the thing",
-                    "branch": "",
+                    "branch": "issue-branch",
                     "assignee": "product-manager"
                 }),
             ))
@@ -3722,7 +3805,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Watcher waiting test",
                     "body": "Please respond",
-                    "branch": "",
+                    "branch": "issue-branch",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -3817,7 +3900,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Error test issue",
                     "body": "trigger an error",
-                    "branch": "",
+                    "branch": "issue-branch",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -3887,7 +3970,7 @@ mod tests {
             title: "Multi-turn test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,
@@ -4415,7 +4498,7 @@ mod tests {
             title: "No text test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,
@@ -4940,7 +5023,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Work", "body": "do work", "branch": "", "assignee": "test-agent"
+                    "title": "Work", "body": "do work", "branch": "issue-branch", "assignee": "test-agent"
                 }),
             ))
             .await
@@ -5046,7 +5129,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Lifecycle test",
                     "body": "body",
-                    "branch": "",
+                    "branch": "issue-branch",
                     "assignee": "test-agent"
                 }),
             ))
@@ -5170,7 +5253,7 @@ mod tests {
             title: "Failed issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Failed,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(old_session_id),
             parent_id: None,
@@ -5239,7 +5322,7 @@ mod tests {
             title: "Waiting issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(waiting_session_id),
             parent_id: None,
@@ -5323,7 +5406,7 @@ mod tests {
             title: "Cancelled issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Cancelled,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: None,
             parent_id: None,
@@ -5374,7 +5457,7 @@ mod tests {
             title: "Cancelled issue with session".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Cancelled,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(cancelled_session_id),
             parent_id: None,
@@ -5425,7 +5508,7 @@ mod tests {
             title: "Running issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
             parent_id: None,
@@ -5465,7 +5548,7 @@ mod tests {
             title: "Waiting no-session issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: None,
             parent_id: None,
@@ -5815,39 +5898,109 @@ mod tests {
     }
 
 
-    /// `PATCH /issues/:id/status` with any status other than `in_progress` must
-    /// return 400 — those transitions have dedicated endpoints (`cancel`, `complete`,
-    /// `reopen`).  The direct DB write path was removed because it bypassed event
-    /// emission, session cleanup, and hooks.
+    /// `PATCH /issues/:id/status` routes `cancelled` and `open` through the service
+    /// (emitting events), while `waiting`, `failed`, and `completed` return 400.
     #[tokio::test]
-    async fn test_patch_issue_status_non_in_progress_returns_400() {
-        let (app, _state) = test_app_with_state().await;
+    #[allow(clippy::too_many_lines)]
+    async fn test_patch_issue_status_routing() {
+        let (app, state) = test_app_with_state().await;
 
-        // Create an open issue.
+        // ── cancelled: must succeed and return status=cancelled ───────────────
+        // Create a fresh open issue.
         let create_resp = app
             .clone()
             .oneshot(issue_req(
                 "POST",
                 "/issues",
-                &serde_json::json!({
-                    "title": "Status update test",
-                    "body": "body"
-                }),
+                &serde_json::json!({"title": "Status routing test", "body": "body"}),
             ))
             .await
             .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let issue_id = created["id"].as_str().unwrap().to_string();
+        let b = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let id1 = created["id"].as_str().unwrap().to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/issues/{id1}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"status": "cancelled"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PATCH /status cancelled must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "cancelled", "issue must be cancelled");
+        // Verify the DB was updated via the service (not a raw write).
+        let db_issue = state.db.get_issue(id1.clone()).await.unwrap();
+        assert_eq!(
+            db_issue.status,
+            types::IssueStatus::Cancelled,
+            "DB must reflect cancelled status"
+        );
 
-        // Each non-in_progress status must be rejected with 400.
-        for status in ["waiting", "completed", "failed", "cancelled", "open"] {
+        // ── open: must succeed and return status=open (reopen a cancelled issue) ─
+        // The issue is now cancelled; reopening it should set it back to open.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/issues/{id1}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"status": "open"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "PATCH /status open (reopen) must return 200"
+        );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open", "issue must be open after reopen");
+        let db_issue = state.db.get_issue(id1.clone()).await.unwrap();
+        assert_eq!(
+            db_issue.status,
+            types::IssueStatus::Open,
+            "DB must reflect open status after reopen"
+        );
+
+        // ── waiting / failed / completed: must return 400 ─────────────────────
+        // Create a fresh open issue for the 400 checks.
+        let create_resp2 = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({"title": "Status routing test 2", "body": "body"}),
+            ))
+            .await
+            .unwrap();
+        let b2 = response_body_bytes(create_resp2).await;
+        let created2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        let id2 = created2["id"].as_str().unwrap().to_string();
+        for status in ["waiting", "failed", "completed"] {
             let resp = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("PATCH")
-                        .uri(format!("/issues/{issue_id}/status"))
+                        .uri(format!("/issues/{id2}/status"))
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::to_vec(&serde_json::json!({"status": status})).unwrap(),
@@ -5889,7 +6042,7 @@ mod tests {
             title: "Cancel test".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -5991,7 +6144,7 @@ mod tests {
             title: "Route cancel test".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session_id),
             parent_id: None,

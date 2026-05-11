@@ -135,7 +135,7 @@ mod tests {
             title: "Test issue".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "test-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session_id),
             parent_id: None,
