@@ -5868,6 +5868,127 @@ mod tests {
         );
     }
 
+    // ─── POST /issues/:id/cancel route tests ─────────────────────────────────
+
+    /// POST /issues/:id/cancel must return the cancelled issue and, via the
+    /// lifecycle subscriber, drop the session `msg_sender` and mark the session
+    /// Cancelled in the DB.  The route itself must NOT touch `msg_senders`
+    /// directly — all session cleanup is delegated to the subscriber.
+    #[tokio::test]
+    async fn test_cancel_issue_route_delegates_cleanup_to_subscriber() {
+        // test_app_with_state spawns both the hook evaluator and the lifecycle
+        // subscriber, so cleanup happens through the event bus path.
+        let (app, state) = test_app_with_state().await;
+
+        // Create a Running session.
+        let session_id = Uuid::new_v4();
+        let session = types::Session {
+            id: session_id,
+            name: "route-cancel-test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some("bot".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create an InProgress issue linked to the session.
+        let issue = types::Issue {
+            id: "rc-c1".to_string(),
+            title: "Route cancel test".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Insert a msg_sender so we can detect removal.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(1);
+        {
+            let mut senders = state.msg_senders.lock().await;
+            senders.insert(session_id, tx);
+        }
+
+        // Confirm sender is present before cancel.
+        {
+            let senders = state.msg_senders.lock().await;
+            assert!(
+                senders.contains_key(&session_id),
+                "msg_sender must be present before cancel"
+            );
+            drop(senders);
+        }
+
+        // POST /issues/rc-c1/cancel
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/issues/rc-c1/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cancel_issue must return 200"
+        );
+
+        // Verify the returned issue is Cancelled.
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "cancelled",
+            "returned issue must have status=cancelled"
+        );
+
+        // Wait for the lifecycle subscriber to remove the msg_sender and update
+        // the session status (subscriber is async, so we poll with a deadline).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            let still_present = senders.contains_key(&session_id);
+            drop(senders);
+            if !still_present {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "msg_sender was not removed within 3 s after cancel_issue"
+            );
+        }
+
+        // Verify msg_sender is gone.
+        {
+            let senders = state.msg_senders.lock().await;
+            assert!(
+                !senders.contains_key(&session_id),
+                "msg_sender must be removed after cancel_issue"
+            );
+            drop(senders);
+        }
+
+        // Verify session is Cancelled in DB.
+        let db_session = state.db.get_session(session_id).await.unwrap();
+        assert_eq!(
+            db_session.status,
+            types::SessionStatus::Cancelled,
+            "session must be marked Cancelled in DB after cancel_issue"
+        );
+    }
+
     // ─── /named-events route integration tests ────────────────────────────────
 
     fn named_event_req(method: &str, uri: &str, body: &serde_json::Value) -> Request<Body> {

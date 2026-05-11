@@ -211,28 +211,16 @@ pub async fn reopen_issue(
 
 /// POST /issues/:id/cancel — cancel a running or open issue.
 ///
-/// Marks the issue `cancelled`. If the issue has a linked session, also drops
-/// the session's msg sender (terminating the harness) and marks the session
-/// `cancelled` in the DB.
+/// Marks the issue `cancelled` and returns it.  All session cleanup
+/// (dropping the msg sender, marking the session Cancelled in the DB) is
+/// handled by the global issue lifecycle subscriber when it receives the
+/// `IssueEvent::StatusChanged { to: Cancelled }` event emitted by
+/// `issue_service.cancel_issue()`.
 pub async fn cancel_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
     let issue = state.issue_service.cancel_issue(id).await?;
-
-    if let Some(session_id) = issue.session_id {
-        // Drop the msg sender so the harness exits cleanly.
-        {
-            let mut senders = state.msg_senders.lock().await;
-            senders.remove(&session_id);
-        }
-        // Update session status to cancelled.
-        let _ = state
-            .db
-            .update_session_status(session_id, types::SessionStatus::Cancelled)
-            .await;
-    }
-
     Ok(Json(issue))
 }
 
