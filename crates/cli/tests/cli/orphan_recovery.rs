@@ -1,8 +1,6 @@
-mod common;
-
 use predicates::prelude::*;
 
-fn write_swe_agent(h: &common::TestHarness) {
+fn write_swe_agent(h: &super::common::TestHarness) {
     let agents_dir = h.repo_dir.path().join(".ns2/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -16,7 +14,7 @@ fn write_swe_agent(h: &common::TestHarness) {
 
 #[test]
 fn orphan_session_marked_failed_on_restart() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -39,7 +37,7 @@ fn orphan_session_marked_failed_on_restart() {
 
 #[test]
 fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -92,7 +90,7 @@ fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
 
 #[test]
 fn reopen_failed_issue_transitions_to_open() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -107,9 +105,39 @@ fn reopen_failed_issue_transitions_to_open() {
         "swe",
     ]);
 
+    // Start the issue so it gets a linked session, then wait for it to finish.
+    h.ns2_stdout(&["issue", "edit", "--id", &issue_id, "--status", "in_progress"]);
+    h.ns2_stdout(&["issue", "wait", "--id", &issue_id]);
+
+    // Fetch the session_id so we can force it back to running for the orphan sweep.
+    let issue_json = h.http_get(&format!("/issues/{issue_id}"));
+    let session_id = {
+        let v: serde_json::Value = serde_json::from_str(&issue_json).unwrap();
+        v["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Simulate the server crashing mid-run by forcing session and issue back to
+    // running/in_progress, then restarting the server. The orphan sweep will
+    // transition the issue to `failed`.
+    h.http_patch(
+        &format!("/sessions/{session_id}/status"),
+        r#"{"status":"running"}"#,
+    );
     h.http_patch(
         &format!("/issues/{issue_id}/status"),
-        r#"{"status":"failed"}"#,
+        r#"{"status":"in_progress"}"#,
+    );
+
+    h.stop_server();
+    h.start_server();
+
+    // Give the orphan sweep a moment to run.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let body = h.http_get(&format!("/issues/{issue_id}"));
+    assert!(
+        body.contains(r#""status":"failed""#) || body.contains(r#""status": "failed""#),
+        "issue must be 'failed' after orphan sweep, got: {body}",
     );
 
     h.ns2()
@@ -127,7 +155,7 @@ fn reopen_failed_issue_transitions_to_open() {
 
 #[test]
 fn reopen_open_issue_fails() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -141,7 +169,7 @@ fn reopen_open_issue_fails() {
 
 #[test]
 fn reopen_nonexistent_issue_fails() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2()
