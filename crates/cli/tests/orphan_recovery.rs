@@ -107,9 +107,39 @@ fn reopen_failed_issue_transitions_to_open() {
         "swe",
     ]);
 
+    // Start the issue so it gets a linked session, then wait for it to finish.
+    h.ns2_stdout(&["issue", "edit", "--id", &issue_id, "--status", "in_progress"]);
+    h.ns2_stdout(&["issue", "wait", "--id", &issue_id]);
+
+    // Fetch the session_id so we can force it back to running for the orphan sweep.
+    let issue_json = h.http_get(&format!("/issues/{issue_id}"));
+    let session_id = {
+        let v: serde_json::Value = serde_json::from_str(&issue_json).unwrap();
+        v["session_id"].as_str().unwrap().to_string()
+    };
+
+    // Simulate the server crashing mid-run by forcing session and issue back to
+    // running/in_progress, then restarting the server. The orphan sweep will
+    // transition the issue to `failed`.
+    h.http_patch(
+        &format!("/sessions/{session_id}/status"),
+        r#"{"status":"running"}"#,
+    );
     h.http_patch(
         &format!("/issues/{issue_id}/status"),
-        r#"{"status":"failed"}"#,
+        r#"{"status":"in_progress"}"#,
+    );
+
+    h.stop_server();
+    h.start_server();
+
+    // Give the orphan sweep a moment to run.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let body = h.http_get(&format!("/issues/{issue_id}"));
+    assert!(
+        body.contains(r#""status":"failed""#) || body.contains(r#""status": "failed""#),
+        "issue must be 'failed' after orphan sweep, got: {body}",
     );
 
     h.ns2()

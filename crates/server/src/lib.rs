@@ -5716,9 +5716,13 @@ mod tests {
     }
 
 
+    /// `PATCH /issues/:id/status` with any status other than `in_progress` must
+    /// return 400 — those transitions have dedicated endpoints (`cancel`, `complete`,
+    /// `reopen`).  The direct DB write path was removed because it bypassed event
+    /// emission, session cleanup, and hooks.
     #[tokio::test]
-    async fn test_patch_issue_status_non_in_progress_updates_field() {
-        let (app, state) = test_app_with_state().await;
+    async fn test_patch_issue_status_non_in_progress_returns_400() {
+        let (app, _state) = test_app_with_state().await;
 
         // Create an open issue.
         let create_resp = app
@@ -5737,38 +5741,28 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let issue_id = created["id"].as_str().unwrap().to_string();
 
-        // PATCH /issues/{id}/status with {"status": "waiting"}.
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(format!("/issues/{issue_id}/status"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({"status": "waiting"})).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "PATCH with non-in_progress status must return 200"
-        );
-        let body = response_body_bytes(resp).await;
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v["status"], "waiting",
-            "returned issue must have the new status"
-        );
-
-        // Confirm persistence: fetch from DB directly.
-        let persisted = state.db.get_issue(issue_id).await.unwrap();
-        assert_eq!(
-            persisted.status,
-            types::IssueStatus::Waiting,
-            "DB must persist the new status"
-        );
+        // Each non-in_progress status must be rejected with 400.
+        for status in ["waiting", "completed", "failed", "cancelled", "open"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/issues/{issue_id}/status"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({"status": status})).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "PATCH /status with status={status} must return 400"
+            );
+        }
     }
 
     // ── lifecycle subscriber Cancelled arm test ───────────────────────────────

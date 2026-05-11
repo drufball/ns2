@@ -226,16 +226,19 @@ pub async fn cancel_issue(
 
 /// PATCH /issues/:id/status — update an issue's status.
 ///
-/// When the new status is `in_progress`, this handler:
+/// Only `in_progress` is accepted.  When the new status is `in_progress`, this handler:
 /// 1. Checks the issue has an assignee (returns 400 if not).
 /// 2. If the issue has a linked session in `Failed` state, marks that session
 ///    `Cancelled` and clears the `session_id` on the issue.
-/// 3. If the issue is in `Waiting` state (has an existing session), directly
-///    spawns the harness against the existing session (resume mode).
-/// 4. Otherwise calls `issue_service.start_issue()` and spawns the harness.
+/// 3. If the issue is in `Waiting` state (has an existing session), calls
+///    `issue_service.resume_issue()` so the lifecycle subscriber can resume the harness.
+/// 4. Otherwise calls `issue_service.start_issue()` and the lifecycle subscriber spawns
+///    the harness.
 /// 5. Returns the issue in `in_progress` state.
 ///
-/// For any other status the issue's status is updated directly in the DB.
+/// All other status values return `400 Bad Request` — they each have a dedicated
+/// endpoint (`cancel`, `complete`, `reopen`) that correctly handles session cleanup
+/// and event emission.
 pub async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -304,10 +307,31 @@ pub async fn update_issue_status(
         return do_start_issue(&state, id).await;
     }
 
-    // For all other statuses: simple field update.
-    let mut issue = state.db.get_issue(id.clone()).await?;
-    issue.status = new_status;
-    state.db.update_issue(&issue).await?;
-    let updated = state.db.get_issue(id).await?;
-    Ok(Json(updated))
+    // All other status values are rejected.  Each has a dedicated endpoint:
+    //   cancelled  → POST /issues/:id/cancel
+    //   completed  → POST /issues/:id/complete
+    //   failed     → set only by the harness error path or orphan sweep
+    //   waiting    → set only by the lifecycle subscriber (stop(waiting))
+    //   open       → POST /issues/:id/reopen
+    //
+    // Routing these through a raw DB write would bypass event emission, session
+    // cleanup, and hooks, so we return 400 with a helpful message instead.
+    let hint = match new_status {
+        IssueStatus::Cancelled => {
+            "use `POST /issues/:id/cancel` (or `ns2 issue cancel --id <id>`)".to_string()
+        }
+        IssueStatus::Completed => {
+            "use `POST /issues/:id/complete` (or `ns2 issue complete --id <id> --comment <text>`)".to_string()
+        }
+        IssueStatus::Open => {
+            "use `POST /issues/:id/reopen` (or `ns2 issue reopen --id <id>`)".to_string()
+        }
+        IssueStatus::Failed | IssueStatus::Waiting => {
+            format!("'{new_status}' is set automatically by the server; it cannot be set via PATCH")
+        }
+        IssueStatus::InProgress => unreachable!("in_progress handled above"),
+    };
+    Err(Error::BadRequest(format!(
+        "PATCH /issues/:id/status only accepts 'in_progress'; {hint}"
+    )))
 }
