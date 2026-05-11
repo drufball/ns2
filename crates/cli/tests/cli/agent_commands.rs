@@ -1,10 +1,8 @@
-mod common;
-
 use predicates::prelude::*;
 
 #[test]
 fn agent_list_when_no_agents_dir_shows_message() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args(["agent", "list"])
@@ -15,7 +13,7 @@ fn agent_list_when_no_agents_dir_shows_message() {
 
 #[test]
 fn agent_new_creates_file_with_correct_content() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -41,7 +39,7 @@ fn agent_new_creates_file_with_correct_content() {
 
 #[test]
 fn agent_list_shows_created_agent() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -68,7 +66,7 @@ fn agent_list_shows_created_agent() {
 
 #[test]
 fn agent_list_sorted_alphabetically() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -109,7 +107,7 @@ fn agent_list_sorted_alphabetically() {
 
 #[test]
 fn agent_edit_description_only_preserves_body() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -146,7 +144,7 @@ fn agent_edit_description_only_preserves_body() {
 
 #[test]
 fn agent_edit_body_only_preserves_description() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -183,7 +181,7 @@ fn agent_edit_body_only_preserves_description() {
 
 #[test]
 fn agent_edit_without_flags_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -209,7 +207,7 @@ fn agent_edit_without_flags_fails() {
 
 #[test]
 fn agent_new_duplicate_name_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -244,7 +242,7 @@ fn agent_new_duplicate_name_fails() {
 
 #[test]
 fn agent_new_requires_name() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args(["agent", "new", "--description", "desc", "--body", "body"])

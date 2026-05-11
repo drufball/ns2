@@ -1,12 +1,10 @@
-mod common;
-
 use predicates::prelude::*;
 
 // ── Flow 10: spec new ────────────────────────────────────────────────────────
 
 #[test]
 fn spec_new_creates_file_with_targets() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -31,7 +29,7 @@ fn spec_new_creates_file_with_targets() {
 
 #[test]
 fn spec_new_multiple_targets() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -53,7 +51,7 @@ fn spec_new_multiple_targets() {
 
 #[test]
 fn spec_new_on_existing_path_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -81,7 +79,7 @@ fn spec_new_on_existing_path_fails() {
 
 #[test]
 fn spec_new_without_target_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args(["spec", "new", "notarget.spec.md"])
@@ -93,7 +91,7 @@ fn spec_new_without_target_fails() {
 
 #[test]
 fn spec_sync_clean_exits_zero() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness.setup_codebase_layout();
 
     let main_rs = harness.repo_dir.path().join("crates/cli/src/main.rs");
@@ -135,7 +133,7 @@ fn spec_sync_clean_exits_zero() {
 
 #[test]
 fn spec_sync_stale_after_touch_exits_nonzero() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness.setup_codebase_layout();
 
     let main_rs = harness.repo_dir.path().join("crates/cli/src/main.rs");
@@ -175,7 +173,7 @@ fn spec_sync_stale_after_touch_exits_nonzero() {
 
 #[test]
 fn spec_sync_no_path_finds_all_specs() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness.setup_codebase_layout();
 
     let main_rs = harness.repo_dir.path().join("crates/cli/src/main.rs");
@@ -214,7 +212,7 @@ fn spec_sync_no_path_finds_all_specs() {
 
 #[test]
 fn spec_sync_unverified_spec_treats_all_files_stale() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness.setup_codebase_layout();
 
     harness
@@ -238,7 +236,7 @@ fn spec_sync_unverified_spec_treats_all_files_stale() {
 
 #[test]
 fn spec_sync_skips_specs_without_targets() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness.setup_codebase_layout();
 
     harness.ns2().args(["spec", "sync"]).assert().success();
@@ -248,7 +246,7 @@ fn spec_sync_skips_specs_without_targets() {
 
 #[test]
 fn spec_verify_writes_verified_timestamp() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -277,7 +275,7 @@ fn spec_verify_writes_verified_timestamp() {
 
 #[test]
 fn spec_verify_updates_existing_timestamp() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -327,7 +325,7 @@ fn spec_verify_updates_existing_timestamp() {
 #[test]
 fn spec_verify_preserves_body_and_targets() {
     use std::io::Write;
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -370,7 +368,7 @@ fn spec_verify_preserves_body_and_targets() {
 
 #[test]
 fn spec_verify_multiple_paths_at_once() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     for name in &["a.spec.md", "b.spec.md", "c.spec.md"] {
         harness
             .ns2()
@@ -396,7 +394,7 @@ fn spec_verify_multiple_paths_at_once() {
 
 #[test]
 fn spec_verify_partial_failure_still_verifies_valid() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args([
@@ -443,7 +441,7 @@ fn spec_verify_partial_failure_still_verifies_valid() {
 
 #[test]
 fn spec_verify_nonexistent_path_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     harness
         .ns2()
         .args(["spec", "verify", "does-not-exist.spec.md"])
@@ -453,7 +451,7 @@ fn spec_verify_nonexistent_path_fails() {
 
 #[test]
 fn spec_verify_file_without_targets_fails() {
-    let harness = common::TestHarness::new();
+    let harness = super::common::TestHarness::new();
     let plain = harness.repo_dir.path().join("plain.md");
     std::fs::write(&plain, "# Just a plain markdown file\n\nNo frontmatter.\n").unwrap();
 

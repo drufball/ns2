@@ -1,8 +1,6 @@
-mod common;
-
 use predicates::prelude::*;
 
-fn write_swe_agent(h: &common::TestHarness) {
+fn write_swe_agent(h: &super::common::TestHarness) {
     let agents_dir = h.repo_dir.path().join(".ns2/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -16,7 +14,7 @@ fn write_swe_agent(h: &common::TestHarness) {
 
 #[test]
 fn orphan_session_marked_failed_on_restart() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -39,7 +37,7 @@ fn orphan_session_marked_failed_on_restart() {
 
 #[test]
 fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -92,7 +90,7 @@ fn orphan_session_with_linked_issue_posts_comment_and_fails_issue() {
 
 #[test]
 fn reopen_failed_issue_transitions_to_open() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -157,7 +155,7 @@ fn reopen_failed_issue_transitions_to_open() {
 
 #[test]
 fn reopen_open_issue_fails() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     write_swe_agent(&h);
     h.start_server();
 
@@ -171,7 +169,7 @@ fn reopen_open_issue_fails() {
 
 #[test]
 fn reopen_nonexistent_issue_fails() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2()

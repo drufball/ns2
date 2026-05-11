@@ -1,10 +1,8 @@
-mod common;
-
 #[allow(unused_imports)]
 use predicates::prelude::*;
 
 fn write_agent(
-    h: &common::TestHarness,
+    h: &super::common::TestHarness,
     name: &str,
     body: &str,
     include_project_config: bool,
@@ -33,7 +31,7 @@ fn write_agent(
 
 #[test]
 fn session_with_include_project_config_completes() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     std::fs::write(
         h.repo_dir.path().join("CLAUDE.md"),
@@ -57,7 +55,7 @@ fn session_with_include_project_config_completes() {
 
 #[test]
 fn session_without_include_project_config_ignores_claude_md() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     std::fs::write(
         h.repo_dir.path().join("CLAUDE.md"),
@@ -81,7 +79,7 @@ fn session_without_include_project_config_ignores_claude_md() {
 
 #[test]
 fn missing_claude_md_with_include_project_config_still_completes() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     write_agent(&h, "proj-agent", "You are helpful.", true, "");
     let uuid = h.ns2_stdout(&[
@@ -100,7 +98,7 @@ fn missing_claude_md_with_include_project_config_still_completes() {
 
 #[test]
 fn invalid_import_in_claude_md_produces_warning_not_abort() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     std::fs::write(
         h.repo_dir.path().join("CLAUDE.md"),
@@ -126,7 +124,7 @@ fn invalid_import_in_claude_md_produces_warning_not_abort() {
 
 #[test]
 fn stop_hook_fires_on_session_completion() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     let log_path = h.repo_dir.path().join("stop-hook-log.txt");
     let script_path = h.repo_dir.path().join("stop-hook.sh");
@@ -169,7 +167,7 @@ exit 0
 
 #[test]
 fn project_level_stop_hook_inherited_when_include_project_config() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     let log_path = h.repo_dir.path().join("project-hook-log.txt");
     let script_path = h.repo_dir.path().join("project-hook.sh");
@@ -217,7 +215,7 @@ exit 0
 
 #[test]
 fn commit_guard_exits_zero_on_clean_tree() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     let hooks_dir = h.repo_dir.path().join(".claude/hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
@@ -252,7 +250,7 @@ exit 0
 
 #[test]
 fn commit_guard_exits_nonzero_on_dirty_tree() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     let hooks_dir = h.repo_dir.path().join(".claude/hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
@@ -297,7 +295,7 @@ exit 0
 
 #[test]
 fn commit_guard_exits_nonzero_on_staged_changes() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     let hooks_dir = h.repo_dir.path().join(".claude/hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
@@ -343,7 +341,7 @@ exit 0
 
 #[test]
 fn commit_guard_exits_nonzero_on_unpushed_commits() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
     h.setup_origin();
     // Push initial state so the local branch tracks origin

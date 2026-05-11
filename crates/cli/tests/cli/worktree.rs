@@ -1,6 +1,4 @@
-mod common;
-
-use common::TestHarness;
+use super::common::TestHarness;
 
 fn write_agent(h: &TestHarness, name: &str) {
     let dir = h.repo_dir.path().join(".ns2/agents");
