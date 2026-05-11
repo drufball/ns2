@@ -276,22 +276,20 @@ pub async fn cancel_session(
         .await?;
 
     // Mark any linked issue as failed (the issue wasn't explicitly cancelled).
+    // Route through issue_service so that IssueEvent::CommentAdded and
+    // IssueEvent::StatusChanged { to: Failed } are emitted on the event bus.
     let linked_issues = state
         .db
         .list_issues_by_session_id(id)
         .await
         .unwrap_or_default();
-    for mut issue in linked_issues {
-        use types::{IssueComment, IssueStatus};
+    for issue in linked_issues {
+        use types::IssueStatus;
         if matches!(issue.status, IssueStatus::InProgress | IssueStatus::Open) {
-            issue.comments.push(IssueComment {
-                author: "system".to_string(),
-                created_at: chrono::Utc::now(),
-                body: "session cancelled".to_string(),
-            });
-            issue.status = IssueStatus::Failed;
-            issue.updated_at = chrono::Utc::now();
-            let _ = state.db.update_issue(&issue).await;
+            let _ = state
+                .issue_service
+                .fail_issue(&issue.id, "session cancelled".to_string())
+                .await;
         }
     }
 

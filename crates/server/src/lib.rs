@@ -1749,6 +1749,103 @@ mod tests {
         );
     }
 
+    /// Cancelling a session that has a linked `InProgress` issue must emit
+    /// `IssueEvent::CommentAdded` and `IssueEvent::StatusChanged { to: Failed }`
+    /// through the event bus (by routing through `IssueService::fail_issue`).
+    #[tokio::test]
+    async fn test_cancel_session_emits_issue_events_for_linked_issue() {
+        use events::{IssueEvent, SystemEvent};
+
+        let (app, state) = test_app_with_state().await;
+
+        // Subscribe to the event bus BEFORE sending the cancel request.
+        let mut rx = state.event_bus.subscribe();
+
+        // Create a session in Created state.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "cancel-event-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create an InProgress issue linked to this session.
+        let issue = types::Issue {
+            id: "cancel-evt-01".to_string(),
+            title: "Linked issue".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: String::new(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // POST /sessions/:id/cancel
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/cancel", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cancel_session should return 200 for a Created session"
+        );
+
+        // Drain the event bus and collect all IssueEvents.
+        let mut comment_added = false;
+        let mut status_changed_to_failed = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                SystemEvent::Issue(IssueEvent::CommentAdded { ref issue, ref comment })
+                    if issue.id == "cancel-evt-01" && comment.body == "session cancelled" =>
+                {
+                    comment_added = true;
+                }
+                SystemEvent::Issue(IssueEvent::StatusChanged {
+                    ref issue,
+                    to: IssueStatus::Failed,
+                    ..
+                }) if issue.id == "cancel-evt-01" => {
+                    status_changed_to_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            comment_added,
+            "IssueEvent::CommentAdded must be emitted when a session is cancelled"
+        );
+        assert!(
+            status_changed_to_failed,
+            "IssueEvent::StatusChanged {{ to: Failed }} must be emitted when a session is cancelled"
+        );
+
+        // The issue must be Failed in the DB.
+        let fetched = state.db.get_issue("cancel-evt-01".to_string()).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            IssueStatus::Failed,
+            "linked issue must be Failed in the DB after session cancel"
+        );
+    }
+
     /// Resuming a Waiting session via POST /sessions/:id/messages must spawn
     /// a harness with the linked issue's ID so the issue watcher is active.
     ///
