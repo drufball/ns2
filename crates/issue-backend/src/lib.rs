@@ -919,11 +919,11 @@ mod tests {
     }
 
     /// Helper: write a test shell script to a temp file and return the path.
-    fn write_test_script(content: &str) -> tempfile::NamedTempFile {
+    fn write_test_script(content: &str) -> tempfile::TempPath {
         use std::io::Write as _;
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
-        // Make executable
+        f.flush().unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -931,7 +931,8 @@ mod tests {
             perms.set_mode(0o755);
             f.as_file().set_permissions(perms).unwrap();
         }
-        f
+        // Close the write handle before exec so Linux doesn't return ETXTBSY.
+        f.into_temp_path()
     }
 
     #[tokio::test]
@@ -940,7 +941,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": true}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let issue = make_issue("ab12");
         let result = backend.create(&issue).await;
@@ -955,7 +956,7 @@ mod tests {
         );
         let script = write_test_script(&script_content);
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend.get("ab12").await;
         assert!(result.is_ok(), "get should return Ok(issue), got: {result:?}");
@@ -968,7 +969,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": true, \"issues\": []}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend
             .list(IssueFilter {
@@ -987,7 +988,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": true}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let issue = make_issue("ab12");
         let result = backend.save(&issue).await;
@@ -1000,7 +1001,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": true}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend.delete("ab12").await;
         assert!(result.is_ok(), "delete should return Ok(()), got: {result:?}");
@@ -1012,7 +1013,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": false, \"not_found\": true, \"error\": \"not found\"}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend.get("xxxx").await;
         assert!(
@@ -1027,7 +1028,7 @@ mod tests {
             "#!/bin/sh\necho '{\"ok\": false, \"error\": \"some error\"}'\n",
         );
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend.get("ab12").await;
         assert!(
@@ -1040,7 +1041,7 @@ mod tests {
     async fn shell_backend_nonzero_exit_maps_to_other_error() {
         let script = write_test_script("#!/bin/sh\nexit 1\n");
         let backend = ShellIssueBackend::new(
-            script.path().to_str().unwrap().to_string(),
+            script.to_str().unwrap().to_string(),
         );
         let result = backend.delete("ab12").await;
         assert!(
@@ -1078,7 +1079,7 @@ fi
 "#,
         );
         let backend =
-            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+            ShellIssueBackend::new(script.to_str().unwrap().to_string());
         let issue = make_issue("ab12");
         let result = backend.create(&issue).await;
         assert!(
@@ -1103,7 +1104,7 @@ fi
 "#
         ));
         let backend =
-            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+            ShellIssueBackend::new(script.to_str().unwrap().to_string());
         let result = backend.get("ab12").await;
         assert!(
             result.is_ok(),
@@ -1126,7 +1127,7 @@ fi
 "#,
         );
         let backend =
-            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+            ShellIssueBackend::new(script.to_str().unwrap().to_string());
         let result = backend
             .list(IssueFilter {
                 status: None,
@@ -1155,7 +1156,7 @@ fi
 "#,
         );
         let backend =
-            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+            ShellIssueBackend::new(script.to_str().unwrap().to_string());
         let issue = make_issue("ab12");
         let result = backend.save(&issue).await;
         assert!(
@@ -1179,7 +1180,7 @@ fi
 "#,
         );
         let backend =
-            ShellIssueBackend::new(script.path().to_str().unwrap().to_string());
+            ShellIssueBackend::new(script.to_str().unwrap().to_string());
         let result = backend.delete("ab12").await;
         assert!(
             result.is_ok(),
@@ -1301,7 +1302,7 @@ command = "/path/to/backend.sh"
         let config = IssueBackendConfig {
             backend: BackendKind::Shell,
             shell: Some(ShellConfig {
-                command: script.path().to_str().unwrap().to_string(),
+                command: script.to_str().unwrap().to_string(),
             }),
             github: None,
         };
