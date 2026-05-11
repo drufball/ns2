@@ -76,6 +76,7 @@ fn spawn_hook_evaluator(state: &AppState) {
     let mut rx = state.event_bus.subscribe();
     let hook_store_eval = Arc::clone(&state.hook_store);
     let issue_svc_eval = state.issue_service.clone();
+    let event_bus_eval = state.event_bus.clone();
     tokio::spawn(async move {
         use tokio::sync::broadcast::error::RecvError;
         loop {
@@ -91,12 +92,14 @@ fn spawn_hook_evaluator(state: &AppState) {
                             let hook_clone = hook.clone();
                             let issue_svc = issue_svc_eval.clone();
                             let hook_store_clone = Arc::clone(&hook_store_eval);
+                            let event_bus_clone = event_bus_eval.clone();
                             tokio::spawn(async move {
                                 hooks::execute::run_action(
                                     &hook_clone,
                                     &event_clone,
                                     &issue_svc,
                                     hook_store_clone.as_ref(),
+                                    &event_bus_clone,
                                 )
                                 .await;
                             });
@@ -1627,6 +1630,8 @@ mod tests {
             issue_id: None,
             types: Some("session".into()),
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
 
         let mut received = Vec::new();

@@ -216,6 +216,10 @@ pub enum HookAction {
         timeout_secs: u64,
         blocking: bool,
     },
+    McpNotify {
+        channel_id: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,6 +637,30 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&timer_kind).unwrap();
         assert_eq!(v["type"], "timer");
+    }
+
+    // ── Scenario A: McpNotify round-trip ─────────────────────────────────────
+
+    #[test]
+    fn hook_action_mcp_notify_serde_round_trip() {
+        let action = HookAction::McpNotify {
+            channel_id: "alice".into(),
+            body: "hello".into(),
+        };
+        let json = serde_json::to_string(&action).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(v["type"], "mcp_notify");
+        assert_eq!(v["channel_id"], "alice");
+        assert_eq!(v["body"], "hello");
+
+        let decoded: HookAction = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            HookAction::McpNotify { channel_id, body } => {
+                assert_eq!(channel_id, "alice");
+                assert_eq!(body, "hello");
+            }
+            _ => panic!("expected McpNotify variant"),
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-05-10T18:25:58Z
+verified: 2026-05-10T18:53:22Z
 ---
 
 # Data Model Spec
@@ -98,7 +98,7 @@ Event-driven hooks that fire when a `SystemEvent` matches their filter.
 | `name` | TEXT | human-readable label |
 | `event_names` | TEXT | JSON array of event name strings the hook listens for (e.g. `["issue.created","external.ci-complete"]`); `["*"]` matches all |
 | `filter` | TEXT | optional JSON; field conditions that must match for the hook to fire |
-| `action_type` | TEXT | `send_message`, `create_issue`, or `run_shell` |
+| `action_type` | TEXT | `send_message`, `create_issue`, `run_shell`, or `mcp_notify` |
 | `action` | TEXT | JSON; shape varies by `action_type` |
 | `enabled` | INTEGER | `1` = active, `0` = disabled |
 | `created_by` | TEXT | optional; who created the hook |
@@ -135,6 +135,12 @@ The `types` crate mirrors the DB schema in Rust:
 - `Webhook { secret: Option<String> }` — receives HTTP POST requests at `POST /webhooks/:event_id`; HMAC-SHA256 signature verification is applied when a secret is set
 - `Timer { schedule: String }` — fires on a 5-field cron schedule (e.g. `"0 9 * * 1"` = Monday 9 am UTC)
 
+`HookAction` has four variants:
+- `SendMessage { target, body }` — delivers a rendered message to a session or issue
+- `CreateIssue { title, body, assignee, parent, start }` — creates a new issue (and optionally starts it)
+- `RunShell { command, timeout_secs, blocking }` — runs a shell command
+- `McpNotify { channel_id, body }` — emits a `McpChannelNotification` on the event bus, which the `ns2 mcp` process forwards to Claude Code as a JSON-RPC `notifications/claude/channel` message
+
 `Hook.event_names` is a `Vec<String>` listing the event names the hook reacts to (e.g. `"issue.created"`, `"external.ci-complete"`, `"timer.heartbeat"`). The special value `"*"` matches all events.
 
 ## DB connect
@@ -149,3 +155,4 @@ The `types` crate mirrors the DB schema in Rust:
 - `Issue(IssueEvent)` — issue lifecycle events (created, status changed, comment added)
 - `External { event_id, event_name, payload }` — fired when an external webhook is received; carries the named Event's id and name
 - `TimerFired { event_id, event_name, fired_at }` — fired by the timer scheduler; carries the named Event's id and name
+- `McpChannelNotification { channel_id, body, meta }` — emitted by the `McpNotify` hook action; the `ns2 mcp` process filters the SSE stream for this variant and forwards it to Claude Code as a `notifications/claude/channel` JSON-RPC message. `meta` is a `HashMap<String, String>` populated from the triggering event (e.g. `issue_id`, `from`, `to` for `StatusChanged` events).
