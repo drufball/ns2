@@ -1,6 +1,4 @@
-mod common;
-
-use common::TestHarness;
+use super::common::TestHarness;
 use predicates::prelude::*;
 
 #[test]

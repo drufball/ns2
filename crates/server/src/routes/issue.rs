@@ -211,43 +211,42 @@ pub async fn reopen_issue(
 
 /// POST /issues/:id/cancel — cancel a running or open issue.
 ///
-/// Marks the issue `cancelled`. If the issue has a linked session, also drops
-/// the session's msg sender (terminating the harness) and marks the session
-/// `cancelled` in the DB.
+/// Marks the issue `cancelled` and returns it.  All session cleanup
+/// (dropping the msg sender, marking the session Cancelled in the DB) is
+/// handled by the global issue lifecycle subscriber when it receives the
+/// `IssueEvent::StatusChanged { to: Cancelled }` event emitted by
+/// `issue_service.cancel_issue()`.
 pub async fn cancel_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Issue>, Error> {
     let issue = state.issue_service.cancel_issue(id).await?;
-
-    if let Some(session_id) = issue.session_id {
-        // Drop the msg sender so the harness exits cleanly.
-        {
-            let mut senders = state.msg_senders.lock().await;
-            senders.remove(&session_id);
-        }
-        // Update session status to cancelled.
-        let _ = state
-            .db
-            .update_session_status(session_id, types::SessionStatus::Cancelled)
-            .await;
-    }
-
     Ok(Json(issue))
 }
 
 /// PATCH /issues/:id/status — update an issue's status.
 ///
-/// When the new status is `in_progress`, this handler:
-/// 1. Checks the issue has an assignee (returns 400 if not).
-/// 2. If the issue has a linked session in `Failed` state, marks that session
-///    `Cancelled` and clears the `session_id` on the issue.
-/// 3. If the issue is in `Waiting` state (has an existing session), directly
-///    spawns the harness against the existing session (resume mode).
-/// 4. Otherwise calls `issue_service.start_issue()` and spawns the harness.
-/// 5. Returns the issue in `in_progress` state.
+/// Accepted status values and their behaviour:
 ///
-/// For any other status the issue's status is updated directly in the DB.
+/// - `in_progress` — starts or resumes the issue:
+///   1. Checks the issue has an assignee (returns 400 if not).
+///   2. If the issue has a linked session in `Failed` state, marks that session
+///      `Cancelled` and clears the `session_id` on the issue.
+///   3. If the issue is in `Waiting` state (has an existing session), calls
+///      `issue_service.resume_issue()` so the lifecycle subscriber can resume the harness.
+///   4. Otherwise calls `issue_service.start_issue()` and the lifecycle subscriber spawns
+///      the harness.
+///   5. Returns the issue in `in_progress` state.
+///
+/// - `cancelled` — routes through `issue_service.cancel_issue()`, which emits events
+///   and handles session cleanup via the lifecycle subscriber.
+///
+/// - `open` — routes through `issue_service.reopen_issue(id, None)`, which emits events.
+///   No comment is added. Use `POST /issues/:id/reopen` to reopen with a comment.
+///
+/// - `waiting` — returns 400: set automatically by the server, cannot be set via PATCH.
+/// - `failed` — returns 400: set automatically by the server, cannot be set via PATCH.
+/// - `completed` — returns 400: use `POST /issues/:id/complete` (requires `--comment`).
 pub async fn update_issue_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -316,10 +315,34 @@ pub async fn update_issue_status(
         return do_start_issue(&state, id).await;
     }
 
-    // For all other statuses: simple field update.
-    let mut issue = state.db.get_issue(id.clone()).await?;
-    issue.status = new_status;
-    state.db.update_issue(&issue).await?;
-    let updated = state.db.get_issue(id).await?;
-    Ok(Json(updated))
+    // `cancelled` and `open` are routed through the service so that event
+    // emission, session cleanup, and hooks all fire correctly.
+    if new_status == IssueStatus::Cancelled {
+        let issue = state.issue_service.cancel_issue(id).await?;
+        return Ok(Json(issue));
+    }
+
+    if new_status == IssueStatus::Open {
+        let issue = state.issue_service.reopen_issue(id, None).await?;
+        return Ok(Json(issue));
+    }
+
+    // The remaining statuses (`waiting`, `failed`, `completed`) cannot be set
+    // via PATCH — they are either set automatically by the server or require a
+    // dedicated endpoint with additional required input.
+    let hint = match new_status {
+        IssueStatus::Completed => {
+            "use `POST /issues/:id/complete` (requires --comment)".to_string()
+        }
+        IssueStatus::Waiting => {
+            "'waiting' is set automatically by the server and cannot be set via PATCH".to_string()
+        }
+        IssueStatus::Failed => {
+            "'failed' is set automatically by the server and cannot be set via PATCH".to_string()
+        }
+        IssueStatus::InProgress | IssueStatus::Cancelled | IssueStatus::Open => {
+            unreachable!("handled above")
+        }
+    };
+    Err(Error::BadRequest(hint))
 }

@@ -1,6 +1,5 @@
 use assert_cmd::cargo::cargo_bin;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -31,28 +30,28 @@ impl TestHarness {
 
     /// Start the ns2 server on `self.port` and block until it is ready.
     pub fn start_server(&mut self) {
-        let mut proc = Command::new(cargo_bin("ns2"))
+        let proc = Command::new(cargo_bin("ns2"))
             .args(["server", "start", "--port", &self.port.to_string()])
             .env("HOME", self.home_dir.path())
             .env_remove("ANTHROPIC_API_KEY")
             .current_dir(self.repo_dir.path())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn ns2 server");
 
-        let stdout = proc.stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
+        let addr = format!("127.0.0.1:{}", self.port);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            line.clear();
-            assert!(
-                reader.read_line(&mut line).unwrap() != 0,
-                "ns2 server exited before printing 'Listening on'"
-            );
-            if line.contains("Listening on") {
+            if std::net::TcpStream::connect(&addr).is_ok() {
                 break;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server did not accept connections within 10s on {addr}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         self.server = Some(proc);
     }

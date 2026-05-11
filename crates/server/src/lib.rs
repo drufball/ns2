@@ -143,6 +143,109 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
     }
 }
 
+/// Process a single lifecycle event, updating issue/session state accordingly.
+///
+/// This is the core logic extracted from the subscriber loop so tests can
+/// call it directly without timing assumptions.
+///
+/// `stop_map` tracks per-session stop info: `session_id → (status, optional
+/// comment)`.  Entries are inserted on `Stopped` and removed on `Done` or
+/// `Error`.
+pub(crate) async fn process_lifecycle_event(
+    state: &AppState,
+    stop_map: &mut std::collections::HashMap<uuid::Uuid, (events::StopEventStatus, Option<String>)>,
+    event: events::SystemEvent,
+) {
+    use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
+    use types::IssueStatus;
+
+    match event {
+        // ── Session events → issue state ─────────────────────────
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Stopped { status, comment },
+        } => {
+            stop_map.insert(session_id, (status, comment));
+        }
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Done,
+        } => {
+            let issues = state
+                .db
+                .list_issues_by_session_id(session_id)
+                .await
+                .unwrap_or_default();
+            for issue in issues {
+                let (park_status, comment) =
+                    if let Some((stop_status, stop_comment)) = stop_map.remove(&session_id) {
+                        let ps = if matches!(stop_status, StopEventStatus::Complete) {
+                            IssueStatus::Completed
+                        } else {
+                            IssueStatus::Waiting
+                        };
+                        (ps, stop_comment)
+                    } else {
+                        (IssueStatus::Waiting, None)
+                    };
+                let _ = state
+                    .issue_service
+                    .park_issue(&issue.id, park_status, comment, None)
+                    .await;
+            }
+        }
+
+        SystemEvent::Session {
+            session_id,
+            event: SessionEvent::Error { message },
+        } => {
+            stop_map.remove(&session_id);
+            let issues = state
+                .db
+                .list_issues_by_session_id(session_id)
+                .await
+                .unwrap_or_default();
+            for issue in issues {
+                let _ = state
+                    .issue_service
+                    .fail_issue(&issue.id, message.clone())
+                    .await;
+            }
+        }
+
+        // ── Issue state → session actions ─────────────────────────
+
+        SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            to: IssueStatus::InProgress,
+            ..
+        }) => {
+            handle_in_progress(state, issue).await;
+        }
+
+        SystemEvent::Issue(IssueEvent::StatusChanged {
+            issue,
+            to: IssueStatus::Cancelled,
+            ..
+        }) => {
+            // Kill the active session if any
+            if let Some(session_id) = issue.session_id {
+                let mut senders = state.msg_senders.lock().await;
+                senders.remove(&session_id);
+                drop(senders);
+                let _ = state
+                    .db
+                    .update_session_status(session_id, types::SessionStatus::Cancelled)
+                    .await;
+            }
+        }
+
+        _ => {}
+    }
+}
+
 /// Spawn the global issue lifecycle subscriber.
 ///
 /// This single long-lived task handles all cross-cutting session→issue and
@@ -157,10 +260,8 @@ async fn handle_in_progress(state: &AppState, issue: types::Issue) {
 /// - `IssueEvent::StatusChanged { to: InProgress }` — start or resume harness
 /// - `IssueEvent::StatusChanged { to: Cancelled }`  — drop msg sender to kill harness
 pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
-    use events::{IssueEvent, SessionEvent, StopEventStatus, SystemEvent};
-    use std::collections::HashMap;
+    use events::StopEventStatus;
     use tokio::sync::broadcast::error::RecvError;
-    use types::IssueStatus;
 
     let mut rx = state.event_bus.subscribe();
     let state = state.clone();
@@ -175,97 +276,12 @@ pub fn spawn_issue_lifecycle_subscriber(state: &AppState) {
         // typically short-lived relative to session count, and each entry is
         // tiny (~50 bytes).  A periodic sweep could be added if this becomes
         // a concern.
-        let mut stop_map: HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> = HashMap::new();
+        let mut stop_map: std::collections::HashMap<uuid::Uuid, (StopEventStatus, Option<String>)> =
+            std::collections::HashMap::new();
 
         loop {
             match rx.recv().await {
-                Ok(event) => match event {
-                    // ── Session events → issue state ─────────────────────────
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Stopped { status, comment },
-                    } => {
-                        stop_map.insert(session_id, (status, comment));
-                    }
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Done,
-                    } => {
-                        let issues = state
-                            .db
-                            .list_issues_by_session_id(session_id)
-                            .await
-                            .unwrap_or_default();
-                        for issue in issues {
-                            let (park_status, comment) =
-                                if let Some((stop_status, stop_comment)) =
-                                    stop_map.remove(&session_id)
-                                {
-                                    let ps = if matches!(stop_status, StopEventStatus::Complete) {
-                                        IssueStatus::Completed
-                                    } else {
-                                        IssueStatus::Waiting
-                                    };
-                                    (ps, stop_comment)
-                                } else {
-                                    (IssueStatus::Waiting, None)
-                                };
-                            let _ = state
-                                .issue_service
-                                .park_issue(&issue.id, park_status, comment, None)
-                                .await;
-                        }
-                    }
-
-                    SystemEvent::Session {
-                        session_id,
-                        event: SessionEvent::Error { message },
-                    } => {
-                        stop_map.remove(&session_id);
-                        let issues = state
-                            .db
-                            .list_issues_by_session_id(session_id)
-                            .await
-                            .unwrap_or_default();
-                        for issue in issues {
-                            let _ = state
-                                .issue_service
-                                .fail_issue(&issue.id, message.clone())
-                                .await;
-                        }
-                    }
-
-                    // ── Issue state → session actions ─────────────────────────
-
-                    SystemEvent::Issue(IssueEvent::StatusChanged {
-                        issue,
-                        to: IssueStatus::InProgress,
-                        ..
-                    }) => {
-                        handle_in_progress(&state, issue).await;
-                    }
-
-                    SystemEvent::Issue(IssueEvent::StatusChanged {
-                        issue,
-                        to: IssueStatus::Cancelled,
-                        ..
-                    }) => {
-                        // Kill the active session if any
-                        if let Some(session_id) = issue.session_id {
-                            let mut senders = state.msg_senders.lock().await;
-                            senders.remove(&session_id);
-                            drop(senders);
-                            let _ = state
-                                .db
-                                .update_session_status(session_id, types::SessionStatus::Cancelled)
-                                .await;
-                        }
-                    }
-
-                    _ => {}
-                },
+                Ok(event) => process_lifecycle_event(&state, &mut stop_map, event).await,
                 Err(RecvError::Lagged(n)) => {
                     tracing::warn!("Issue lifecycle subscriber lagged by {n} messages");
                 }
@@ -318,6 +334,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         event_bus,
         hook_store,
         event_store,
+        git_root: None,
     };
 
     // Spawn the hook evaluator background task.
@@ -398,6 +415,129 @@ mod tests {
         }
     }
 
+    /// Create an isolated temporary git root for tests that spawn a harness.
+    ///
+    /// Sets up:
+    /// - A bare origin git repository + a local clone with an initial commit, so
+    ///   that `ensure_worktree` (called by `resolve_session_cwd`) can create real
+    ///   worktrees inside the temp directory rather than requiring a live remote.
+    /// - A `ns2.toml` that sets `worktrees.path` to a `worktrees/` subdirectory
+    ///   inside the temp root, keeping all worktrees isolated from the real repo.
+    /// - A minimal `.ns2/agents/` directory with stub agent files for every agent
+    ///   name used in the server test suite, so the harness never reads from the
+    ///   real repository's `.ns2/agents/` directory.
+    ///
+    /// The `TempDir` handles are leaked so the directories stay alive for the
+    /// duration of the test process.  Memory is reclaimed by the OS at process exit.
+    pub fn make_isolated_git_root() -> std::path::PathBuf {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let root = tmp.path().to_owned();
+
+        // ── bare origin ────────────────────────────────────────────────────────
+        let origin_tmp = tempfile::TempDir::new().expect("TempDir::new for origin");
+        let origin_path = origin_tmp.path().to_owned();
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(&origin_path)
+            .status()
+            .expect("git init --bare for test origin");
+
+        // ── initialise the local clone ─────────────────────────────────────────
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git init for test root");
+
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", &origin_path.to_string_lossy()])
+            .current_dir(&root)
+            .status()
+            .expect("git remote add origin");
+
+        for (k, v) in &[("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&root)
+                .status()
+                .unwrap();
+        }
+
+        // Write a placeholder commit so `origin/main` exists and `ensure_worktree`
+        // can use it as the start point when creating new worktree branches.
+        std::fs::write(root.join(".gitkeep"), "").expect("write .gitkeep");
+        std::process::Command::new("git")
+            .args(["add", ".gitkeep"])
+            .current_dir(&root)
+            .status()
+            .expect("git add .gitkeep");
+        std::process::Command::new("git")
+            .args(["-c", "commit.gpgsign=false", "commit", "-m", "init"])
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .expect("git commit init");
+        std::process::Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git push origin main");
+
+        // Set origin/HEAD so `detect_remote_default_branch` works.
+        std::process::Command::new("git")
+            .args(["remote", "set-head", "origin", "--auto"])
+            .current_dir(&root)
+            .status()
+            .expect("git remote set-head");
+
+        // ── worktrees config ───────────────────────────────────────────────────
+        // Point worktrees.path at a subdirectory inside the temp root so all
+        // worktrees created during tests are fully isolated.
+        let worktrees_dir = root.join("worktrees");
+        std::fs::create_dir_all(&worktrees_dir).expect("create worktrees dir");
+        std::fs::write(
+            root.join("ns2.toml"),
+            format!(
+                "[worktrees]\npath = \"{}\"\n",
+                worktrees_dir.to_string_lossy()
+            ),
+        )
+        .expect("write ns2.toml");
+
+        // ── stub agents ────────────────────────────────────────────────────────
+        let agents_dir = root.join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create .ns2/agents");
+
+        // Write minimal stub agent files for every name used in server tests.
+        // All stubs have include_project_config: false so no further filesystem
+        // reads (CLAUDE.md, .claude/settings.json) occur during tests.
+        for name in &[
+            "bot",
+            "product-manager",
+            "swe-agent",
+            "swe",
+            "test-agent",
+            "test-agent-no-disk-def",
+        ] {
+            std::fs::write(
+                agents_dir.join(format!("{name}.md")),
+                format!(
+                    "---\nname: {name}\ndescription: stub for server tests\ninclude_project_config: false\n---\n\nStub agent.\n"
+                ),
+            )
+            .expect("write stub agent");
+        }
+
+        // Leak both TempDirs: this keeps the directories alive until the test
+        // process exits, at which point the OS cleans them up.
+        Box::leak(Box::new(origin_tmp));
+        Box::leak(Box::new(tmp));
+        root
+    }
+
     pub async fn test_state() -> AppState {
         let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
@@ -415,6 +555,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         }
     }
 
@@ -812,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_to_running_session_returns_200() {
-        let (app, _state) = test_app_with_state().await;
+        let (app, state) = test_app_with_state().await;
 
         let create_resp = app
             .clone()
@@ -825,8 +966,22 @@ mod tests {
         let body = response_body_bytes(create_resp).await;
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let id = created["id"].as_str().unwrap().to_owned();
+        let session_id: Uuid = id.parse().unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until the harness has registered its sender in msg_senders.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let resp = app
             .oneshot(
@@ -887,7 +1042,21 @@ mod tests {
         assert_eq!(r1.unwrap().status(), StatusCode::OK);
         assert_eq!(r2.unwrap().status(), StatusCode::OK);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until at least one sender is registered (at most one harness must
+        // have been spawned for this session).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let senders = state.msg_senders.lock().await;
         let sender_count = i32::from(senders.contains_key(&session_id));
@@ -936,7 +1105,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // The create request is synchronous — if no harness was spawned, the
+        // msg_senders map must be empty immediately (no need to sleep).
+        // Yield once to allow any spurious async work to settle.
+        tokio::task::yield_now().await;
 
         let senders = state.msg_senders.lock().await;
         let is_empty = senders.is_empty();
@@ -959,7 +1131,20 @@ mod tests {
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let session_id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Poll until the harness registers its sender in msg_senders.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            if senders.contains_key(&session_id) {
+                break;
+            }
+            drop(senders);
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "harness never registered sender within 3s"
+            );
+        }
 
         let senders = state.msg_senders.lock().await;
         let has_key = senders.contains_key(&session_id);
@@ -1749,6 +1934,103 @@ mod tests {
         );
     }
 
+    /// Cancelling a session that has a linked `InProgress` issue must emit
+    /// `IssueEvent::CommentAdded` and `IssueEvent::StatusChanged { to: Failed }`
+    /// through the event bus (by routing through `IssueService::fail_issue`).
+    #[tokio::test]
+    async fn test_cancel_session_emits_issue_events_for_linked_issue() {
+        use events::{IssueEvent, SystemEvent};
+
+        let (app, state) = test_app_with_state().await;
+
+        // Subscribe to the event bus BEFORE sending the cancel request.
+        let mut rx = state.event_bus.subscribe();
+
+        // Create a session in Created state.
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "cancel-event-test".into(),
+            status: SessionStatus::Created,
+            agent: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create an InProgress issue linked to this session.
+        let issue = types::Issue {
+            id: "cancel-evt-01".to_string(),
+            title: "Linked issue".to_string(),
+            body: "body".to_string(),
+            status: IssueStatus::InProgress,
+            branch: "issue-branch".to_string(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session.id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // POST /sessions/:id/cancel
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/cancel", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cancel_session should return 200 for a Created session"
+        );
+
+        // Drain the event bus and collect all IssueEvents.
+        let mut comment_added = false;
+        let mut status_changed_to_failed = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                SystemEvent::Issue(IssueEvent::CommentAdded { ref issue, ref comment })
+                    if issue.id == "cancel-evt-01" && comment.body == "session cancelled" =>
+                {
+                    comment_added = true;
+                }
+                SystemEvent::Issue(IssueEvent::StatusChanged {
+                    ref issue,
+                    to: IssueStatus::Failed,
+                    ..
+                }) if issue.id == "cancel-evt-01" => {
+                    status_changed_to_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            comment_added,
+            "IssueEvent::CommentAdded must be emitted when a session is cancelled"
+        );
+        assert!(
+            status_changed_to_failed,
+            "IssueEvent::StatusChanged {{ to: Failed }} must be emitted when a session is cancelled"
+        );
+
+        // The issue must be Failed in the DB.
+        let fetched = state.db.get_issue("cancel-evt-01".to_string()).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            IssueStatus::Failed,
+            "linked issue must be Failed in the DB after session cancel"
+        );
+    }
+
     /// Resuming a Waiting session via POST /sessions/:id/messages must spawn
     /// a harness with the linked issue's ID so the issue watcher is active.
     ///
@@ -1783,7 +2065,7 @@ mod tests {
             title: "Waiting issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2230,7 +2512,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Has assignee", "body": "B", "assignee": "swe"
+                    "title": "Has assignee", "body": "B", "branch": "issue-branch", "assignee": "swe"
                 }),
             ))
             .await
@@ -2347,7 +2629,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", &serde_json::json!({
-                "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
+                "title": "Auto complete test", "body": "body", "branch": "issue-branch", "assignee": "test-agent-no-disk-def"
             })))
             .await
             .unwrap();
@@ -2597,7 +2879,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: None,
             session_id: Some(session.id),
             parent_id: None,
@@ -2720,7 +3002,7 @@ mod tests {
             title: "Issue A".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2735,7 +3017,7 @@ mod tests {
             title: "Issue B".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2812,7 +3094,7 @@ mod tests {
             title: "Already Running Issue".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
             parent_id: None,
@@ -2850,8 +3132,8 @@ mod tests {
             "in_progress on a Running session issue must return 400"
         );
 
-        // msg_senders must not have grown.
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        // The request was rejected synchronously with 400, so no harness can have
+        // been spawned.  Check msg_senders immediately — no sleep needed.
         let final_count = {
             let senders = state.msg_senders.lock().await;
             let count = senders.len();
@@ -2871,13 +3153,15 @@ mod tests {
     /// entry from `stop_map`. If Done arrives later for the same session,
     /// the issue must transition to Waiting (not Completed), proving
     /// the `stop_map` was cleared by the Error handler.
+    ///
+    /// Calls `process_lifecycle_event` directly — no background tasks, no sleeps.
     #[tokio::test]
     async fn test_error_clears_stop_map_so_done_produces_waiting() {
         use events::{SessionEvent, StopEventStatus, SystemEvent};
+        use std::collections::HashMap;
         use types::{IssueStatus, Session, SessionStatus};
 
         let state = test_state().await;
-        spawn_issue_lifecycle_subscriber(&state);
 
         // Create a session and an issue linked to it.
         let session = Session {
@@ -2895,7 +3179,7 @@ mod tests {
             title: "Error clears stop map".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -2907,73 +3191,60 @@ mod tests {
         };
         state.db.create_issue(&issue).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let mut stop_map = HashMap::new();
 
-        // Emit Stopped{Complete} — would mark the issue Completed on Done
+        // Process Stopped{Complete} — would mark the issue Completed on Done
         // if the stop_map entry were retained.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Stopped {
-                status: StopEventStatus::Complete,
-                comment: None,
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Stopped {
+                    status: StopEventStatus::Complete,
+                    comment: None,
+                },
             },
-        });
+        )
+        .await;
 
-        // Emit Error — global subscriber should fail the issue AND clear the
-        // stop_map entry for this session.
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Error {
-                message: "simulated error".into(),
+        // Process Error — should fail the issue AND clear the stop_map entry.
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Error {
+                    message: "simulated error".into(),
+                },
             },
-        });
+        )
+        .await;
 
-        // Wait for the issue to become Failed.
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
-            if fetched.status == IssueStatus::Failed {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "issue did not become Failed within 3s (status={})",
-                fetched.status
-            );
-        }
+        let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
+        assert_eq!(
+            fetched.status,
+            IssueStatus::Failed,
+            "issue must be Failed after Error event"
+        );
 
         // Reset issue back to InProgress so it can transition again.
         let mut reset_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
         reset_issue.status = IssueStatus::InProgress;
         state.db.update_issue(&reset_issue).await.unwrap();
 
-        // Now emit Done WITHOUT a preceding Stopped for this session.
+        // Process Done WITHOUT a preceding Stopped for this session.
         // Because Error already cleared the stop_map entry, the subscriber
         // must park the issue as Waiting (not Completed).
-        state.event_bus.send(SystemEvent::Session {
-            session_id: session.id,
-            event: SessionEvent::Done,
-        });
-
-        let deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-            let fetched = state.db.get_issue("ecsm01".to_string()).await.unwrap();
-            if fetched.status == IssueStatus::Waiting {
-                break;
-            }
-            assert_ne!(
-                fetched.status,
-                IssueStatus::Completed,
-                "issue became Completed — stop_map entry was not cleared by Error"
-            );
-            assert!(
-                tokio::time::Instant::now() <= deadline2,
-                "issue did not become Waiting within 3s after Done (status={})",
-                fetched.status
-            );
-        }
+        process_lifecycle_event(
+            &state,
+            &mut stop_map,
+            SystemEvent::Session {
+                session_id: session.id,
+                event: SessionEvent::Done,
+            },
+        )
+        .await;
 
         let final_issue = state.db.get_issue("ecsm01".to_string()).await.unwrap();
         assert_eq!(
@@ -2992,7 +3263,7 @@ mod tests {
             title: "Test issue".into(),
             body: "body".into(),
             status,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: None,
             session_id: Some(Uuid::new_v4()),
             parent_id: None,
@@ -3286,6 +3557,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3298,6 +3570,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "My Title",
                     "body": "My Body",
+                    "branch": "issue-branch",
                     "assignee": "test-agent"
                 }),
             ))
@@ -3400,6 +3673,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3412,6 +3686,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "PM Task",
                     "body": "Do the thing",
+                    "branch": "issue-branch",
                     "assignee": "product-manager"
                 }),
             ))
@@ -3530,6 +3805,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Watcher waiting test",
                     "body": "Please respond",
+                    "branch": "issue-branch",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -3611,6 +3887,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3623,6 +3900,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Error test issue",
                     "body": "trigger an error",
+                    "branch": "issue-branch",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -3692,7 +3970,7 @@ mod tests {
             title: "Multi-turn test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,
@@ -4220,7 +4498,7 @@ mod tests {
             title: "No text test".to_string(),
             body: "body".to_string(),
             status: IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: None,
             parent_id: None,
@@ -4745,7 +5023,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Work", "body": "do work", "assignee": "test-agent"
+                    "title": "Work", "body": "do work", "branch": "issue-branch", "assignee": "test-agent"
                 }),
             ))
             .await
@@ -4851,6 +5129,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Lifecycle test",
                     "body": "body",
+                    "branch": "issue-branch",
                     "assignee": "test-agent"
                 }),
             ))
@@ -4974,7 +5253,7 @@ mod tests {
             title: "Failed issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Failed,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(old_session_id),
             parent_id: None,
@@ -5043,7 +5322,7 @@ mod tests {
             title: "Waiting issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(waiting_session_id),
             parent_id: None,
@@ -5127,7 +5406,7 @@ mod tests {
             title: "Cancelled issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Cancelled,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: None,
             parent_id: None,
@@ -5178,7 +5457,7 @@ mod tests {
             title: "Cancelled issue with session".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Cancelled,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(cancelled_session_id),
             parent_id: None,
@@ -5229,7 +5508,7 @@ mod tests {
             title: "Running issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: Some(running_session_id),
             parent_id: None,
@@ -5269,7 +5548,7 @@ mod tests {
             title: "Waiting no-session issue".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::Waiting,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("test-agent".to_string()),
             session_id: None,
             parent_id: None,
@@ -5619,36 +5898,37 @@ mod tests {
     }
 
 
+    /// `PATCH /issues/:id/status` routes `cancelled` and `open` through the service
+    /// (emitting events), while `waiting`, `failed`, and `completed` return 400.
     #[tokio::test]
-    async fn test_patch_issue_status_non_in_progress_updates_field() {
+    #[allow(clippy::too_many_lines)]
+    async fn test_patch_issue_status_routing() {
         let (app, state) = test_app_with_state().await;
 
-        // Create an open issue.
+        // ── cancelled: must succeed and return status=cancelled ───────────────
+        // Create a fresh open issue.
         let create_resp = app
             .clone()
             .oneshot(issue_req(
                 "POST",
                 "/issues",
-                &serde_json::json!({
-                    "title": "Status update test",
-                    "body": "body"
-                }),
+                &serde_json::json!({"title": "Status routing test", "body": "body"}),
             ))
             .await
             .unwrap();
-        let body = response_body_bytes(create_resp).await;
-        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let issue_id = created["id"].as_str().unwrap().to_string();
-
-        // PATCH /issues/{id}/status with {"status": "waiting"}.
+        let b = response_body_bytes(create_resp).await;
+        let created: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let id1 = created["id"].as_str().unwrap().to_string();
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("PATCH")
-                    .uri(format!("/issues/{issue_id}/status"))
+                    .uri(format!("/issues/{id1}/status"))
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&serde_json::json!({"status": "waiting"})).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"status": "cancelled"})).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -5656,22 +5936,85 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "PATCH with non-in_progress status must return 200"
+            "PATCH /status cancelled must return 200"
         );
         let body = response_body_bytes(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "cancelled", "issue must be cancelled");
+        // Verify the DB was updated via the service (not a raw write).
+        let db_issue = state.db.get_issue(id1.clone()).await.unwrap();
         assert_eq!(
-            v["status"], "waiting",
-            "returned issue must have the new status"
+            db_issue.status,
+            types::IssueStatus::Cancelled,
+            "DB must reflect cancelled status"
         );
 
-        // Confirm persistence: fetch from DB directly.
-        let persisted = state.db.get_issue(issue_id).await.unwrap();
+        // ── open: must succeed and return status=open (reopen a cancelled issue) ─
+        // The issue is now cancelled; reopening it should set it back to open.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/issues/{id1}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"status": "open"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            persisted.status,
-            types::IssueStatus::Waiting,
-            "DB must persist the new status"
+            resp.status(),
+            StatusCode::OK,
+            "PATCH /status open (reopen) must return 200"
         );
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "open", "issue must be open after reopen");
+        let db_issue = state.db.get_issue(id1.clone()).await.unwrap();
+        assert_eq!(
+            db_issue.status,
+            types::IssueStatus::Open,
+            "DB must reflect open status after reopen"
+        );
+
+        // ── waiting / failed / completed: must return 400 ─────────────────────
+        // Create a fresh open issue for the 400 checks.
+        let create_resp2 = app
+            .clone()
+            .oneshot(issue_req(
+                "POST",
+                "/issues",
+                &serde_json::json!({"title": "Status routing test 2", "body": "body"}),
+            ))
+            .await
+            .unwrap();
+        let b2 = response_body_bytes(create_resp2).await;
+        let created2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        let id2 = created2["id"].as_str().unwrap().to_string();
+        for status in ["waiting", "failed", "completed"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/issues/{id2}/status"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({"status": status})).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "PATCH /status with status={status} must return 400"
+            );
+        }
     }
 
     // ── lifecycle subscriber Cancelled arm test ───────────────────────────────
@@ -5699,7 +6042,7 @@ mod tests {
             title: "Cancel test".to_string(),
             body: "body".to_string(),
             status: types::IssueStatus::InProgress,
-            branch: String::new(),
+            branch: "issue-branch".to_string(),
             assignee: Some("bot".to_string()),
             session_id: Some(session.id),
             parent_id: None,
@@ -5768,6 +6111,127 @@ mod tests {
             db_session.status,
             types::SessionStatus::Cancelled,
             "session must be marked Cancelled in DB"
+        );
+    }
+
+    // ─── POST /issues/:id/cancel route tests ─────────────────────────────────
+
+    /// POST /issues/:id/cancel must return the cancelled issue and, via the
+    /// lifecycle subscriber, drop the session `msg_sender` and mark the session
+    /// Cancelled in the DB.  The route itself must NOT touch `msg_senders`
+    /// directly — all session cleanup is delegated to the subscriber.
+    #[tokio::test]
+    async fn test_cancel_issue_route_delegates_cleanup_to_subscriber() {
+        // test_app_with_state spawns both the hook evaluator and the lifecycle
+        // subscriber, so cleanup happens through the event bus path.
+        let (app, state) = test_app_with_state().await;
+
+        // Create a Running session.
+        let session_id = Uuid::new_v4();
+        let session = types::Session {
+            id: session_id,
+            name: "route-cancel-test".into(),
+            status: types::SessionStatus::Running,
+            agent: Some("bot".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_session(&session).await.unwrap();
+
+        // Create an InProgress issue linked to the session.
+        let issue = types::Issue {
+            id: "rc-c1".to_string(),
+            title: "Route cancel test".to_string(),
+            body: "body".to_string(),
+            status: types::IssueStatus::InProgress,
+            branch: "issue-branch".to_string(),
+            assignee: Some("bot".to_string()),
+            session_id: Some(session_id),
+            parent_id: None,
+            ancestor_ids: vec![],
+            blocked_on: vec![],
+            comments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        state.db.create_issue(&issue).await.unwrap();
+
+        // Insert a msg_sender so we can detect removal.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(1);
+        {
+            let mut senders = state.msg_senders.lock().await;
+            senders.insert(session_id, tx);
+        }
+
+        // Confirm sender is present before cancel.
+        {
+            let senders = state.msg_senders.lock().await;
+            assert!(
+                senders.contains_key(&session_id),
+                "msg_sender must be present before cancel"
+            );
+            drop(senders);
+        }
+
+        // POST /issues/rc-c1/cancel
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/issues/rc-c1/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cancel_issue must return 200"
+        );
+
+        // Verify the returned issue is Cancelled.
+        let body = response_body_bytes(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["status"], "cancelled",
+            "returned issue must have status=cancelled"
+        );
+
+        // Wait for the lifecycle subscriber to remove the msg_sender and update
+        // the session status (subscriber is async, so we poll with a deadline).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            let senders = state.msg_senders.lock().await;
+            let still_present = senders.contains_key(&session_id);
+            drop(senders);
+            if !still_present {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "msg_sender was not removed within 3 s after cancel_issue"
+            );
+        }
+
+        // Verify msg_sender is gone.
+        {
+            let senders = state.msg_senders.lock().await;
+            assert!(
+                !senders.contains_key(&session_id),
+                "msg_sender must be removed after cancel_issue"
+            );
+            drop(senders);
+        }
+
+        // Verify session is Cancelled in DB.
+        let db_session = state.db.get_session(session_id).await.unwrap();
+        assert_eq!(
+            db_session.status,
+            types::SessionStatus::Cancelled,
+            "session must be marked Cancelled in DB after cancel_issue"
         );
     }
 

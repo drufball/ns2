@@ -1,6 +1,4 @@
-mod common;
-
-use common::TestHarness;
+use super::common::TestHarness;
 
 #[test]
 fn server_starts_and_health_responds_ok() {
