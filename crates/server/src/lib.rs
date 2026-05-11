@@ -318,6 +318,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         event_bus,
         hook_store,
         event_store,
+        git_root: None,
     };
 
     // Spawn the hook evaluator background task.
@@ -398,6 +399,46 @@ mod tests {
         }
     }
 
+    /// Create an isolated temporary git root for tests that spawn a harness.
+    ///
+    /// Sets up a minimal `.ns2/agents/` directory with stub agent files for every
+    /// agent name used in the server test suite, so the harness never reads from
+    /// the real repository's `.ns2/agents/` directory.
+    ///
+    /// The `TempDir` is leaked so the directory stays alive for the duration of the
+    /// test process.  Memory is reclaimed by the OS at process exit.
+    pub fn make_isolated_git_root() -> std::path::PathBuf {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let root = tmp.path().to_owned();
+        let agents_dir = root.join(".ns2").join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create .ns2/agents");
+
+        // Write minimal stub agent files for every name used in server tests.
+        // All stubs have include_project_config: false so no further filesystem
+        // reads (CLAUDE.md, .claude/settings.json) occur during tests.
+        for name in &[
+            "bot",
+            "product-manager",
+            "swe-agent",
+            "swe",
+            "test-agent",
+            "test-agent-no-disk-def",
+        ] {
+            std::fs::write(
+                agents_dir.join(format!("{name}.md")),
+                format!(
+                    "---\nname: {name}\ndescription: stub for server tests\ninclude_project_config: false\n---\n\nStub agent.\n"
+                ),
+            )
+            .expect("write stub agent");
+        }
+
+        // Leak the TempDir: this keeps the directory alive until the test process
+        // exits, at which point the OS cleans it up.
+        Box::leak(Box::new(tmp));
+        root
+    }
+
     pub async fn test_state() -> AppState {
         let (db, hook_store, event_store) = db::connect("sqlite::memory:").await.unwrap();
         let client = Arc::new(TestClient) as Arc<dyn anthropic::AnthropicClient>;
@@ -415,6 +456,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         }
     }
 
@@ -2327,7 +2369,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Has assignee", "body": "B", "assignee": "swe"
+                    "title": "Has assignee", "body": "B", "branch": "", "assignee": "swe"
                 }),
             ))
             .await
@@ -2444,7 +2486,7 @@ mod tests {
         let create_resp = app
             .clone()
             .oneshot(issue_req("POST", "/issues", &serde_json::json!({
-                "title": "Auto complete test", "body": "body", "assignee": "test-agent-no-disk-def"
+                "title": "Auto complete test", "body": "body", "branch": "", "assignee": "test-agent-no-disk-def"
             })))
             .await
             .unwrap();
@@ -3383,6 +3425,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3395,6 +3438,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "My Title",
                     "body": "My Body",
+                    "branch": "",
                     "assignee": "test-agent"
                 }),
             ))
@@ -3497,6 +3541,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3509,6 +3554,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "PM Task",
                     "body": "Do the thing",
+                    "branch": "",
                     "assignee": "product-manager"
                 }),
             ))
@@ -3627,6 +3673,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Watcher waiting test",
                     "body": "Please respond",
+                    "branch": "",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -3708,6 +3755,7 @@ mod tests {
             event_bus,
             hook_store,
             event_store,
+            git_root: Some(make_isolated_git_root()),
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3720,6 +3768,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Error test issue",
                     "body": "trigger an error",
+                    "branch": "",
                     "assignee": "swe-agent"
                 }),
             ))
@@ -4842,7 +4891,7 @@ mod tests {
                 "POST",
                 "/issues",
                 &serde_json::json!({
-                    "title": "Work", "body": "do work", "assignee": "test-agent"
+                    "title": "Work", "body": "do work", "branch": "", "assignee": "test-agent"
                 }),
             ))
             .await
@@ -4948,6 +4997,7 @@ mod tests {
                 &serde_json::json!({
                     "title": "Lifecycle test",
                     "body": "body",
+                    "branch": "",
                     "assignee": "test-agent"
                 }),
             ))

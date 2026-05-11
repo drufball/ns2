@@ -34,7 +34,7 @@ pub fn spawn_harness_sync(
         session: session_clone.clone(),
         model,
         tools,
-        git_root: None,
+        git_root: state.git_root.clone(),
         cwd: None,
     };
 
