@@ -2,7 +2,7 @@
 targets:
   - crates/server/src/**/*.rs
   - crates/server/Cargo.toml
-verified: 2026-05-10T18:53:22Z
+verified: 2026-06-10T00:00:00Z
 ---
 
 # server crate
@@ -11,7 +11,7 @@ The server crate is the HTTP layer for ns2. It owns the axum router, the runtime
 
 ## What it does
 
-The server handles these families of HTTP endpoints: session management, issue management, SSE event streaming, external webhook ingestion, hook CRUD, and named-event CRUD. Route handlers are intentionally thin — they parse input, call a service or the database, and return a response. No business logic lives in a handler.
+The server handles these families of HTTP endpoints: session management, issue management, SSE event streaming, external webhook ingestion, custom event injection, hook CRUD, and named-event CRUD. Route handlers are intentionally thin — they parse input, call a service or the database, and return a response. No business logic lives in a handler.
 
 On startup, `run(config)` initializes the database, constructs `AppState`, spawns background tasks (hook evaluator, timer scheduler, issue lifecycle subscriber), runs the orphan sweep (see Session Lifecycle Spec), and binds the TCP listener with graceful SIGTERM/Ctrl-C shutdown.
 
@@ -19,7 +19,26 @@ On startup, `run(config)` initializes the database, constructs `AppState`, spawn
 
 - **`lib.rs`** — router construction and the public `run()` entry point. Pure wiring, no business logic.
 - **`state.rs`** — owns `AppState` and the `spawn_harness_sync` function. Single authority over all runtime maps.
-- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, named events, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+- **`routes/`** — thin handlers for sessions, issues, webhooks, hooks, named events, custom event emit, and shared error types. Delegates to `state.rs` or the `issues` crate service.
+
+## IssueBackendConfig and BackendKind
+
+`server` owns the config types for the pluggable issue backend so that `cli` only needs to depend on `server` (not `issue-backend`) for config wiring:
+
+```toml
+# ns2.toml
+[issues]
+backend = "sqlite"   # default; also "shell" or "github"
+
+[issues.shell]
+command = ".ns2/backends/my-backend.sh"
+
+[issues.github]
+owner = "myorg"
+repo  = "myrepo"
+```
+
+`ServerConfig.issue_backend: IssueBackendConfig` carries this config into `server::run()`. `BackendKind` has three variants: `Sqlite` (default), `Shell`, and `GitHub`.
 
 ## Background tasks
 
@@ -27,7 +46,18 @@ Three background tasks are spawned at server startup:
 
 - **Hook evaluator** — subscribes to the `EventBus` and fires hooks whose `event_names` and optional `filter` match incoming `SystemEvent`s.
 - **Timer scheduler** (`hooks::timer::spawn_timer_scheduler`) — wakes every 30 seconds, queries all enabled timer events from `EventStore`, and emits `SystemEvent::TimerFired { event_id, event_name, fired_at }` for any whose 5-field cron schedule falls within the rolling window. Hooks listening for `timer.<name>` are matched by the evaluator.
-- **Issue lifecycle subscriber** (`spawn_issue_lifecycle_subscriber`) — subscribes to the `EventBus` to drive issue status transitions from session events.
+- **Issue lifecycle subscriber** (`spawn_issue_lifecycle_subscriber`) — subscribes to the `EventBus` to drive issue status transitions from session events, and implements human-vs-agent assignment (see below).
+
+## Human vs. agent assignment
+
+When an issue transitions to `in_progress`, the lifecycle subscriber calls `handle_in_progress`. The logic:
+
+1. If the issue has no assignee → return early (no harness spawn, no error).
+2. Check whether `.ns2/agents/<assignee>.md` exists (via `agents::load_agent`).
+3. **No agent definition file** → human assignee: the issue is in `in_progress` status but no harness is spawned. The human is expected to do the work.
+4. **Agent definition exists** → spawn the harness as normal, creating or resuming the session.
+
+This means `PATCH /issues/:id/status` with `in_progress` only requires an assignee to be set — it does **not** require the assignee to map to an agent definition file. Human-vs-agent is resolved at spawn time.
 
 ## AppState and channel ownership
 
@@ -50,6 +80,20 @@ No module other than `state.rs` may insert into or remove from these maps. All h
 - `channel_id` — when set, only `McpChannelNotification` events with a matching `channel_id` are passed. Used by `ns2 mcp` to subscribe to a personal channel.
 
 The `event_type` and `channel_id` filters are used together by `ns2 mcp` to efficiently receive only the notifications intended for a specific developer channel.
+
+## POST /events/emit
+
+`POST /events/emit` injects a custom event onto the global EventBus.
+
+**Request body:**
+```json
+{ "type": "<event-type>", "payload": <any-json> }
+```
+`payload` defaults to `null` if omitted.
+
+**Effect:** emits `SystemEvent::Custom { event_type, payload }`. Any SSE subscriber or hook matching that event type will see it. Returns `200 OK` with `{"ok": true}`.
+
+**Use case:** the primary inbound integration point for shell backends — a script can use `ns2 event emit` to notify ns2 of external state changes without needing direct DB access.
 
 ## POST /webhooks/:event_id
 

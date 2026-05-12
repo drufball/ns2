@@ -34,4 +34,9 @@ pub struct AppState {
     /// discovers the real root via `workspace::git_root()`).  Tests set this to
     /// an isolated temp directory so harness tasks never touch the real repo.
     pub(crate) git_root: Option<std::path::PathBuf>,
+    /// Optional HMAC secret for the GitHub webhook receiver.
+    ///
+    /// Set from `NS2_GITHUB_WEBHOOK_SECRET` at server startup.  `None` means
+    /// the webhook endpoint will accept requests without signature validation.
+    pub(crate) github_webhook_secret: Option<String>,
 }

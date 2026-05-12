@@ -1,4 +1,6 @@
+pub mod emit;
 pub mod events_route;
+pub mod github_webhook;
 pub mod hook;
 pub mod issue;
 pub mod named_event;
@@ -18,6 +20,8 @@ pub enum Error {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -26,6 +30,10 @@ impl From<issues::Error> for Error {
     fn from(e: issues::Error) -> Self {
         match e {
             issues::Error::Db(db_err) => Self::Db(db_err),
+            issues::Error::Backend(issue_backend::Error::NotFound) => Self::NotFound,
+            issues::Error::Backend(other) => {
+                Self::BadRequest(other.to_string())
+            }
             issues::Error::BadRequest(msg) => Self::BadRequest(msg),
         }
     }

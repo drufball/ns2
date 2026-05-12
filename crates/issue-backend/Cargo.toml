@@ -1,0 +1,23 @@
+[package]
+name = "issue-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types = { path = "../types" }
+db = { path = "../db" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+chrono = { workspace = true }
+tempfile = "3"
+toml = "0.8"
+mockito = "1"

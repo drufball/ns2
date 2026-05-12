@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex};
 use tempfile::TempDir;
 
 pub struct TestHarness {
@@ -29,7 +29,13 @@ impl TestHarness {
     }
 
     /// Start the ns2 server on `self.port` and block until it is ready.
+    ///
+    /// At most `SERVER_CONCURRENCY` servers are started simultaneously to avoid
+    /// port-binding races when many tests run in parallel.
     pub fn start_server(&mut self) {
+        // Acquire a concurrency slot before spawning; release once server is up.
+        let permit = SERVER_SEMAPHORE.acquire();
+
         let proc = Command::new(cargo_bin("ns2"))
             .args(["server", "start", "--port", &self.port.to_string()])
             .env("HOME", self.home_dir.path())
@@ -53,6 +59,8 @@ impl TestHarness {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        // Release the slot once the server is confirmed up.
+        drop(permit);
         self.server = Some(proc);
     }
 
@@ -213,6 +221,52 @@ impl Drop for TestHarness {
         }
     }
 }
+
+// ── Startup concurrency limiter ───────────────────────────────────────────────
+
+/// Maximum number of ns2 server processes that may be starting up at the same
+/// time.  Keeping this below the number of CPU cores prevents port-binding
+/// races: when too many servers initialise concurrently the window between
+/// `free_port()` releasing the OS listener and the server's own `bind()` grows
+/// large enough that macOS reassigns the ephemeral port to another process.
+const SERVER_CONCURRENCY: usize = 2;
+
+struct Semaphore {
+    inner: Mutex<usize>,
+    condvar: Condvar,
+}
+
+struct SemaphorePermit<'a>(&'a Semaphore);
+
+impl Semaphore {
+    const fn new() -> Self {
+        Self {
+            inner: Mutex::new(SERVER_CONCURRENCY),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> SemaphorePermit<'_> {
+        let mut count = self.inner.lock().unwrap();
+        while *count == 0 {
+            count = self.condvar.wait(count).unwrap();
+        }
+        *count -= 1;
+        drop(count);
+        SemaphorePermit(self)
+    }
+}
+
+impl Drop for SemaphorePermit<'_> {
+    fn drop(&mut self) {
+        let mut count = self.0.inner.lock().unwrap();
+        *count += 1;
+        drop(count);
+        self.0.condvar.notify_one();
+    }
+}
+
+static SERVER_SEMAPHORE: Semaphore = Semaphore::new();
 
 // Global set of ports already handed out within this test run.
 // Prevents two concurrent tests from racing to the same ephemeral port.

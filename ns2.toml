@@ -4,3 +4,15 @@
 
 [server]
 url = "http://127.0.0.1:9876"
+
+[issues]
+# backend = "sqlite"  # default — no external config required
+# backend = "github"  # GitHub Issues; requires GITHUB_TOKEN + NS2_GITHUB_WEBHOOK_SECRET in .env
+# backend = "shell"   # user-defined script
+
+[issues.github]
+owner = "drufball"
+repo  = "ns2"
+
+# [issues.shell]
+# command = ".ns2/backends/my-backend.sh"

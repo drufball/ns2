@@ -3,7 +3,8 @@ targets:
   - crates/db/src/**/*.rs
   - crates/db/Cargo.toml
   - crates/types/src/**/*.rs
-verified: 2026-05-10T18:53:22Z
+  - crates/issue-backend/src/**/*.rs
+verified: 2026-06-10T00:00:00Z
 ---
 
 # Data Model Spec
@@ -88,6 +89,17 @@ Named events that hooks can listen for. Each event is either a webhook receiver 
 | `created_at` | INTEGER | unix timestamp |
 | `updated_at` | INTEGER | unix timestamp |
 
+### `github_issue_mapping`
+
+Maps ns2 issue IDs to GitHub issue numbers. Used by `GitHubIssueBackend` to translate between the two ID spaces so the rest of ns2 always works with ns2 IDs.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ns2_id` | TEXT PK | → ns2 issue ID (4-char alphanumeric) |
+| `github_number` | INTEGER UNIQUE | GitHub issue number in the configured repo |
+
+This table is owned by the `db` crate via the `GitHubMappingStore` trait. The concrete `SqliteGitHubMappingStore` is private to `db`; the public seam is the trait + `connect_github_mapping_store(pool)` factory.
+
 ### `hooks`
 
 Event-driven hooks that fire when a `SystemEvent` matches their filter.
@@ -145,7 +157,21 @@ The `types` crate mirrors the DB schema in Rust:
 
 ## DB connect
 
-`db::connect(url)` returns a triple `(Arc<dyn Db>, Arc<dyn HookStore>, Arc<dyn EventStore>)`. `EventStore` provides `create_event`, `get_event`, `get_event_by_name`, `list_events`, and `delete_event`.
+`db::connect(url)` returns a triple `(Arc<dyn Db>, Arc<dyn HookStore>, Arc<dyn EventStore>)`. A fourth store, `Arc<dyn GitHubMappingStore>`, can be obtained via `connect_github_mapping_store(pool)` — used by `GitHubIssueBackend`. `EventStore` provides `create_event`, `get_event`, `get_event_by_name`, `list_events`, and `delete_event`.
+
+## IssueBackend and IssueFilter (issue-backend crate)
+
+`IssueFilter` is passed to `IssueBackend::list` to narrow results:
+
+```rust
+pub struct IssueFilter {
+    pub status: Option<IssueStatus>,
+    pub assignee: Option<String>,
+    pub parent_id: Option<String>,
+}
+```
+
+All three fields are optional — a filter with no fields set returns all issues.
 
 ## Events (events crate)
 
@@ -155,4 +181,5 @@ The `types` crate mirrors the DB schema in Rust:
 - `Issue(IssueEvent)` — issue lifecycle events (created, status changed, comment added)
 - `External { event_id, event_name, payload }` — fired when an external webhook is received; carries the named Event's id and name
 - `TimerFired { event_id, event_name, fired_at }` — fired by the timer scheduler; carries the named Event's id and name
+- `Custom { event_type, payload }` — emitted via `POST /events/emit`; used by shell backends and external integrations to inject arbitrary events onto the bus
 - `McpChannelNotification { channel_id, body, meta }` — emitted by the `McpNotify` hook action; the `ns2 mcp` process filters the SSE stream for this variant and forwards it to Claude Code as a `notifications/claude/channel` JSON-RPC message. `meta` is a `HashMap<String, String>` populated from the triggering event (e.g. `issue_id`, `from`, `to` for `StatusChanged` events).

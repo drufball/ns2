@@ -7,11 +7,13 @@ edition = "2021"
 types = { path = "../types" }
 events = { path = "../events" }
 db = { path = "../db" }
+issue-backend = { path = "../issue-backend" }
 harness = { path = "../harness" }
 anthropic = { path = "../anthropic" }
 tools = { path = "../tools" }
 issues = { path = "../issues" }
 hooks = { path = "../hooks" }
+agents = { path = "../agents" }
 axum = { version = "0.7", features = ["json"] }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -111,6 +111,10 @@ pub enum SystemEvent {
         event_name: String,
         fired_at: DateTime<Utc>,
     },
+    Custom {
+        event_type: String,
+        payload: serde_json::Value,
+    },
     McpChannelNotification {
         channel_id: String,
         body: String,
@@ -335,6 +339,19 @@ mod tests {
         let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
         assert!(
             matches!(decoded, SystemEvent::TimerFired { ref event_id, ref event_name, .. } if event_id == "timer-1" && event_name == "heartbeat")
+        );
+    }
+
+    #[test]
+    fn system_event_custom_serde_round_trip() {
+        let ev = SystemEvent::Custom {
+            event_type: "custom.test".into(),
+            payload: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let decoded: SystemEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SystemEvent::Custom { ref event_type, .. } if event_type == "custom.test")
         );
     }
 
