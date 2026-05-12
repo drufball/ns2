@@ -90,11 +90,11 @@ pub enum Error {
 /// Returns `Error::Other` if:
 /// - `backend = shell` but `[issues.shell]` config is absent
 /// - `backend = github` but `[issues.github]` config or `GITHUB_TOKEN` env var is missing
-pub fn from_config(
+pub async fn from_config(
     config: &IssueBackendConfig,
     db: Arc<dyn db::Db>,
 ) -> Result<Arc<dyn IssueBackend>> {
-    from_config_with_mapping(config, db, None)
+    from_config_with_mapping(config, db, None).await
 }
 
 /// Like [`from_config`] but accepts an optional [`db::GitHubMappingStore`].
@@ -102,13 +102,17 @@ pub fn from_config(
 /// When `mapping` is `None` and the backend is GitHub, an in-process no-op mapping
 /// store cannot be used — the caller is responsible for providing one.
 ///
+/// For the GitHub backend, performs an initial sync after construction: fetches all
+/// open issues from GitHub and populates the local mapping table for any issues
+/// that carry an `ns2-id:<id>` label.
+///
 /// # Errors
 ///
 /// Returns `Error::Other` if:
 /// - `backend = shell` but `[issues.shell]` config is absent
 /// - `backend = github` but `[issues.github]` config, `GITHUB_TOKEN` env var,
 ///   or `mapping` is missing
-pub fn from_config_with_mapping(
+pub async fn from_config_with_mapping(
     config: &IssueBackendConfig,
     db: Arc<dyn db::Db>,
     mapping: Option<Arc<dyn db::GitHubMappingStore>>,
@@ -142,12 +146,14 @@ pub fn from_config_with_mapping(
                     "GitHubMappingStore is required for GitHub backend".into(),
                 )
             })?;
-            Ok(Arc::new(GitHubIssueBackend::new(
+            let backend = GitHubIssueBackend::new(
                 gh_config.owner.clone(),
                 gh_config.repo.clone(),
                 token,
                 mapping_store,
-            )))
+            );
+            backend.initial_sync().await?;
+            Ok(Arc::new(backend))
         }
     }
 }
@@ -370,6 +376,9 @@ impl IssueBackend for ShellIssueBackend {
 
 // ── GitHubIssueBackend ────────────────────────────────────────────────────────
 
+/// Label prefix used to carry the ns2 ID on a GitHub issue.
+const NS2_ID_LABEL_PREFIX: &str = "ns2-id:";
+
 /// Status label prefix used by the GitHub backend.
 const STATUS_LABEL_PREFIX: &str = "ns2-status:";
 
@@ -506,6 +515,89 @@ impl GitHubIssueBackend {
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
+    }
+
+    /// Fetch all open issues from GitHub and populate the local mapping table.
+    ///
+    /// For each GitHub issue that carries an `ns2-id:<id>` label, ensures the
+    /// mapping table has an entry.  Issues without the label are skipped — we
+    /// don't auto-create ns2 IDs for existing GitHub issues we don't own.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Other` if the GitHub API request fails or returns a
+    /// non-success status code.
+    pub async fn initial_sync(&self) -> Result<()> {
+        let url = format!(
+            "{}/repos/{}/{}/issues?state=open&per_page=100",
+            self.base_url, self.owner, self.repo
+        );
+
+        let resp = self
+            .auth_request(reqwest::Method::GET, &url)
+            .send()
+            .await
+            .map_err(|e| Error::Other(format!("GitHub API request failed during initial sync: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Other(format!(
+                "GitHub API error {status} during initial sync: {text}"
+            )));
+        }
+
+        let gh_issues: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| Error::Other(format!("Failed to parse GitHub response during initial sync: {e}")))?;
+
+        for gh in &gh_issues {
+            let Some(number) = gh["number"].as_i64() else {
+                continue;
+            };
+
+            // Look for an ns2-id:<id> label.
+            let labels: Vec<String> = gh["labels"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let ns2_id = labels
+                .iter()
+                .find_map(|l| l.strip_prefix(NS2_ID_LABEL_PREFIX).map(String::from));
+
+            let Some(ns2_id) = ns2_id else {
+                tracing::debug!(
+                    github_number = number,
+                    "initial_sync: no ns2-id label on GitHub issue, skipping"
+                );
+                continue;
+            };
+
+            self.mapping
+                .upsert_mapping(&ns2_id, number)
+                .await
+                .map_err(|e| Error::Other(format!("Failed to store GitHub mapping during initial sync: {e}")))?;
+
+            tracing::debug!(
+                ns2_id = %ns2_id,
+                github_number = number,
+                "initial_sync: populated mapping from ns2-id label"
+            );
+        }
+
+        tracing::info!(
+            owner = %self.owner,
+            repo = %self.repo,
+            "GitHubIssueBackend: initial sync complete"
+        );
+
+        Ok(())
     }
 }
 
@@ -1229,7 +1321,7 @@ command = "/path/to/backend.sh"
     async fn from_config_sqlite_creates_and_retrieves_issue() {
         let config = IssueBackendConfig::default(); // backend = Sqlite
         let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
-        let backend = from_config(&config, Arc::clone(&db)).unwrap();
+        let backend = from_config(&config, Arc::clone(&db)).await.unwrap();
 
         let issue = make_issue("ab12");
         backend.create(&issue).await.unwrap();
@@ -1237,63 +1329,54 @@ command = "/path/to/backend.sh"
         assert_eq!(fetched.id, "ab12");
     }
 
-    #[test]
-    fn from_config_shell_without_shell_config_returns_error() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let config = IssueBackendConfig {
-                backend: BackendKind::Shell,
-                shell: None,
-                github: None,
-            };
-            let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
-            let result = from_config(&config, Arc::clone(&db));
-            assert!(
-                matches!(result, Err(Error::Other(ref msg)) if msg.contains("command required")),
-                "expected error about missing command"
-            );
-        });
+    #[tokio::test]
+    async fn from_config_shell_without_shell_config_returns_error() {
+        let config = IssueBackendConfig {
+            backend: BackendKind::Shell,
+            shell: None,
+            github: None,
+        };
+        let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
+        let result = from_config(&config, Arc::clone(&db)).await;
+        assert!(
+            matches!(result, Err(Error::Other(ref msg)) if msg.contains("command required")),
+            "expected error about missing command"
+        );
     }
 
-    #[test]
-    fn from_config_github_without_github_config_returns_error() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let config = IssueBackendConfig {
-                backend: BackendKind::GitHub,
-                shell: None,
-                github: None,
-            };
-            let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
-            let result = from_config(&config, Arc::clone(&db));
-            assert!(
-                matches!(result, Err(Error::Other(ref msg)) if msg.contains("[issues.github]")),
-                "expected error about missing github config"
-            );
-        });
+    #[tokio::test]
+    async fn from_config_github_without_github_config_returns_error() {
+        let config = IssueBackendConfig {
+            backend: BackendKind::GitHub,
+            shell: None,
+            github: None,
+        };
+        let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
+        let result = from_config(&config, Arc::clone(&db)).await;
+        assert!(
+            matches!(result, Err(Error::Other(ref msg)) if msg.contains("[issues.github]")),
+            "expected error about missing github config"
+        );
     }
 
-    #[test]
-    fn from_config_github_without_token_returns_error() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            // Remove the GITHUB_TOKEN env var for this test
-            std::env::remove_var("GITHUB_TOKEN");
-            let config = IssueBackendConfig {
-                backend: BackendKind::GitHub,
-                shell: None,
-                github: Some(GithubConfig {
-                    owner: "owner".into(),
-                    repo: "repo".into(),
-                }),
-            };
-            let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
-            let result = from_config(&config, Arc::clone(&db));
-            assert!(
-                matches!(result, Err(Error::Other(ref msg)) if msg.contains("GITHUB_TOKEN")),
-                "expected error about missing GITHUB_TOKEN"
-            );
-        });
+    #[tokio::test]
+    async fn from_config_github_without_token_returns_error() {
+        // Remove the GITHUB_TOKEN env var for this test
+        std::env::remove_var("GITHUB_TOKEN");
+        let config = IssueBackendConfig {
+            backend: BackendKind::GitHub,
+            shell: None,
+            github: Some(GithubConfig {
+                owner: "owner".into(),
+                repo: "repo".into(),
+            }),
+        };
+        let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
+        let result = from_config(&config, Arc::clone(&db)).await;
+        assert!(
+            matches!(result, Err(Error::Other(ref msg)) if msg.contains("GITHUB_TOKEN")),
+            "expected error about missing GITHUB_TOKEN"
+        );
     }
 
     #[tokio::test]
@@ -1307,7 +1390,7 @@ command = "/path/to/backend.sh"
             github: None,
         };
         let (db, _, _, _) = db::connect("sqlite::memory:").await.unwrap();
-        let backend = from_config(&config, Arc::clone(&db)).unwrap();
+        let backend = from_config(&config, Arc::clone(&db)).await.unwrap();
         // Should be able to call create without error (script returns ok)
         let result = backend.create(&make_issue("ab12")).await;
         assert!(result.is_ok(), "shell backend create should succeed, got: {result:?}");
@@ -1635,5 +1718,141 @@ repo = "ns2"
         let gh = config.github.as_ref().unwrap();
         assert_eq!(gh.owner, "drufball");
         assert_eq!(gh.repo, "ns2");
+    }
+
+    // ── initial_sync tests ─────────────────────────────────────────────────────
+
+    /// Build a GitHub issue JSON that carries an ns2-id label.
+    fn gh_issue_with_ns2_id(number: i64, ns2_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "title": "some issue",
+            "body": "body",
+            "labels": [
+                {"name": format!("ns2-id:{ns2_id}")},
+                {"name": "ns2-status:open"},
+            ],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+        })
+    }
+
+    /// Build a GitHub issue JSON that has NO ns2-id label.
+    fn gh_issue_without_ns2_id(number: i64) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "title": "external issue",
+            "body": "body",
+            "labels": [],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+        })
+    }
+
+    #[tokio::test]
+    async fn initial_sync_populates_mapping_for_issues_with_ns2_id_label() {
+        let mut server = mockito::Server::new_async().await;
+        let gh_list = serde_json::json!([
+            gh_issue_with_ns2_id(10, "ab12"),
+            gh_issue_with_ns2_id(11, "cd34"),
+        ]);
+
+        let mock = server
+            .mock("GET", "/repos/owner/repo/issues?state=open&per_page=100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(gh_list.to_string())
+            .create_async()
+            .await;
+
+        let mapping = make_mapping_store().await;
+        let backend = make_github_backend(&server.url(), Arc::clone(&mapping));
+
+        backend.initial_sync().await.unwrap();
+
+        let num_ab12 = mapping.get_github_number("ab12").await.unwrap();
+        let num_cd34 = mapping.get_github_number("cd34").await.unwrap();
+        assert_eq!(num_ab12, Some(10), "ab12 should be mapped to GH #10");
+        assert_eq!(num_cd34, Some(11), "cd34 should be mapped to GH #11");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn initial_sync_skips_issues_without_ns2_id_label() {
+        let mut server = mockito::Server::new_async().await;
+        let gh_list = serde_json::json!([
+            gh_issue_without_ns2_id(99),
+        ]);
+
+        let mock = server
+            .mock("GET", "/repos/owner/repo/issues?state=open&per_page=100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(gh_list.to_string())
+            .create_async()
+            .await;
+
+        let mapping = make_mapping_store().await;
+        let backend = make_github_backend(&server.url(), Arc::clone(&mapping));
+
+        backend.initial_sync().await.unwrap();
+
+        // No mapping should have been created for the issue without ns2-id label.
+        let ns2_id = mapping.get_ns2_id(99).await.unwrap();
+        assert!(ns2_id.is_none(), "expected no mapping for issue without ns2-id label");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn initial_sync_returns_error_on_api_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/owner/repo/issues?state=open&per_page=100")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let mapping = make_mapping_store().await;
+        let backend = make_github_backend(&server.url(), Arc::clone(&mapping));
+
+        let result = backend.initial_sync().await;
+        assert!(
+            matches!(result, Err(Error::Other(ref msg)) if msg.contains("initial sync")),
+            "expected Other error mentioning initial sync, got: {result:?}"
+        );
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn initial_sync_does_not_overwrite_existing_mappings() {
+        let mut server = mockito::Server::new_async().await;
+        let gh_list = serde_json::json!([
+            gh_issue_with_ns2_id(10, "ab12"),
+        ]);
+
+        let mock = server
+            .mock("GET", "/repos/owner/repo/issues?state=open&per_page=100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(gh_list.to_string())
+            .create_async()
+            .await;
+
+        let mapping = make_mapping_store().await;
+        // Pre-populate with the same mapping.
+        mapping.upsert_mapping("ab12", 10).await.unwrap();
+        let backend = make_github_backend(&server.url(), Arc::clone(&mapping));
+
+        // Should succeed even though the mapping already exists.
+        backend.initial_sync().await.unwrap();
+
+        let num = mapping.get_github_number("ab12").await.unwrap();
+        assert_eq!(num, Some(10), "mapping should still be 10 after sync");
+
+        mock.assert_async().await;
     }
 }

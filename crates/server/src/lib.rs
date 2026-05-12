@@ -16,7 +16,7 @@ mod state;
 pub use routes::session::CreateSessionRequest;
 pub use routes::{Error, Result};
 
-use routes::{emit as emit_route, events_route, hook as hook_route, issue, named_event, session, webhook};
+use routes::{emit as emit_route, events_route, github_webhook, hook as hook_route, issue, named_event, session, webhook};
 use state::AppState;
 
 use events::EventBus;
@@ -100,6 +100,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hooks/:id/executions", get(hook_route::list_executions))
         // External webhook receiver
         .route("/webhooks/:event_id", post(webhook::receive_webhook))
+        // GitHub webhook receiver
+        .route("/webhooks/github", post(github_webhook::receive_github_webhook))
         // Event emit
         .route("/events/emit", post(emit_route::emit_event))
         // Named event CRUD
@@ -399,13 +401,17 @@ pub async fn run(config: ServerConfig) -> Result<()> {
 
     let db_path = config.data_dir.join("ns2.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let (db, hook_store, event_store, _github_mapping) = db::connect(&db_url).await?;
+    let (db, hook_store, event_store, github_mapping) = db::connect(&db_url).await?;
     // Convert server::IssueBackendConfig → issue_backend::IssueBackendConfig
     let ib_config = to_issue_backend_config(config.issue_backend);
-    let backend = issue_backend::from_config(&ib_config, Arc::clone(&db))
+    let backend = issue_backend::from_config_with_mapping(&ib_config, Arc::clone(&db), Some(github_mapping))
+        .await
         .map_err(|e| Error::Other(e.to_string()))?;
     let issue_service = issues::IssueService::with_event_bus(Arc::clone(&db), backend, EventBus::new(1024));
     let event_bus = issue_service.event_bus().clone();
+
+    let github_webhook_secret = std::env::var("NS2_GITHUB_WEBHOOK_SECRET").ok()
+        .filter(|s| !s.is_empty());
 
     let state = AppState {
         db,
@@ -419,6 +425,7 @@ pub async fn run(config: ServerConfig) -> Result<()> {
         hook_store,
         event_store,
         git_root: None,
+        github_webhook_secret,
     };
 
     // Spawn the hook evaluator background task.
@@ -649,6 +656,7 @@ mod tests {
             hook_store,
             event_store,
             git_root: Some(make_isolated_git_root()),
+            github_webhook_secret: None,
         }
     }
 
@@ -3662,6 +3670,7 @@ mod tests {
             hook_store,
             event_store,
             git_root: Some(make_isolated_git_root()),
+            github_webhook_secret: None,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -3780,6 +3789,7 @@ mod tests {
             hook_store,
             event_store,
             git_root: Some(make_isolated_git_root()),
+            github_webhook_secret: None,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
@@ -4004,6 +4014,7 @@ mod tests {
             hook_store,
             event_store,
             git_root: Some(make_isolated_git_root()),
+            github_webhook_secret: None,
         };
         spawn_issue_lifecycle_subscriber(&state);
         let app = build_router(state.clone());
