@@ -262,9 +262,17 @@ impl ShellIssueBackend {
 
         // Write to stdin then close so the child gets EOF.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&input).await.map_err(|e| {
-                Error::Other(format!("failed to write to stdin: {e}"))
-            })?;
+            match stdin.write_all(&input).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                    // Child exited before reading stdin — common for scripts
+                    // that don't read stdin (e.g. `echo`) or exit immediately.
+                    // Continue and check exit status below.
+                }
+                Err(e) => {
+                    return Err(Error::Other(format!("failed to write to stdin: {e}")));
+                }
+            }
             // stdin is dropped here, closing the pipe
         }
 
