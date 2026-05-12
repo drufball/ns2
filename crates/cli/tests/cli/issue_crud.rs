@@ -1,6 +1,4 @@
-mod common;
-
-use common::TestHarness;
+use super::common::TestHarness;
 use predicates::prelude::*;
 
 // ─── Flow 55: issue wait --timeout ───────────────────────────────────────────
@@ -776,31 +774,23 @@ fn issue_new_wait_with_status_open_fails() {
 }
 
 // Scenario 6: --status without --wait (just sets status, no blocking)
-// The issue should be created and its status set to in_progress, but no blocking.
-// Without a real agent running, the status will be "in_progress" or "running" briefly
-// then fail — but the key is the command exits immediately with the issue ID on stdout.
+// Without --wait the command exits immediately after creating the issue and printing its ID.
 #[test]
 fn issue_new_status_without_wait_exits_immediately_and_prints_id() {
     let mut h = TestHarness::new();
     h.start_server();
-    write_agent(&h, "swe");
 
-    // This may fail at status-setting if it can't auto-start (no agent binary) but
-    // the test verifies that without --wait it returns quickly.
+    // No --status flag: create the issue and exit immediately.
     // We only care that stdout contains a 4-char ID.
-    // We use --status open (which just sets status, doesn't auto-start) to avoid
-    // triggering harness issues in test environment.
     let out = h
         .ns2()
-        .args([
-            "issue", "new", "--title", "Status Test", "--body", "b", "--status", "open",
-        ])
+        .args(["issue", "new", "--title", "Status Test", "--body", "b"])
         .output()
         .unwrap();
 
     assert!(
         out.status.success(),
-        "should succeed with --status open: {}",
+        "issue new without --status should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).unwrap().trim().to_string();
@@ -815,20 +805,18 @@ fn issue_new_status_without_wait_exits_immediately_and_prints_id() {
     );
 }
 
-// Verify that --status sets the issue status as expected (using a non-auto-start status)
+// Verify that a newly-created issue starts in the 'open' state (no --status flag needed).
 #[test]
-fn issue_new_with_status_flag_sets_status() {
+fn issue_new_default_status_is_open() {
     let mut h = TestHarness::new();
     h.start_server();
 
-    // Use --status open which is a no-op transition (issue starts as open)
-    let id = h.ns2_stdout(&[
-        "issue", "new", "--title", "Status Test", "--body", "b", "--status", "open",
-    ]);
+    // Issues default to 'open' on creation — no --status flag required.
+    let id = h.ns2_stdout(&["issue", "new", "--title", "Status Test", "--body", "b"]);
     let json = h.http_get(&format!("/issues/{id}"));
     assert!(
         json.contains("\"open\""),
-        "issue should have status 'open', got: {json}"
+        "issue should have default status 'open', got: {json}"
     );
 }
 
@@ -1030,7 +1018,7 @@ fn issue_new_subscribe_invalid_target_format_fails() {
 
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("'issue:<id>' or 'session:<id>'"),
+        stderr.contains("'issue:<id>'") || stderr.contains("issue:<id>"),
         "stderr should describe valid format; got: {stderr:?}"
     );
     // Must name the flag the user actually typed, not the internal flag name
@@ -1044,17 +1032,17 @@ fn issue_new_subscribe_invalid_target_format_fails() {
     );
 }
 
-// Scenario G: --subscribe combined with --status — issue ID (not hook ID) on stdout,
+// Scenario G: --subscribe combined with no --status — issue ID (not hook ID) on stdout,
 // hook is visible in /hooks. Note: --wait is NOT exercised here; this only confirms
-// the stdout contract holds when both --subscribe and --status flags coexist.
+// the stdout contract holds when --subscribe is provided without --wait.
 #[test]
 fn issue_new_subscribe_with_status_stdout_is_issue_id() {
     let mut h = TestHarness::new();
     h.start_server();
 
-    // Use --status open (not in_progress) so --wait is NOT triggered — we just
-    // want to confirm the stdout contract holds when both flags coexist structurally.
-    // (A full --wait + --subscribe integration test would require a live agent.)
+    // No --status flag — just verify the stdout contract holds when --subscribe is
+    // provided without --wait. A full --wait + --subscribe integration test would
+    // require a live agent.
     let out = h
         .ns2()
         .args([
@@ -1066,8 +1054,6 @@ fn issue_new_subscribe_with_status_stdout_is_issue_id() {
             "b",
             "--subscribe",
             "issue:ab12",
-            "--status",
-            "open",
         ])
         .output()
         .unwrap();

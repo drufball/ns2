@@ -1,6 +1,5 @@
 use assert_cmd::cargo::cargo_bin;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,43 +29,31 @@ impl TestHarness {
     }
 
     /// Start the ns2 server on `self.port` and block until it is ready.
-    /// Retries up to 3 times to tolerate transient startup failures under load.
     pub fn start_server(&mut self) {
-        for attempt in 1..=3 {
-            let mut proc = Command::new(cargo_bin("ns2"))
-                .args(["server", "start", "--port", &self.port.to_string()])
-                .env("HOME", self.home_dir.path())
-                .env_remove("ANTHROPIC_API_KEY")
-                .current_dir(self.repo_dir.path())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("failed to spawn ns2 server");
+        let proc = Command::new(cargo_bin("ns2"))
+            .args(["server", "start", "--port", &self.port.to_string()])
+            .env("HOME", self.home_dir.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .current_dir(self.repo_dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn ns2 server");
 
-            let stdout = proc.stdout.take().unwrap();
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            let mut ready = false;
-            loop {
-                line.clear();
-                if reader.read_line(&mut line).unwrap() == 0 {
-                    break; // server exited before printing "Listening on"
-                }
-                if line.contains("Listening on") {
-                    ready = true;
-                    break;
-                }
+        let addr = format!("127.0.0.1:{}", self.port);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::net::TcpStream::connect(&addr).is_ok() {
+                break;
             }
-            if ready {
-                self.server = Some(proc);
-                return;
-            }
-            proc.wait().ok();
-            if attempt < 3 {
-                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
-            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server did not accept connections within 10s on {addr}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("ns2 server exited before printing 'Listening on' (3 attempts)");
+        self.server = Some(proc);
     }
 
     /// Returns a pre-configured `assert_cmd::Command` for the ns2 binary.

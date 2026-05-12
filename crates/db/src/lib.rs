@@ -538,6 +538,7 @@ const fn action_type_str(action: &HookAction) -> &'static str {
         HookAction::SendMessage { .. } => "send_message",
         HookAction::CreateIssue { .. } => "create_issue",
         HookAction::RunShell { .. } => "run_shell",
+        HookAction::McpNotify { .. } => "mcp_notify",
     }
 }
 

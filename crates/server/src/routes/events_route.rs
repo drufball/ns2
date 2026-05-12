@@ -22,18 +22,45 @@ use crate::state::AppState;
 ///   `external`, `timer`).  If absent, all event types are emitted.
 /// - `last_turns` — when `session_id` is set, limit the historical replay to the
 ///   last N turns.  `0` skips all history.  Absent → replay all.
+/// - `event_type` — fine-grained event type filter (e.g. `"mcp.channel_notification"`).
+/// - `channel_id` — when set, only pass `McpChannelNotification` events with this `channel_id`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct EventsQuery {
     pub(crate) session_id: Option<Uuid>,
     pub(crate) issue_id: Option<String>,
     pub(crate) types: Option<String>,
     pub(crate) last_turns: Option<usize>,
+    pub(crate) event_type: Option<String>,
+    pub(crate) channel_id: Option<String>,
 }
 
 impl EventsQuery {
     /// Returns `true` when the event passes all active filters.
     pub(crate) fn matches(&self, ev: &SystemEvent) -> bool {
-        // type filter
+        // event_type filter (fine-grained, e.g. "mcp.channel_notification")
+        if let Some(ref et) = self.event_type {
+            let matches_et = match ev {
+                SystemEvent::McpChannelNotification { .. } => et == "mcp.channel_notification",
+                _ => false,
+            };
+            if !matches_et {
+                return false;
+            }
+        }
+
+        // channel_id filter — only applies to McpChannelNotification
+        if let Some(ref cid) = self.channel_id {
+            match ev {
+                SystemEvent::McpChannelNotification { channel_id, .. } => {
+                    if channel_id != cid {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+
+        // type filter (broad: "session", "issue", "external", "timer")
         if let Some(ref types_str) = self.types {
             let type_name = match ev {
                 SystemEvent::Session { .. } => "session",
@@ -41,6 +68,7 @@ impl EventsQuery {
                 SystemEvent::External { .. } => "external",
                 SystemEvent::TimerFired { .. } => "timer",
                 SystemEvent::Custom { .. } => "custom",
+                SystemEvent::McpChannelNotification { .. } => "mcp",
             };
             if !types_str.split(',').map(str::trim).any(|x| x == type_name) {
                 return false;
@@ -211,6 +239,104 @@ mod tests {
         }
     }
 
+    // ── Scenario D — SSE filter: event_type + channel_id ────────────────────
+
+    #[test]
+    fn matches_event_type_mcp_channel_notification_passes_matching_event() {
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+            event_type: Some("mcp.channel_notification".into()),
+            channel_id: Some("alice".into()),
+        };
+        let ev = SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "hello".into(),
+            meta: std::collections::HashMap::new(),
+        };
+        assert!(q.matches(&ev), "should match matching McpChannelNotification");
+    }
+
+    #[test]
+    fn matches_event_type_mcp_channel_notification_blocks_wrong_channel_id() {
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+            event_type: Some("mcp.channel_notification".into()),
+            channel_id: Some("alice".into()),
+        };
+        let ev = SystemEvent::McpChannelNotification {
+            channel_id: "bob".into(),
+            body: "hello".into(),
+            meta: std::collections::HashMap::new(),
+        };
+        assert!(!q.matches(&ev), "should block McpChannelNotification for bob");
+    }
+
+    #[test]
+    fn matches_event_type_mcp_channel_notification_blocks_issue_event() {
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+            event_type: Some("mcp.channel_notification".into()),
+            channel_id: Some("alice".into()),
+        };
+        let ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
+        assert!(!q.matches(&ev), "should block Issue event with mcp filter");
+    }
+
+    #[test]
+    fn matches_channel_id_only_filter() {
+        // When only channel_id is set (no event_type), only McpChannelNotification with matching id passes
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+            event_type: None,
+            channel_id: Some("alice".into()),
+        };
+        let ev_alice = SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "hi".into(),
+            meta: std::collections::HashMap::new(),
+        };
+        let ev_bob = SystemEvent::McpChannelNotification {
+            channel_id: "bob".into(),
+            body: "hi".into(),
+            meta: std::collections::HashMap::new(),
+        };
+        let ev_issue = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
+
+        assert!(q.matches(&ev_alice), "alice's event should pass");
+        assert!(!q.matches(&ev_bob), "bob's event should not pass");
+        assert!(!q.matches(&ev_issue), "issue event should not pass with channel_id filter");
+    }
+
+    #[test]
+    fn matches_no_filter_accepts_mcp_channel_notification() {
+        let q = EventsQuery {
+            session_id: None,
+            issue_id: None,
+            types: None,
+            last_turns: None,
+            event_type: None,
+            channel_id: None,
+        };
+        let ev = SystemEvent::McpChannelNotification {
+            channel_id: "anyone".into(),
+            body: "hi".into(),
+            meta: std::collections::HashMap::new(),
+        };
+        assert!(q.matches(&ev), "no filter should accept all events including McpChannelNotification");
+    }
+
     // ── EventsQuery::matches ──────────────────────────────────────────────────
 
     #[test]
@@ -220,6 +346,8 @@ mod tests {
             issue_id: None,
             types: None,
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
         let ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
         assert!(q.matches(&ev));
@@ -232,6 +360,8 @@ mod tests {
             issue_id: None,
             types: Some("session".into()),
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
         let issue_ev = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
         assert!(
@@ -256,6 +386,8 @@ mod tests {
             issue_id: None,
             types: Some("issue".into()),
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
         let session_ev = SystemEvent::Session {
             session_id: Uuid::new_v4(),
@@ -280,6 +412,8 @@ mod tests {
             issue_id: None,
             types: Some("session,issue".into()),
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
         let session_ev = SystemEvent::Session {
             session_id: Uuid::new_v4(),
@@ -299,6 +433,8 @@ mod tests {
             issue_id: None,
             types: None,
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
 
         let matching = SystemEvent::Session {
@@ -329,6 +465,8 @@ mod tests {
             issue_id: Some("ab12".into()),
             types: None,
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
 
         let matching = SystemEvent::Issue(IssueEvent::Created(make_issue("ab12")));
@@ -370,6 +508,8 @@ mod tests {
             issue_id: None,
             types: Some("session".into()),
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
 
         // Drain the channel and filter
@@ -679,6 +819,8 @@ mod tests {
             issue_id: Some(target_id.to_string()),
             types: None,
             last_turns: None,
+            event_type: None,
+            channel_id: None,
         };
 
         let mut received = Vec::new();
@@ -708,6 +850,78 @@ mod tests {
                 }
                 _ => panic!("received non-issue event"),
             }
+        }
+    }
+
+    // ── Scenario D — Route-level integration test for MCP SSE path ────────────
+
+    /// Route-level test: `GET /events?event_type=mcp.channel_notification&channel_id=alice`
+    /// must only pass `McpChannelNotification` events for channel `"alice"` and
+    /// block those for `"bob"` and unrelated `Issue` events.
+    #[tokio::test]
+    async fn route_live_stream_mcp_channel_filter_passes_only_matching_channel() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = make_route_state().await;
+        let app = crate::build_router(state.clone());
+
+        // Open the SSE stream filtered to alice's MCP channel.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events?event_type=mcp.channel_notification&channel_id=alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // Emit three events on the bus:
+        //   1. McpChannelNotification for alice  ← should arrive
+        //   2. McpChannelNotification for bob    ← should be blocked
+        //   3. Issue event                       ← should be blocked
+        state.event_bus.send(SystemEvent::McpChannelNotification {
+            channel_id: "alice".into(),
+            body: "alice notification".into(),
+            meta: std::collections::HashMap::new(),
+        });
+        state.event_bus.send(SystemEvent::McpChannelNotification {
+            channel_id: "bob".into(),
+            body: "bob notification".into(),
+            meta: std::collections::HashMap::new(),
+        });
+        state
+            .event_bus
+            .send(SystemEvent::Issue(IssueEvent::Created(make_issue("ab12"))));
+
+        // Collect for a short window — all events are already queued.
+        let raw = collect_sse_body_with_timeout(
+            resp.into_body(),
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+
+        let data_lines: Vec<&str> = raw.lines().filter(|l| l.starts_with("data: ")).collect();
+
+        // Only alice's notification should arrive.
+        assert_eq!(
+            data_lines.len(),
+            1,
+            "only 1 data line expected (alice channel filter); got: {data_lines:?}\nraw={raw:?}"
+        );
+
+        let json = &data_lines[0]["data: ".len()..];
+        let ev: SystemEvent =
+            serde_json::from_str(json).expect("SSE data must be valid SystemEvent JSON");
+        match ev {
+            SystemEvent::McpChannelNotification { channel_id, body, .. } => {
+                assert_eq!(channel_id, "alice", "must be alice's notification");
+                assert_eq!(body, "alice notification");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
         }
     }
 }

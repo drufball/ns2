@@ -30,4 +30,8 @@ pub struct AppState {
     pub(crate) hook_store: Arc<dyn HookStore>,
     /// Event store for CRUD operations on named events.
     pub(crate) event_store: Arc<dyn db::EventStore>,
+    /// Injectable git root for the harness.  `None` in production (the harness
+    /// discovers the real root via `workspace::git_root()`).  Tests set this to
+    /// an isolated temp directory so harness tasks never touch the real repo.
+    pub(crate) git_root: Option<std::path::PathBuf>,
 }

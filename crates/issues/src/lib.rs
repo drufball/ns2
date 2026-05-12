@@ -652,16 +652,11 @@ impl IssueService {
                 }
             };
 
-            for mut issue in issues {
-                issue.comments.push(IssueComment {
-                    author: "system".into(),
-                    body: "session lost on server restart".into(),
-                    created_at: Utc::now(),
-                });
-                issue.status = types::IssueStatus::Failed;
-                issue.updated_at = Utc::now();
-
-                if let Err(e) = self.backend.save(&issue).await {
+            for issue in issues {
+                if let Err(e) = self
+                    .fail_issue(&issue.id, "session lost on server restart".to_string())
+                    .await
+                {
                     eprintln!(
                         "[orphan_sweep] failed to update issue {} to failed: {e}",
                         issue.id
@@ -1182,6 +1177,64 @@ mod tests {
             fetched_issue.comments[0].body,
             "session lost on server restart"
         );
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_emits_comment_added_and_status_changed_events() {
+        let db = Arc::new(MemoryDb::new());
+        let now = Utc::now();
+        let session = Session {
+            id: Uuid::new_v4(),
+            name: "orphan-session".into(),
+            status: SessionStatus::Running,
+            agent: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.create_session(&session).await.unwrap();
+
+        let mut issue = open_issue("ab12");
+        issue.status = IssueStatus::InProgress;
+        issue.session_id = Some(session.id);
+        db.create_issue(&issue).await.unwrap();
+
+        let backend = Arc::new(DbBackend { db: Arc::clone(&db) as Arc<dyn db::Db> });
+        let (svc, bus) = make_service_with_bus(
+            Arc::clone(&db) as Arc<dyn db::Db>,
+            Arc::clone(&backend) as Arc<dyn IssueBackend>,
+        );
+        let mut rx = bus.subscribe();
+
+        svc.orphan_sweep().await;
+
+        let ev1 = rx.try_recv().expect("should have received CommentAdded event");
+        assert!(
+            matches!(
+                ev1,
+                events::SystemEvent::Issue(events::IssueEvent::CommentAdded {
+                    ref comment,
+                    ..
+                }) if comment.body == "session lost on server restart"
+            ),
+            "first event should be CommentAdded with restart body, got: {ev1:?}"
+        );
+
+        let ev2 = rx
+            .try_recv()
+            .expect("should have received StatusChanged event");
+        assert!(
+            matches!(
+                ev2,
+                events::SystemEvent::Issue(events::IssueEvent::StatusChanged {
+                    to: IssueStatus::Failed,
+                    ..
+                })
+            ),
+            "second event should be StatusChanged->Failed, got: {ev2:?}"
+        );
+
+        let fetched_issue = db.get_issue("ab12".into()).await.unwrap();
+        assert_eq!(fetched_issue.status, IssueStatus::Failed);
     }
 
     // --- create_issue ---

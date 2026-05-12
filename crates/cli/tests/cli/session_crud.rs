@@ -1,12 +1,10 @@
-mod common;
-
 use predicates::prelude::*;
 
 // ─── Flow 55: --timeout flag ──────────────────────────────────────────────────
 
 #[test]
 fn session_wait_timeout_exits_nonzero_on_non_terminal_session() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     // A session without a message stays in 'created' — never finishes.
@@ -22,7 +20,7 @@ fn session_wait_timeout_exits_nonzero_on_non_terminal_session() {
 
 #[test]
 fn session_new_without_message_has_created_status() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2_stdout(&["session", "new"]);
@@ -36,7 +34,7 @@ fn session_new_without_message_has_created_status() {
 
 #[test]
 fn session_new_with_name_shows_in_list() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2_stdout(&["session", "new", "--name", "my-session"]);
@@ -50,7 +48,7 @@ fn session_new_with_name_shows_in_list() {
 
 #[test]
 fn session_list_empty_shows_no_sessions() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let out = h.ns2_stdout(&["session", "list"]);
@@ -59,7 +57,7 @@ fn session_list_empty_shows_no_sessions() {
 
 #[test]
 fn session_list_filter_by_status_running_returns_empty() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2_stdout(&["session", "new"]);
@@ -70,7 +68,7 @@ fn session_list_filter_by_status_running_returns_empty() {
 
 #[test]
 fn session_list_filter_by_id() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid1 = h.ns2_stdout(&["session", "new", "--name", "first"]);
@@ -91,7 +89,7 @@ fn session_list_filter_by_id() {
 
 #[test]
 fn session_wait_completes_when_stub_finishes() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -106,7 +104,7 @@ fn session_wait_completes_when_stub_finishes() {
 
 #[test]
 fn session_wait_on_already_terminal_session_returns_immediately() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -122,7 +120,7 @@ fn session_wait_on_already_terminal_session_returns_immediately() {
 
 #[test]
 fn session_wait_multiple_sessions() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid1 = h.ns2_stdout(&["session", "new", "--message", "task one"]);
@@ -146,7 +144,7 @@ fn session_wait_multiple_sessions() {
 
 #[test]
 fn session_wait_failed_session_exits_nonzero() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -166,7 +164,7 @@ fn session_wait_failed_session_exits_nonzero() {
 
 #[test]
 fn session_wait_cancelled_session_exits_zero() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     let uuid = h.ns2_stdout(&["session", "new", "--message", "hello"]);
@@ -194,7 +192,7 @@ fn session_wait_cancelled_session_exits_zero() {
 
 #[test]
 fn session_wait_nonexistent_id_exits_nonzero() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2()
@@ -213,7 +211,7 @@ fn session_wait_nonexistent_id_exits_nonzero() {
 
 #[test]
 fn session_wait_no_ids_exits_nonzero() {
-    let mut h = common::TestHarness::new();
+    let mut h = super::common::TestHarness::new();
     h.start_server();
 
     h.ns2().args(["session", "wait"]).assert().failure();
